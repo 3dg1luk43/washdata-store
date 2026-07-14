@@ -19,8 +19,8 @@ import { join, dirname } from 'node:path';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-const HTML = ['index.html', 'admin.html', 'connect.html'];
-const JS = ['app.js', 'admin.js', 'connect.js', 'washstore.js', 'firestore-rest.js', 'site-config.js', 'lib/ids.js', 'lib/trace.js'];
+const HTML = ['index.html', 'admin.html', 'connect.html', 'create.html'];
+const JS = ['app.js', 'admin.js', 'connect.js', 'create.js', 'washstore.js', 'firestore-rest.js', 'site-config.js', 'lib/ids.js', 'lib/trace.js'];
 const HASH_FILES = [...HTML, ...JS, 'config.js', 'styles.css'];
 
 // Remove existing ?v= from local refs/imports so the hash is stable across runs.

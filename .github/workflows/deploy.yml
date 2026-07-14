@@ -40,8 +40,8 @@ jobs:
       - name: Assemble the static site into dist/
         run: |
           mkdir -p dist/lib dist/img
-          cp index.html admin.html connect.html \
-             app.js admin.js connect.js washstore.js firestore-rest.js site-config.js config.js \
+          cp index.html admin.html connect.html create.html \
+             app.js admin.js connect.js create.js washstore.js firestore-rest.js site-config.js config.js \
              styles.css dist/
           cp lib/ids.js lib/trace.js dist/lib/
           cp img/icon.png dist/img/ 2>/dev/null || true
