@@ -260,6 +260,8 @@ async function loadDevices(reset = false) {
   try {
     const { items, cursor } = await adminListDevices({ pageSize: 40, cursor: _devCursor });
     if (reset) $('devices-tbody').innerHTML = '';
+    // Pending first so items needing review are easy to find.
+    items.sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1));
     if (items.length === 0 && !_devCursor) { $('devices-tbody').innerHTML = `<tr><td colspan="8" class="tbl-msg">No devices found.</td></tr>`; }
     else { items.forEach((d) => $('devices-tbody').appendChild(buildDeviceRow(d))); }
     _devCursor = cursor; $('devices-load-more').toggleAttribute('hidden', !cursor);
