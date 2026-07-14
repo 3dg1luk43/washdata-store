@@ -1,32 +1,25 @@
 import firebaseConfig from './config.js';
 import {
   init, onAuth, signIn, signOutUser, isAdmin, ensureUserProfile,
-  deleteEnvelope,
-  adminListEnvelopes, adminUpdateStatus, adminListUsers, adminBanUser, adminUnbanUser,
-  adminGetStats,
+  deleteCycle, qcLabel,
+  adminListCycles, adminSetCycleStatus,
+  adminListDevices, adminSetDeviceStatus, adminMergeDevices,
+  adminListUsers, adminBanUser, adminUnbanUser, adminGetStats,
 } from './washstore.js';
 
 init(firebaseConfig);
 
-// ============================================================
-// Module state
-// ============================================================
-let _adminUser = null;
+// ============================================================ state
 let _isAdmin = false;
 let _reviewCursor = null;
-let _envCursor = null;
+let _cyCursor = null;
+let _devCursor = null;
 let _userCursor = null;
-let _envFilters = { status: '', applianceType: '' };
+let _cyFilters = { status: '', applianceType: '' };
 let _reviewRecord = null;
 
-// ============================================================
-// DOM shorthand
-// ============================================================
+// ============================================================ dom + toast
 function $(id) { return document.getElementById(id); }
-
-// ============================================================
-// Toast
-// ============================================================
 function toast(msg, type = 'success') {
   const el = document.createElement('div');
   el.className = `toast toast-${type}`;
@@ -35,682 +28,398 @@ function toast(msg, type = 'success') {
   setTimeout(() => el.remove(), 4000);
 }
 
-// ============================================================
-// Helpers
-// ============================================================
+// ============================================================ helpers
 function esc(str) {
   if (str == null) return '';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
-
 function formatDate(ts) {
   if (!ts) return '-';
   const d = ts.toDate ? ts.toDate() : new Date(typeof ts === 'number' ? ts * 1000 : ts);
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
-
 function formatDuration(sec) {
   if (sec == null || isNaN(sec)) return '-';
-  const s = Math.round(sec);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const rem = s % 60;
+  const s = Math.round(sec); const h = Math.floor(s / 3600); const m = Math.floor((s % 3600) / 60); const rem = s % 60;
   if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m ${rem}s`;
   return `${rem}s`;
 }
-
 function typeLabel(t) {
-  const map = { washer: 'Washer', dryer: 'Dryer', dishwasher: 'Dishwasher', washer_dryer: 'Washer-Dryer' };
-  return map[t] || t;
+  return { washer: 'Washer', dryer: 'Dryer', dishwasher: 'Dishwasher', washer_dryer: 'Washer-Dryer' }[t] || t;
 }
+function truncate(str, max = 8) { if (!str) return ''; return str.length > max ? str.slice(0, max) + '...' : str; }
 
-function sparklineSVG(record, w = 80, h = 36) {
-  let pts;
-  if (record.cycle?.points?.length > 1) {
-    pts = record.cycle.points;
-  } else if (record.envelope?.avg?.length > 1) {
-    const avg = record.envelope.avg;
-    const dur = record.envelope.target_duration || avg.length;
-    pts = avg.map((v, i) => [i * dur / (avg.length - 1), v]);
-  } else {
-    return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"></svg>`;
-  }
-  if (pts.length > 200) {
-    const step = Math.ceil(pts.length / 200);
-    pts = pts.filter((_, i) => i % step === 0);
-  }
-  const xs = pts.map(p => p[0]);
-  const ys = pts.map(p => p[1]);
-  const x0 = xs[0], xN = xs[xs.length - 1], yMax = Math.max(...ys) || 1;
-  const pad = 2;
-  const sx = x => pad + ((x - x0) / (xN - x0 || 1)) * (w - 2 * pad);
-  const sy = y => h - pad - (y / yMax) * (h - 2 * pad);
+function sparklineSVG(record, w = 100, h = 60) {
+  let pts = record?.trace?.points;
+  if (!Array.isArray(pts) || pts.length < 2) return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"></svg>`;
+  if (pts.length > 200) { const step = Math.ceil(pts.length / 200); pts = pts.filter((_, i) => i % step === 0); }
+  const xs = pts.map((p) => p[0]); const ys = pts.map((p) => p[1]);
+  const x0 = xs[0], xN = xs[xs.length - 1], yMax = Math.max(...ys) || 1; const pad = 2;
+  const sx = (x) => pad + ((x - x0) / (xN - x0 || 1)) * (w - 2 * pad);
+  const sy = (y) => h - pad - (y / yMax) * (h - 2 * pad);
   const d = pts.map((p, i) => `${i ? 'L' : 'M'}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(' ');
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">
-    <path d="${d}" stroke="var(--accent)" stroke-width="1.5" fill="none" stroke-linejoin="round"/>
-  </svg>`;
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg"><path d="${d}" stroke="var(--accent)" stroke-width="1.5" fill="none" stroke-linejoin="round"/></svg>`;
+}
+function deviceLabel(c) {
+  const p = String(c.deviceId || '').split('__');
+  return `${p[1] || ''} ${p[2] || ''}`.trim() || c.deviceId || '?';
 }
 
-function truncate(str, max = 8) {
-  if (!str) return '';
-  return str.length > max ? str.slice(0, max) + '...' : str;
-}
-
-// ============================================================
-// Auth
-// ============================================================
+// ============================================================ auth gate
 function renderAuthArea(user) {
   const area = $('auth-status');
   if (user) {
-    area.innerHTML = `
-      ${user.photoURL ? `<img class="user-avatar" src="${esc(user.photoURL)}" alt="">` : ''}
+    area.innerHTML = `${user.photoURL ? `<img class="user-avatar" src="${esc(user.photoURL)}" alt="">` : ''}
       <span class="user-name">${esc(user.displayName || 'User')}</span>
-      <button class="btn btn-ghost btn-sm" id="signout-btn">Sign out</button>
-    `;
-    $('signout-btn').addEventListener('click', async () => {
-      try { await signOutUser(); } catch (e) { toast(e.message, 'error'); }
-    });
+      <button class="btn btn-ghost btn-sm" id="signout-btn">Sign out</button>`;
+    $('signout-btn').addEventListener('click', async () => { try { await signOutUser(); } catch (e) { toast(e.message, 'error'); } });
   } else {
     area.innerHTML = `<button class="btn btn-primary btn-sm" id="signin-btn">Sign in with GitHub</button>`;
-    $('signin-btn').addEventListener('click', async () => {
-      try { await signIn(); } catch (e) { toast(e.message, 'error'); }
-    });
+    $('signin-btn').addEventListener('click', async () => { try { await signIn(); } catch (e) { toast(e.message, 'error'); } });
   }
 }
 
 onAuth(async (user) => {
-  _adminUser = user;
   renderAuthArea(user);
-
-  // Hide gate spinner
   $('admin-gate').setAttribute('hidden', '');
-
   if (!user) {
     $('denied-title').textContent = 'Sign in Required';
     $('denied-text').textContent = 'Please sign in with an admin GitHub account to access this panel.';
     $('admin-signin-btn').removeAttribute('hidden');
-    $('admin-signin-btn').addEventListener('click', async () => {
-      try { await signIn(); } catch (e) { toast(e.message, 'error'); }
-    });
-    $('admin-denied').removeAttribute('hidden');
-    $('admin-panel').setAttribute('hidden', '');
+    $('admin-signin-btn').addEventListener('click', async () => { try { await signIn(); } catch (e) { toast(e.message, 'error'); } });
+    $('admin-denied').removeAttribute('hidden'); $('admin-panel').setAttribute('hidden', '');
     return;
   }
-
   try { await ensureUserProfile(user); } catch (_) {}
-
   let admin = false;
   try { admin = await isAdmin(); } catch (_) {}
   _isAdmin = admin;
-
   if (!admin) {
     $('denied-title').textContent = 'Access Denied';
     $('denied-text').textContent = 'Your account does not have admin permissions for this panel.';
     $('admin-signin-btn').setAttribute('hidden', '');
-    $('admin-denied').removeAttribute('hidden');
-    $('admin-panel').setAttribute('hidden', '');
+    $('admin-denied').removeAttribute('hidden'); $('admin-panel').setAttribute('hidden', '');
     return;
   }
-
-  $('admin-denied').setAttribute('hidden', '');
-  $('admin-panel').removeAttribute('hidden');
+  $('admin-denied').setAttribute('hidden', ''); $('admin-panel').removeAttribute('hidden');
   loadOverview();
 });
 
-// ============================================================
-// Tab routing
-// ============================================================
-const ADMIN_TABS = ['overview', 'review', 'envelopes', 'users'];
-
-function switchAdminTab(name) {
-  ADMIN_TABS.forEach(t => {
+// ============================================================ tabs
+const TABS = ['overview', 'review', 'cycles', 'devices', 'users'];
+function switchTab(name) {
+  TABS.forEach((t) => {
     $(`${t}-tab`).toggleAttribute('hidden', t !== name);
     $(`${t}-btn`).classList.toggle('active', t === name);
     $(`${t}-btn`).setAttribute('aria-selected', t === name ? 'true' : 'false');
   });
 }
+TABS.forEach((name) => $(`${name}-btn`).addEventListener('click', () => {
+  switchTab(name);
+  if (name === 'review' && !$('review-list').hasChildNodes()) loadReview(true);
+  if (name === 'cycles' && !$('cycles-tbody').hasChildNodes()) loadCycles(true);
+  if (name === 'devices' && !$('devices-tbody').hasChildNodes()) loadDevices(true);
+  if (name === 'users' && !$('users-tbody').hasChildNodes()) loadUsers(true);
+}));
 
-ADMIN_TABS.forEach(name => {
-  $(`${name}-btn`).addEventListener('click', () => {
-    switchAdminTab(name);
-    if (name === 'review' && !$('review-list').hasChildNodes()) loadReviewQueue(true);
-    if (name === 'envelopes' && !$('envelopes-tbody').querySelector('tr td[data-env]')) loadEnvelopesTable(true);
-    if (name === 'users' && !$('users-tbody').querySelector('tr td[data-uid]')) loadUsersTable(true);
-  });
-});
-
-// ============================================================
-// Overview
-// ============================================================
+// ============================================================ overview
 async function loadOverview() {
   $('stats-grid').innerHTML = '<div class="loading-center" style="grid-column:1/-1"><div class="loading-spinner"></div></div>';
   try {
-    const stats = await adminGetStats();
+    const s = await adminGetStats();
     $('stats-grid').innerHTML = `
-      <div class="stat-card">
-        <div class="stat-label">Pending Review</div>
-        <div class="stat-value c-pending">${stats.pending}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Approved</div>
-        <div class="stat-value c-approved">${stats.approved}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Rejected</div>
-        <div class="stat-value c-rejected">${stats.rejected}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Removed</div>
-        <div class="stat-value c-removed">${stats.removed}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Banned Users</div>
-        <div class="stat-value c-ban">${stats.bannedUsers}</div>
-      </div>
-    `;
+      <div class="stat-card"><div class="stat-label">Pending Review</div><div class="stat-value c-pending">${s.pending}</div></div>
+      <div class="stat-card"><div class="stat-label">Approved</div><div class="stat-value c-approved">${s.approved}</div></div>
+      <div class="stat-card"><div class="stat-label">Rejected</div><div class="stat-value c-rejected">${s.rejected}</div></div>
+      <div class="stat-card"><div class="stat-label">Removed</div><div class="stat-value c-removed">${s.removed}</div></div>
+      <div class="stat-card"><div class="stat-label">Banned Users</div><div class="stat-value c-ban">${s.bannedUsers}</div></div>`;
   } catch (e) {
     $('stats-grid').innerHTML = `<div class="text-muted" style="grid-column:1/-1;padding:1rem">${esc(e.message)}</div>`;
     toast(e.message, 'error');
   }
 }
+$('stats-refresh-btn').addEventListener('click', loadOverview);
 
-$('stats-refresh-btn').addEventListener('click', () => loadOverview());
-
-// ============================================================
-// Review Queue
-// ============================================================
-async function loadReviewQueue(reset = false) {
-  if (reset) {
-    _reviewCursor = null;
-    $('review-list').innerHTML = '';
-    $('review-load-more').setAttribute('hidden', '');
-  }
-
+// ============================================================ review queue
+async function loadReview(reset = false) {
+  if (reset) { _reviewCursor = null; $('review-list').innerHTML = ''; $('review-load-more').setAttribute('hidden', ''); }
   const spinner = document.createElement('div');
-  spinner.className = 'loading-center';
-  spinner.innerHTML = '<div class="loading-spinner"></div>';
+  spinner.className = 'loading-center'; spinner.innerHTML = '<div class="loading-spinner"></div>';
   $('review-list').appendChild(spinner);
-
   try {
-    const result = await adminListEnvelopes({ status: 'pending', pageSize: 12, cursor: _reviewCursor });
+    const { items, cursor } = await adminListCycles({ status: 'pending', pageSize: 12, cursor: _reviewCursor });
     spinner.remove();
-
-    if (result.items.length === 0 && !_reviewCursor) {
-      $('review-list').innerHTML = `
-        <div class="empty-state">
-          <div class="empty-icon">&#9989;</div>
-          <div class="empty-title">Queue is clear</div>
-          <div class="empty-text">No envelopes pending review.</div>
-        </div>`;
-    } else {
-      result.items.forEach(rec => $('review-list').appendChild(buildReviewCard(rec)));
-    }
-
-    _reviewCursor = result.cursor;
-    $('review-load-more').toggleAttribute('hidden', !result.cursor);
-  } catch (e) {
-    spinner.remove();
-    toast(e.message, 'error');
-  }
+    if (items.length === 0 && !_reviewCursor) { $('review-list').innerHTML = reviewEmpty(); }
+    else { items.forEach((c) => $('review-list').appendChild(buildReviewCard(c))); }
+    _reviewCursor = cursor; $('review-load-more').toggleAttribute('hidden', !cursor);
+  } catch (e) { spinner.remove(); toast(e.message, 'error'); }
+}
+function reviewEmpty() {
+  return `<div class="empty-state"><div class="empty-icon">&#9989;</div><div class="empty-title">Queue is clear</div><div class="empty-text">No cycles pending review.</div></div>`;
 }
 
-function buildReviewCard(rec) {
+function buildReviewCard(c) {
   const el = document.createElement('div');
-  el.className = 'review-card';
-  el.id = `review-card-${rec.id}`;
+  el.className = 'review-card'; el.id = `review-card-${c.id}`;
   el.innerHTML = `
-    <div class="review-card-spark">${sparklineSVG(rec, 100, 60)}</div>
+    <div class="review-card-spark">${sparklineSVG(c, 100, 60)}</div>
     <div class="review-card-body">
-      <div class="review-card-title">${esc(rec.brand)} ${esc(rec.model)}</div>
-      <div class="text-muted" style="font-size:.8125rem">${esc(rec.program)}</div>
+      <div class="review-card-title">${esc(deviceLabel(c))}</div>
+      <div class="text-muted" style="font-size:.8125rem">${esc(c.program_lc || '')}</div>
       <div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.25rem">
-        <span class="badge badge-type">${esc(typeLabel(rec.applianceType))}</span>
+        <span class="badge badge-type">${esc(typeLabel(c.applianceType))}</span>
         <span class="badge badge-pending">Pending</span>
+        <span class="badge">${esc(qcLabel(c.qc))}</span>
       </div>
-      <div class="text-muted" style="font-size:.75rem;margin-top:.3rem">
-        by ${esc(rec.uploaderName || 'Anonymous')} &middot; ${formatDate(rec.createdAt)}
-      </div>
+      <div class="text-muted" style="font-size:.75rem;margin-top:.3rem">by ${esc(c.uploaderName || 'Anonymous')} &middot; ${formatDate(c.createdAt)}</div>
     </div>
     <div class="review-card-actions">
-      <button class="btn btn-primary btn-sm">Approve</button>
-      <button class="btn btn-danger btn-sm">Reject</button>
-      <button class="btn btn-ghost btn-sm">View</button>
-    </div>
-  `;
-
-  const [approveBtn, rejectBtn, viewBtn] = el.querySelectorAll('.review-card-actions .btn');
-
-  approveBtn.addEventListener('click', async () => {
-    approveBtn.disabled = true;
-    try {
-      await adminUpdateStatus(rec.id, 'approved');
-      el.remove();
-      toast(`Approved: ${rec.brand} ${rec.model}`);
-      if (!$('review-list').hasChildNodes()) {
-        $('review-list').innerHTML = `<div class="empty-state">
-          <div class="empty-icon">&#9989;</div>
-          <div class="empty-title">Queue is clear</div>
-          <div class="empty-text">No envelopes pending review.</div>
-        </div>`;
-      }
-    } catch (e) {
-      approveBtn.disabled = false;
-      toast(e.message, 'error');
-    }
-  });
-
-  rejectBtn.addEventListener('click', async () => {
-    const reason = prompt('Rejection reason (shown to uploader):');
-    if (reason === null) return;
-    rejectBtn.disabled = true;
-    try {
-      await adminUpdateStatus(rec.id, 'rejected', reason || '');
-      el.remove();
-      toast('Rejected');
-      if (!$('review-list').hasChildNodes()) {
-        $('review-list').innerHTML = `<div class="empty-state">
-          <div class="empty-icon">&#9989;</div>
-          <div class="empty-title">Queue is clear</div>
-          <div class="empty-text">No envelopes pending review.</div>
-        </div>`;
-      }
-    } catch (e) {
-      rejectBtn.disabled = false;
-      toast(e.message, 'error');
-    }
-  });
-
-  viewBtn.addEventListener('click', () => openReviewModal(rec));
-
+      <button class="btn btn-primary btn-sm" data-approve>Approve</button>
+      <button class="btn btn-danger btn-sm" data-reject>Reject</button>
+      <button class="btn btn-ghost btn-sm" data-view>View</button>
+    </div>`;
+  el.querySelector('[data-approve]').addEventListener('click', (ev) => approveCycle(c, ev.currentTarget, el));
+  el.querySelector('[data-reject]').addEventListener('click', (ev) => rejectCycle(c, ev.currentTarget, el));
+  el.querySelector('[data-view]').addEventListener('click', () => openReviewModal(c));
   return el;
 }
 
-$('review-load-more').addEventListener('click', () => loadReviewQueue(false));
-
-// ============================================================
-// All Envelopes table
-// ============================================================
-async function loadEnvelopesTable(reset = false) {
-  if (reset) {
-    _envCursor = null;
-    $('envelopes-load-more').setAttribute('hidden', '');
-  }
-
-  const tbody = $('envelopes-tbody');
-  if (reset) {
-    tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:1.5rem;color:var(--text-muted)">Loading...</td></tr>`;
-  }
-
+async function approveCycle(c, btn, card) {
+  if (btn) btn.disabled = true;
   try {
-    const result = await adminListEnvelopes({
-      status: _envFilters.status || null,
-      applianceType: _envFilters.applianceType || null,
-      pageSize: 25,
-      cursor: _envCursor,
-    });
+    await adminSetCycleStatus(c.id, 'approved');
+    // Cascade: make the parent device + profile visible too.
+    try { await adminSetDeviceStatus(c.deviceId, 'approved'); } catch (_) {}
+    toast(`Approved: ${deviceLabel(c)}`);
+    if (card) { card.remove(); if (!$('review-list').hasChildNodes()) $('review-list').innerHTML = reviewEmpty(); }
+  } catch (e) { if (btn) btn.disabled = false; toast(e.message, 'error'); }
+}
+async function rejectCycle(c, btn, card) {
+  const reason = prompt('Rejection reason (shown to uploader):');
+  if (reason === null) return;
+  if (btn) btn.disabled = true;
+  try {
+    await adminSetCycleStatus(c.id, 'rejected', reason || '');
+    toast('Rejected');
+    if (card) { card.remove(); if (!$('review-list').hasChildNodes()) $('review-list').innerHTML = reviewEmpty(); }
+  } catch (e) { if (btn) btn.disabled = false; toast(e.message, 'error'); }
+}
+$('review-load-more').addEventListener('click', () => loadReview(false));
 
-    if (reset) tbody.innerHTML = '';
-
-    if (result.items.length === 0 && !_envCursor) {
-      tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:2rem;color:var(--text-muted)">No envelopes found.</td></tr>`;
-    } else {
-      result.items.forEach(rec => tbody.appendChild(buildEnvelopeRow(rec)));
-    }
-
-    _envCursor = result.cursor;
-    $('envelopes-load-more').toggleAttribute('hidden', !result.cursor);
+// ============================================================ cycles table
+async function loadCycles(reset = false) {
+  if (reset) { _cyCursor = null; $('cycles-tbody').innerHTML = `<tr><td colspan="10" class="tbl-msg">Loading...</td></tr>`; $('cycles-load-more').setAttribute('hidden', ''); }
+  try {
+    const { items, cursor } = await adminListCycles({ status: _cyFilters.status || null, applianceType: _cyFilters.applianceType || null, pageSize: 25, cursor: _cyCursor });
+    if (reset) $('cycles-tbody').innerHTML = '';
+    if (items.length === 0 && !_cyCursor) { $('cycles-tbody').innerHTML = `<tr><td colspan="10" class="tbl-msg">No cycles found.</td></tr>`; }
+    else { items.forEach((c) => $('cycles-tbody').appendChild(buildCycleRow(c))); }
+    _cyCursor = cursor; $('cycles-load-more').toggleAttribute('hidden', !cursor);
   } catch (e) {
-    if (reset) tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:1.5rem;color:var(--danger)">${esc(e.message)}</td></tr>`;
+    if (reset) $('cycles-tbody').innerHTML = `<tr><td colspan="10" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
     toast(e.message, 'error');
   }
 }
 
-function buildEnvelopeRow(rec) {
+function buildCycleRow(c) {
   const tr = document.createElement('tr');
-  const actions = buildEnvelopeActions(rec);
   tr.innerHTML = `
-    <td><code class="mono" style="font-size:.75rem">${esc(truncate(rec.id, 8))}</code></td>
-    <td>
-      <div style="font-weight:600;font-size:.8125rem">${esc(rec.brand)}</div>
-      <div class="text-muted" style="font-size:.75rem">${esc(rec.model)}</div>
-    </td>
-    <td class="truncate" style="max-width:100px" title="${esc(rec.program)}">${esc(rec.program)}</td>
-    <td><span class="badge badge-type">${esc(typeLabel(rec.applianceType))}</span></td>
-    <td><span class="badge badge-${esc(rec.status)}">${esc(rec.status)}</span></td>
-    <td class="text-muted truncate" title="${esc(rec.uploaderName || '')}">${esc(truncate(rec.uploaderName || 'Anon', 14))}</td>
-    <td class="text-muted" style="white-space:nowrap;font-size:.75rem">${formatDate(rec.createdAt)}</td>
-    <td class="text-muted">${rec.downloads || 0}</td>
-    <td><div class="action-cell" data-env="${esc(rec.id)}"></div></td>
-  `;
-  // Mark the data cell so we can detect non-empty table
-  tr.querySelector('td[data-env]').dataset.env = rec.id;
-  buildEnvelopeActionBtns(tr.querySelector('.action-cell'), rec);
+    <td><code class="mono" style="font-size:.72rem">${esc(truncate(c.id, 8))}</code></td>
+    <td>${esc(deviceLabel(c))}</td>
+    <td class="truncate" style="max-width:100px" title="${esc(c.program_lc || '')}">${esc(c.program_lc || '')}</td>
+    <td><span class="badge badge-type">${esc(typeLabel(c.applianceType))}</span></td>
+    <td><span class="badge badge-${esc(c.status)}">${esc(c.status)}</span></td>
+    <td class="text-muted" style="font-size:.72rem">${esc(qcLabel(c.qc))}</td>
+    <td class="text-muted truncate" title="${esc(c.uploaderName || '')}">${esc(truncate(c.uploaderName || 'Anon', 14))}</td>
+    <td class="text-muted" style="white-space:nowrap;font-size:.72rem">${formatDate(c.createdAt)}</td>
+    <td class="text-muted">${c.downloads || 0}</td>
+    <td><div class="action-cell"></div></td>`;
+  buildCycleActions(tr.querySelector('.action-cell'), c, tr);
   return tr;
 }
 
-function buildEnvelopeActionBtns(container, rec) {
+function buildCycleActions(container, c, tr) {
   container.innerHTML = '';
-
-  if (rec.status !== 'approved') {
-    const approveBtn = document.createElement('button');
-    approveBtn.className = 'btn btn-ghost btn-sm';
-    approveBtn.textContent = 'Approve';
-    approveBtn.addEventListener('click', async () => {
-      approveBtn.disabled = true;
-      try {
-        await adminUpdateStatus(rec.id, 'approved');
-        toast('Approved');
-        rec.status = 'approved';
-        const row = container.closest('tr');
-        row.querySelector('.badge').className = `badge badge-approved`;
-        row.querySelector('.badge').textContent = 'approved';
-        buildEnvelopeActionBtns(container, rec);
-      } catch (e) {
-        approveBtn.disabled = false;
-        toast(e.message, 'error');
-      }
-    });
-    container.appendChild(approveBtn);
-  }
-
-  if (rec.status !== 'rejected') {
-    const rejectBtn = document.createElement('button');
-    rejectBtn.className = 'btn btn-ghost btn-sm';
-    rejectBtn.textContent = 'Reject';
-    rejectBtn.addEventListener('click', async () => {
-      const reason = prompt('Rejection reason:');
-      if (reason === null) return;
-      rejectBtn.disabled = true;
-      try {
-        await adminUpdateStatus(rec.id, 'rejected', reason || '');
-        toast('Rejected');
-        rec.status = 'rejected';
-        const row = container.closest('tr');
-        row.querySelector('.badge').className = `badge badge-rejected`;
-        row.querySelector('.badge').textContent = 'rejected';
-        buildEnvelopeActionBtns(container, rec);
-      } catch (e) {
-        rejectBtn.disabled = false;
-        toast(e.message, 'error');
-      }
-    });
-    container.appendChild(rejectBtn);
-  }
-
-  if (rec.status === 'approved') {
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'btn btn-ghost btn-sm';
-    removeBtn.textContent = 'Remove';
-    removeBtn.addEventListener('click', async () => {
-      if (!confirm('Remove this envelope from public view? The record is kept.')) return;
-      removeBtn.disabled = true;
-      try {
-        await adminUpdateStatus(rec.id, 'removed');
-        toast('Removed from public');
-        rec.status = 'removed';
-        const row = container.closest('tr');
-        row.querySelector('.badge').className = `badge badge-removed`;
-        row.querySelector('.badge').textContent = 'removed';
-        buildEnvelopeActionBtns(container, rec);
-      } catch (e) {
-        removeBtn.disabled = false;
-        toast(e.message, 'error');
-      }
-    });
-    container.appendChild(removeBtn);
-  }
-
-  const deleteBtn = document.createElement('button');
-  deleteBtn.className = 'btn btn-danger btn-sm';
-  deleteBtn.textContent = 'Delete';
-  deleteBtn.addEventListener('click', async () => {
-    if (!confirm(`Permanently delete "${rec.brand} ${rec.model} - ${rec.program}"? This cannot be undone.`)) return;
-    deleteBtn.disabled = true;
+  const setStatus = (status, needReason) => async () => {
+    let reason = null;
+    if (needReason) { reason = prompt('Reason:'); if (reason === null) return; }
     try {
-      await deleteEnvelope(rec.id);
-      container.closest('tr').remove();
-      toast('Deleted permanently');
-    } catch (e) {
-      deleteBtn.disabled = false;
-      toast(e.message, 'error');
-    }
+      await adminSetCycleStatus(c.id, status, reason);
+      if (status === 'approved') { try { await adminSetDeviceStatus(c.deviceId, 'approved'); } catch (_) {} }
+      c.status = status;
+      const badge = tr.children[4].querySelector('.badge');
+      badge.className = `badge badge-${status}`; badge.textContent = status;
+      buildCycleActions(container, c, tr);
+      toast(`Set ${status}`);
+    } catch (e) { toast(e.message, 'error'); }
+  };
+  const mk = (label, cls, handler) => { const b = document.createElement('button'); b.className = `btn ${cls} btn-sm`; b.textContent = label; b.addEventListener('click', handler); container.appendChild(b); };
+  if (c.status !== 'approved') mk('Approve', 'btn-ghost', setStatus('approved', false));
+  if (c.status !== 'rejected') mk('Reject', 'btn-ghost', setStatus('rejected', true));
+  if (c.status === 'approved') mk('Remove', 'btn-ghost', setStatus('removed', false));
+  mk('View', 'btn-ghost', () => openReviewModal(c));
+  mk('Delete', 'btn-danger', async () => {
+    if (!confirm(`Permanently delete this cycle (${deviceLabel(c)} - ${c.program_lc})?`)) return;
+    try { await deleteCycle(c.id); tr.remove(); toast('Deleted permanently'); } catch (e) { toast(e.message, 'error'); }
   });
-  container.appendChild(deleteBtn);
 }
 
-$('env-filter-apply').addEventListener('click', () => {
-  _envFilters.status = $('env-filter-status').value;
-  _envFilters.applianceType = $('env-filter-type').value;
-  loadEnvelopesTable(true);
-});
+$('cy-filter-apply').addEventListener('click', () => { _cyFilters = { status: $('cy-filter-status').value, applianceType: $('cy-filter-type').value }; loadCycles(true); });
+$('cy-filter-clear').addEventListener('click', () => { $('cy-filter-status').value = ''; $('cy-filter-type').value = ''; _cyFilters = { status: '', applianceType: '' }; loadCycles(true); });
+$('cycles-load-more').addEventListener('click', () => loadCycles(false));
 
-$('env-filter-clear').addEventListener('click', () => {
-  $('env-filter-status').value = '';
-  $('env-filter-type').value = '';
-  _envFilters = { status: '', applianceType: '' };
-  loadEnvelopesTable(true);
-});
-
-$('envelopes-load-more').addEventListener('click', () => loadEnvelopesTable(false));
-
-// ============================================================
-// Users table
-// ============================================================
-async function loadUsersTable(reset = false) {
-  if (reset) {
-    _userCursor = null;
-    $('users-load-more').setAttribute('hidden', '');
-  }
-
-  const tbody = $('users-tbody');
-  if (reset) {
-    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:1.5rem;color:var(--text-muted)">Loading...</td></tr>`;
-  }
-
+// ============================================================ devices table
+async function loadDevices(reset = false) {
+  if (reset) { _devCursor = null; $('devices-tbody').innerHTML = `<tr><td colspan="7" class="tbl-msg">Loading...</td></tr>`; $('devices-load-more').setAttribute('hidden', ''); }
   try {
-    const result = await adminListUsers({ pageSize: 25, cursor: _userCursor });
-
-    if (reset) tbody.innerHTML = '';
-
-    if (result.items.length === 0 && !_userCursor) {
-      tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-muted)">No users found.</td></tr>`;
-    } else {
-      result.items.forEach(user => tbody.appendChild(buildUserRow(user)));
-    }
-
-    _userCursor = result.cursor;
-    $('users-load-more').toggleAttribute('hidden', !result.cursor);
+    const { items, cursor } = await adminListDevices({ pageSize: 40, cursor: _devCursor });
+    if (reset) $('devices-tbody').innerHTML = '';
+    if (items.length === 0 && !_devCursor) { $('devices-tbody').innerHTML = `<tr><td colspan="7" class="tbl-msg">No devices found.</td></tr>`; }
+    else { items.forEach((d) => $('devices-tbody').appendChild(buildDeviceRow(d))); }
+    _devCursor = cursor; $('devices-load-more').toggleAttribute('hidden', !cursor);
   } catch (e) {
-    if (reset) tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:1.5rem;color:var(--danger)">${esc(e.message)}</td></tr>`;
+    if (reset) $('devices-tbody').innerHTML = `<tr><td colspan="7" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
     toast(e.message, 'error');
   }
 }
 
-function buildUserRow(user) {
+function buildDeviceRow(d) {
   const tr = document.createElement('tr');
-  const initial = (user.displayName || 'U').charAt(0).toUpperCase();
-  const avatarHtml = user.photoURL
-    ? `<img src="${esc(user.photoURL)}" alt="">`
-    : initial;
-  const statusBadge = user.banned
-    ? `<span class="badge badge-rejected">Banned</span>`
-    : `<span class="badge badge-approved">Active</span>`;
-
   tr.innerHTML = `
-    <td>
-      <div class="user-cell">
-        <div class="user-cell-avatar">${avatarHtml}</div>
-        <span style="font-size:.8125rem;font-weight:500">${esc(user.displayName || 'Unknown')}</span>
-      </div>
-    </td>
-    <td data-uid="${esc(user.uid)}"><code class="mono" style="font-size:.72rem">${esc(truncate(user.uid, 12))}</code></td>
-    <td>${statusBadge}</td>
-    <td class="text-muted" style="font-size:.75rem;max-width:160px;overflow:hidden;text-overflow:ellipsis">${esc(user.banReason || '-')}</td>
-    <td class="text-muted" style="white-space:nowrap;font-size:.75rem">${formatDate(user.createdAt)}</td>
-    <td><div class="action-cell"></div></td>
-  `;
-
-  buildUserActionBtns(tr.querySelector('.action-cell'), user, tr);
+    <td><code class="mono" style="font-size:.7rem">${esc(truncate(d.id, 26))}</code></td>
+    <td>${esc(d.brand || '')}</td>
+    <td>${esc(d.model || '')}</td>
+    <td><span class="badge badge-type">${esc(typeLabel(d.applianceType))}</span></td>
+    <td><span class="badge badge-${esc(d.status)}">${esc(d.status)}</span></td>
+    <td class="text-muted">${d.favoriteCount || 0}</td>
+    <td><div class="action-cell"></div></td>`;
+  const cell = tr.querySelector('.action-cell');
+  const mkBtn = (label, status) => {
+    const b = document.createElement('button'); b.className = 'btn btn-ghost btn-sm'; b.textContent = label;
+    b.addEventListener('click', async () => {
+      try {
+        await adminSetDeviceStatus(d.id, status); d.status = status;
+        const badge = tr.children[4].querySelector('.badge'); badge.className = `badge badge-${status}`; badge.textContent = status;
+        toast(`Device ${status}`);
+      } catch (e) { toast(e.message, 'error'); }
+    });
+    cell.appendChild(b);
+  };
+  if (d.status !== 'approved') mkBtn('Approve', 'approved');
+  if (d.status !== 'removed') mkBtn('Remove', 'removed');
+  const useAsTarget = document.createElement('button');
+  useAsTarget.className = 'btn btn-ghost btn-sm'; useAsTarget.textContent = 'Merge target';
+  useAsTarget.addEventListener('click', () => { $('merge-to').value = d.id; switchTab('devices'); });
+  cell.appendChild(useAsTarget);
   return tr;
 }
 
-function buildUserActionBtns(container, user, tr) {
-  container.innerHTML = '';
+$('merge-btn').addEventListener('click', async () => {
+  const from = $('merge-from').value.trim();
+  const to = $('merge-to').value.trim();
+  if (!from || !to) { toast('Enter both source and target deviceId', 'error'); return; }
+  if (!confirm(`Merge ${from} into ${to}? All its profiles/cycles are reassigned and the source device is deleted.`)) return;
+  try { await adminMergeDevices(from, to); toast('Merged'); $('merge-from').value = ''; $('merge-to').value = ''; loadDevices(true); }
+  catch (e) { toast(e.message, 'error'); }
+});
+$('devices-load-more').addEventListener('click', () => loadDevices(false));
 
-  if (user.banned) {
-    const unbanBtn = document.createElement('button');
-    unbanBtn.className = 'btn btn-ghost btn-sm';
-    unbanBtn.textContent = 'Unban';
-    unbanBtn.addEventListener('click', async () => {
-      if (!confirm(`Unban ${user.displayName || user.uid}?`)) return;
-      unbanBtn.disabled = true;
-      try {
-        await adminUnbanUser(user.uid);
-        toast('User unbanned');
-        user.banned = false;
-        user.banReason = null;
-        refreshUserRow(tr, user);
-      } catch (e) {
-        unbanBtn.disabled = false;
-        toast(e.message, 'error');
-      }
-    });
-    container.appendChild(unbanBtn);
-  } else {
-    const banBtn = document.createElement('button');
-    banBtn.className = 'btn btn-danger btn-sm';
-    banBtn.textContent = 'Ban';
-    banBtn.addEventListener('click', async () => {
-      const reason = prompt(`Ban reason for ${user.displayName || user.uid}:`);
-      if (reason === null) return;
-      banBtn.disabled = true;
-      try {
-        await adminBanUser(user.uid, reason || '');
-        toast('User banned');
-        user.banned = true;
-        user.banReason = reason || '';
-        refreshUserRow(tr, user);
-      } catch (e) {
-        banBtn.disabled = false;
-        toast(e.message, 'error');
-      }
-    });
-    container.appendChild(banBtn);
+// ============================================================ users table
+async function loadUsers(reset = false) {
+  if (reset) { _userCursor = null; $('users-tbody').innerHTML = `<tr><td colspan="6" class="tbl-msg">Loading...</td></tr>`; $('users-load-more').setAttribute('hidden', ''); }
+  try {
+    const { items, cursor } = await adminListUsers({ pageSize: 40, cursor: _userCursor });
+    if (reset) $('users-tbody').innerHTML = '';
+    if (items.length === 0 && !_userCursor) { $('users-tbody').innerHTML = `<tr><td colspan="6" class="tbl-msg">No users found.</td></tr>`; }
+    else { items.forEach((u) => $('users-tbody').appendChild(buildUserRow(u))); }
+    _userCursor = cursor; $('users-load-more').toggleAttribute('hidden', !cursor);
+  } catch (e) {
+    if (reset) $('users-tbody').innerHTML = `<tr><td colspan="6" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
+    toast(e.message, 'error');
   }
 }
 
-function refreshUserRow(tr, user) {
-  // Update status cell and ban reason cell, rebuild action cell
-  const cells = tr.querySelectorAll('td');
-  cells[2].innerHTML = user.banned
-    ? `<span class="badge badge-rejected">Banned</span>`
-    : `<span class="badge badge-approved">Active</span>`;
-  cells[3].textContent = user.banReason || '-';
-  buildUserActionBtns(cells[5].querySelector('.action-cell'), user, tr);
+function buildUserRow(u) {
+  const tr = document.createElement('tr');
+  const initial = (u.displayName || 'U').charAt(0).toUpperCase();
+  const avatar = u.photoURL ? `<img src="${esc(u.photoURL)}" alt="">` : initial;
+  tr.innerHTML = `
+    <td><div class="user-cell"><div class="user-cell-avatar">${avatar}</div><span style="font-size:.8125rem;font-weight:500">${esc(u.displayName || 'Unknown')}</span></div></td>
+    <td><code class="mono" style="font-size:.7rem">${esc(truncate(u.uid, 12))}</code></td>
+    <td>${statusBadge(u)}</td>
+    <td class="text-muted" style="font-size:.75rem;max-width:160px;overflow:hidden;text-overflow:ellipsis">${esc(u.banReason || '-')}</td>
+    <td class="text-muted" style="white-space:nowrap;font-size:.72rem">${formatDate(u.createdAt)}</td>
+    <td><div class="action-cell"></div></td>`;
+  buildUserActions(tr.querySelector('.action-cell'), u, tr);
+  return tr;
 }
+function statusBadge(u) {
+  return u.banned ? `<span class="badge badge-rejected">Banned</span>` : `<span class="badge badge-approved">Active</span>`;
+}
+function buildUserActions(cell, u, tr) {
+  cell.innerHTML = '';
+  const b = document.createElement('button');
+  if (u.banned) {
+    b.className = 'btn btn-ghost btn-sm'; b.textContent = 'Unban';
+    b.addEventListener('click', async () => {
+      if (!confirm(`Unban ${u.displayName || u.uid}?`)) return;
+      try { await adminUnbanUser(u.uid); u.banned = false; u.banReason = null; refreshUserRow(tr, u); toast('User unbanned'); } catch (e) { toast(e.message, 'error'); }
+    });
+  } else {
+    b.className = 'btn btn-danger btn-sm'; b.textContent = 'Ban';
+    b.addEventListener('click', async () => {
+      const reason = prompt(`Ban reason for ${u.displayName || u.uid}:`); if (reason === null) return;
+      try { await adminBanUser(u.uid, reason || ''); u.banned = true; u.banReason = reason || ''; refreshUserRow(tr, u); toast('User banned'); } catch (e) { toast(e.message, 'error'); }
+    });
+  }
+  cell.appendChild(b);
+}
+function refreshUserRow(tr, u) {
+  const cells = tr.querySelectorAll('td');
+  cells[2].innerHTML = statusBadge(u);
+  cells[3].textContent = u.banReason || '-';
+  buildUserActions(cells[5].querySelector('.action-cell'), u, tr);
+}
+$('users-load-more').addEventListener('click', () => loadUsers(false));
 
-$('users-load-more').addEventListener('click', () => loadUsersTable(false));
-
-// ============================================================
-// Review modal
-// ============================================================
-function openReviewModal(rec) {
-  _reviewRecord = rec;
-  $('review-modal-title').textContent = `${rec.brand} ${rec.model}`;
-  $('review-modal-subtitle').textContent = rec.program;
-  $('review-modal-sparkline').innerHTML = sparklineSVG(rec, 320, 80);
-
-  const env = rec.envelope || {};
+// ============================================================ review modal
+function openReviewModal(c) {
+  _reviewRecord = c;
+  $('review-modal-title').textContent = deviceLabel(c);
+  $('review-modal-subtitle').textContent = c.program_lc || '';
+  $('review-modal-sparkline').innerHTML = sparklineSVG(c, 320, 80);
+  const st = c.stats || {};
   $('review-modal-body').innerHTML = `
-    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:.875rem">
-      <div class="detail-item"><span class="detail-label">Type</span><span class="detail-value">${esc(typeLabel(rec.applianceType))}</span></div>
-      <div class="detail-item"><span class="detail-label">Uploader</span><span class="detail-value">${esc(rec.uploaderName || 'Anonymous')}</span></div>
-      <div class="detail-item"><span class="detail-label">Duration</span><span class="detail-value">${formatDuration(env.target_duration)}</span></div>
-      <div class="detail-item"><span class="detail-label">Avg Energy</span><span class="detail-value">${env.avg_energy != null ? env.avg_energy.toFixed(3) + ' kWh' : '-'}</span></div>
-      <div class="detail-item"><span class="detail-label">Cycles</span><span class="detail-value">${env.cycle_count ?? '-'}</span></div>
-      <div class="detail-item"><span class="detail-label">Interval</span><span class="detail-value">${rec.sampleIntervalSec != null ? rec.sampleIntervalSec + 's' : '-'}</span></div>
-      <div class="detail-item"><span class="detail-label">Uploaded</span><span class="detail-value">${formatDate(rec.createdAt)}</span></div>
-      <div class="detail-item"><span class="detail-label">Schema v</span><span class="detail-value">${rec.envelopeSchemaVersion ?? '-'}</span></div>
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:.75rem">
+      <div class="detail-item"><span class="detail-label">Type</span><span class="detail-value">${esc(typeLabel(c.applianceType))}</span></div>
+      <div class="detail-item"><span class="detail-label">Uploader</span><span class="detail-value">${esc(c.uploaderName || 'Anonymous')}</span></div>
+      <div class="detail-item"><span class="detail-label">Provenance</span><span class="detail-value">${esc(qcLabel(c.qc))}</span></div>
+      <div class="detail-item"><span class="detail-label">Duration</span><span class="detail-value">${formatDuration(st.duration)}</span></div>
+      <div class="detail-item"><span class="detail-label">Energy</span><span class="detail-value">${st.energy_wh != null ? (st.energy_wh / 1000).toFixed(3) + ' kWh' : '-'}</span></div>
+      <div class="detail-item"><span class="detail-label">Peak</span><span class="detail-value">${st.peak_w != null ? st.peak_w + ' W' : '-'}</span></div>
+      <div class="detail-item"><span class="detail-label">Points</span><span class="detail-value">${c.trace && c.trace.points ? c.trace.points.length : 0}</span></div>
+      <div class="detail-item"><span class="detail-label">Schema v</span><span class="detail-value">${c.cycleSchemaVersion ?? '-'}</span></div>
     </div>
-    ${rec.sensor ? `<div class="mt-1 text-muted" style="font-size:.8125rem">Sensor: ${esc(rec.sensor)}</div>` : ''}
-    ${rec.notes ? `<div class="mt-2" style="font-size:.875rem;color:var(--text)">${esc(rec.notes)}</div>` : ''}
-    <div style="margin-top:.875rem">
-      <div class="detail-label" style="margin-bottom:.35rem">Envelope preview</div>
-      <pre class="envelope-json" style="max-height:180px">${esc(JSON.stringify(rec.envelope || {}, null, 2))}</pre>
-    </div>
-  `;
-
+    <div style="margin-top:.875rem"><div class="detail-label" style="margin-bottom:.35rem">Trace preview</div>
+      <pre class="envelope-json" style="max-height:180px">${esc(JSON.stringify({ deviceId: c.deviceId, profileId: c.profileId, stats: c.stats }, null, 2))}</pre></div>`;
   $('review-modal').removeAttribute('hidden');
 }
-
-function closeReviewModal() {
-  $('review-modal').setAttribute('hidden', '');
-  _reviewRecord = null;
-}
-
+function closeReviewModal() { $('review-modal').setAttribute('hidden', ''); _reviewRecord = null; }
 $('review-modal-close').addEventListener('click', closeReviewModal);
 $('review-modal-close-footer').addEventListener('click', closeReviewModal);
-$('review-modal').addEventListener('click', (e) => {
-  if (e.target === $('review-modal')) closeReviewModal();
-});
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('review-modal').hasAttribute('hidden')) closeReviewModal();
-});
+$('review-modal').addEventListener('click', (e) => { if (e.target === $('review-modal')) closeReviewModal(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('review-modal').hasAttribute('hidden')) closeReviewModal(); });
 
 $('review-approve-btn').addEventListener('click', async () => {
   if (!_reviewRecord) return;
-  const btn = $('review-approve-btn');
-  btn.disabled = true;
-  try {
-    await adminUpdateStatus(_reviewRecord.id, 'approved');
-    toast(`Approved: ${_reviewRecord.brand} ${_reviewRecord.model}`);
-    // Remove from review queue if visible
-    const card = $(`review-card-${_reviewRecord.id}`);
-    if (card) {
-      card.remove();
-      if (!$('review-list').hasChildNodes()) {
-        $('review-list').innerHTML = `<div class="empty-state">
-          <div class="empty-icon">&#9989;</div>
-          <div class="empty-title">Queue is clear</div>
-          <div class="empty-text">No envelopes pending review.</div>
-        </div>`;
-      }
-    }
-    closeReviewModal();
-  } catch (e) {
-    btn.disabled = false;
-    toast(e.message, 'error');
-  }
+  const c = _reviewRecord;
+  await approveCycle(c, $('review-approve-btn'), $(`review-card-${c.id}`));
+  closeReviewModal();
 });
-
 $('review-reject-btn').addEventListener('click', async () => {
   if (!_reviewRecord) return;
-  const reason = prompt('Rejection reason (shown to uploader):');
-  if (reason === null) return;
-  const btn = $('review-reject-btn');
-  btn.disabled = true;
-  try {
-    await adminUpdateStatus(_reviewRecord.id, 'rejected', reason || '');
-    toast('Rejected');
-    const card = $(`review-card-${_reviewRecord.id}`);
-    if (card) {
-      card.remove();
-      if (!$('review-list').hasChildNodes()) {
-        $('review-list').innerHTML = `<div class="empty-state">
-          <div class="empty-icon">&#9989;</div>
-          <div class="empty-title">Queue is clear</div>
-          <div class="empty-text">No envelopes pending review.</div>
-        </div>`;
-      }
-    }
-    closeReviewModal();
-  } catch (e) {
-    btn.disabled = false;
-    toast(e.message, 'error');
-  }
+  const c = _reviewRecord;
+  await rejectCycle(c, $('review-reject-btn'), $(`review-card-${c.id}`));
+  closeReviewModal();
 });
