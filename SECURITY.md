@@ -12,7 +12,9 @@ is not protected, and the residual risks an operator should know about.
   exposes nothing that loading the site would not.
 - **The Firebase `apiKey` is not a secret.** It identifies the project; it is not a
   credential. Access is enforced by the rules, not by hiding the key.
-- **Approved envelopes, comments, and ratings** are world-readable (that is the point).
+- **Approved devices, programs, reference cycles, comments, and ratings** are world-readable
+  (that is the point). The store is organized as `devices` -> `profiles` -> `cycles` flat
+  collections with deterministic parent-ID references.
 
 ## What is protected
 
@@ -20,8 +22,9 @@ is not protected, and the residual risks an operator should know about.
   exist in the `admins` collection. That collection is not client-writable - admins are added
   only via the Firebase console. The `admin.html` page being public does not grant access;
   every action is checked server-side by the rules.
-- **Self-approval is impossible.** Changing an envelope's `status` to `approved` is allowed
-  only for admins. An uploader can edit their own `notes` and nothing else.
+- **Self-approval is impossible.** Changing a device's, program's, or cycle's `status` to
+  `approved` is allowed only for admins. An uploader can delete their own reference cycle but
+  cannot approve it or alter other fields.
 - **Contributing requires a GitHub sign-in.** Upload, comment, and rating writes are gated on
   `sign_in_provider == 'github.com'`. Anonymous sessions (used by the read-only integration
   client) can browse approved content but cannot write.
@@ -35,16 +38,20 @@ is not protected, and the residual risks an operator should know about.
   enforced by the rules on create, so malformed or oversized documents are rejected regardless
   of what a client sends.
 - **Ratings cannot be forged.** Each user has exactly one rating document (keyed by their UID,
-  value constrained to 1-5) in the `ratings` subcollection. There is no denormalized average
-  stored on the envelope. The displayed average and count are computed at read time with a
+  value constrained to 1-5) in a cycle's `ratings` subcollection. There is no denormalized
+  average stored on the cycle. The displayed average and count are computed at read time with a
   server-side aggregation query over that subcollection, so they always reflect the real
   per-user ratings.
+- **The `qc` provenance code is obscured, not secret.** Each cycle carries an integer
+  provenance hint (how the recording was produced) that only the admin UI decodes to a label.
+  Because approved cycles are world-readable, this is deliberate obscurity for a low-stakes
+  moderation signal, not access control - do not treat it as private.
 
 ## Document size
 
 Firestore enforces a hard **1 MiB (about 1.05 MB) per-document limit** server-side. That is
 the real backend ceiling and it cannot be raised - a 5 MB document simply cannot be created in
-Firestore. WashData Store therefore keeps envelopes small:
+Firestore. WashData Store therefore keeps documents small:
 
 - The client rejects an upload larger than ~900 KB (`MAX_DOC_BYTES` in `washstore.js`) with a
   clear message, before it reaches the backend.
@@ -63,7 +70,7 @@ There is no application server, so true server-side rate limiting is not availab
 Cloud Functions (Blaze) or Firebase App Check. The current controls:
 
 - **Client-side throttle (best-effort).** `washstore.js` limits writes to 20 per rolling minute
-  per browser session and counts each envelope's download at most once per session. This stops
+  per browser session and counts each cycle's download at most once per session. This stops
   accidental or casual flooding through the UI. It is **not** a security control - a scripted
   client that bypasses the UI is unaffected.
 - **Public download counter** remains an unauthenticated `+1`. A determined script could still
