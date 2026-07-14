@@ -3,9 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="A free community store for sharing appliance power-cycle envelopes for the ha_washdata Home Assistant integration.">
+  <meta name="description" content="A free community store for sharing appliance power-cycle reference recordings for the ha_washdata Home Assistant integration.">
   <title>WashData Store</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128268;</text></svg>">
+  <link rel="icon" type="image/png" href="img/icon.png">
+  <link rel="apple-touch-icon" href="img/icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -27,22 +28,21 @@
       <button class="nav-link" id="mine-nav">My Uploads</button>
       <a class="nav-link" href="admin.html" id="admin-link" hidden>Admin</a>
     </nav>
-    <div class="user-area" id="auth-status">
-      <!-- populated by app.js -->
-    </div>
+    <div class="user-area" id="auth-status"></div>
   </header>
 
   <main>
-    <!-- Tab buttons -->
     <div class="tabs" role="tablist" aria-label="Store sections">
-      <button class="tab-btn active" id="browse-btn" role="tab" aria-selected="true" aria-controls="browse-tab">Browse</button>
-      <button class="tab-btn" id="upload-btn" role="tab" aria-selected="false" aria-controls="upload-tab">Upload</button>
-      <button class="tab-btn" id="mine-btn" role="tab" aria-selected="false" aria-controls="mine-tab">My Uploads</button>
+      <button class="tab-btn active" id="browse-btn" role="tab" aria-selected="true">Browse</button>
+      <button class="tab-btn" id="upload-btn" role="tab" aria-selected="false">Upload</button>
+      <button class="tab-btn" id="mine-btn" role="tab" aria-selected="false">My Uploads</button>
     </div>
 
-    <!-- Browse tab -->
+    <!-- Browse tab: device grid -> device view -> profile view -->
     <div class="tab-panel" id="browse-tab" role="tabpanel">
-      <div class="filter-rail">
+      <nav class="breadcrumb" id="breadcrumb" aria-label="Breadcrumb" hidden></nav>
+
+      <div class="filter-rail" id="filter-rail">
         <div class="form-group">
           <label for="filter-type">Appliance type</label>
           <select id="filter-type">
@@ -57,15 +57,16 @@
           <label for="filter-brand">Brand</label>
           <input type="text" id="filter-brand" placeholder="e.g. Bosch" autocomplete="off">
         </div>
+        <div class="form-group filter-fav">
+          <label><input type="checkbox" id="filter-favorites"> Favorites only</label>
+        </div>
         <div class="filter-actions">
           <button class="btn btn-primary btn-sm" id="filter-apply">Apply</button>
           <button class="btn btn-ghost btn-sm" id="filter-clear">Clear</button>
         </div>
       </div>
 
-      <div class="card-grid" id="card-grid" aria-live="polite">
-        <!-- cards rendered by app.js -->
-      </div>
+      <div id="browse-body" aria-live="polite"></div>
 
       <div class="load-more-area">
         <button class="btn btn-ghost" id="load-more-btn" hidden>Load more</button>
@@ -74,19 +75,15 @@
 
     <!-- Upload tab -->
     <div class="tab-panel" id="upload-tab" role="tabpanel" hidden>
-      <div class="section-header">
-        <h2 class="section-title">Upload an Envelope</h2>
-      </div>
+      <div class="section-header"><h2 class="section-title">Upload a Reference Cycle</h2></div>
 
-      <!-- Shown when not signed in -->
       <div id="upload-auth-notice" class="empty-state" hidden>
         <div class="empty-icon">&#128274;</div>
         <div class="empty-title">Sign in to contribute</div>
-        <div class="empty-text">You need a GitHub account to upload envelopes to the community store.</div>
+        <div class="empty-text">You need a GitHub account to upload reference cycles to the community store.</div>
         <button class="btn btn-primary mt-1" id="upload-signin-btn">Sign in with GitHub</button>
       </div>
 
-      <!-- Upload form (shown when signed in) -->
       <form class="upload-form" id="upload-form" hidden novalidate>
         <div class="form-row">
           <div class="form-group" style="flex:1">
@@ -104,7 +101,6 @@
             <input type="text" id="up-brand" placeholder="e.g. Bosch" maxlength="40" required>
           </div>
         </div>
-
         <div class="form-row">
           <div class="form-group" style="flex:1">
             <label for="up-model">Model *</label>
@@ -115,73 +111,46 @@
             <input type="text" id="up-program" placeholder="e.g. Cotton 40" maxlength="60" required>
           </div>
         </div>
-
         <div class="form-row">
           <div class="form-group" style="flex:1">
             <label for="up-interval">Sample interval (seconds) *</label>
             <input type="number" id="up-interval" placeholder="5" min="1" max="3600" required>
-            <span class="form-hint">The interval between power readings in your cycle data</span>
+            <span class="form-hint">The interval between power readings in the recording</span>
           </div>
           <div class="form-group" style="flex:1">
-            <label for="up-sensor">Sensor name (optional)</label>
-            <input type="text" id="up-sensor" placeholder="e.g. sensor.washer_power" maxlength="80">
+            <label for="up-desc">Description (optional)</label>
+            <input type="text" id="up-desc" placeholder="e.g. eco mode, full load" maxlength="200">
           </div>
         </div>
-
         <div class="form-group">
-          <label for="up-notes">Notes (optional)</label>
-          <textarea id="up-notes" placeholder="Any useful context about this recording: region, firmware version, load size, etc." maxlength="500"></textarea>
+          <label for="up-cycle-file">Reference cycle file *</label>
+          <input type="file" id="up-cycle-file" accept=".json,.csv,.tsv,text/plain,application/json" required>
+          <span class="form-hint">Power trace: JSON array of [seconds, watts] pairs, or CSV with two columns</span>
         </div>
-
-        <div class="form-group">
-          <label for="up-envelope-file">Envelope JSON file *</label>
-          <input type="file" id="up-envelope-file" accept=".json,application/json" required>
-          <span class="form-hint">JSON object with avg, min, max arrays plus target_duration, avg_energy, duration_std_dev, cycle_count</span>
-        </div>
-
-        <div class="form-group">
-          <label for="up-cycle-file">Raw cycle file (optional)</label>
-          <input type="file" id="up-cycle-file" accept=".json,.csv,.tsv,text/plain">
-          <span class="form-hint">Optional raw power trace: JSON array of [time, watts] pairs, or CSV with two columns</span>
-        </div>
-
+        <div id="upload-preview" class="upload-preview" hidden></div>
         <div id="upload-result" hidden></div>
-
-        <div>
-          <button type="submit" class="btn btn-primary" id="upload-submit">Submit Upload</button>
-        </div>
-
-        <p class="form-hint">Uploaded envelopes are reviewed before appearing in the public store. Thank you for contributing!</p>
+        <div><button type="submit" class="btn btn-primary" id="upload-submit">Submit Upload</button></div>
+        <p class="form-hint">Uploads are reviewed before appearing publicly. Thank you for contributing!</p>
       </form>
     </div>
 
     <!-- My Uploads tab -->
     <div class="tab-panel" id="mine-tab" role="tabpanel" hidden>
-      <div class="section-header">
-        <h2 class="section-title">My Uploads</h2>
-      </div>
-
-      <!-- Shown when not signed in -->
+      <div class="section-header"><h2 class="section-title">My Uploads</h2></div>
       <div id="mine-signin-notice" class="empty-state" hidden>
         <div class="empty-icon">&#128274;</div>
         <div class="empty-title">Sign in to view your uploads</div>
-        <div class="empty-text">Sign in with GitHub to manage the envelopes you have contributed.</div>
+        <div class="empty-text">Sign in with GitHub to manage the reference cycles you have contributed.</div>
         <button class="btn btn-primary mt-1" id="mine-signin-btn">Sign in with GitHub</button>
       </div>
-
-      <!-- Shown when signed in -->
       <div id="mine-content" hidden>
-        <div class="card-grid" id="mine-grid" aria-live="polite">
-          <!-- populated by app.js -->
-        </div>
-        <div class="load-more-area">
-          <button class="btn btn-ghost" id="mine-load-more" hidden>Load more</button>
-        </div>
+        <div class="card-grid" id="mine-grid"></div>
+        <div class="load-more-area"><button class="btn btn-ghost" id="mine-load-more" hidden>Load more</button></div>
       </div>
     </div>
   </main>
 
-  <!-- Details modal -->
+  <!-- Cycle details modal -->
   <div class="modal-overlay" id="details-modal" hidden aria-modal="true" role="dialog" aria-labelledby="modal-title">
     <div class="modal">
       <div class="modal-header">
@@ -192,42 +161,29 @@
         </div>
         <button class="modal-close" id="modal-close" aria-label="Close">&#215;</button>
       </div>
-
       <div class="modal-sparkline-area" id="modal-sparkline"></div>
-
       <div class="modal-tabs">
         <button class="modal-tab-btn active" id="modal-detail-tab-btn">Details</button>
-        <button class="modal-tab-btn" id="modal-json-tab-btn">Envelope JSON</button>
+        <button class="modal-tab-btn" id="modal-json-tab-btn">Cycle JSON</button>
         <button class="modal-tab-btn" id="modal-comments-tab-btn">Comments</button>
       </div>
-
       <div class="modal-body">
-        <!-- Detail section -->
         <div class="modal-section" id="modal-detail-section">
           <div id="modal-detail-content"></div>
           <div id="modal-rating-section"></div>
         </div>
-
-        <!-- JSON section -->
         <div class="modal-section" id="modal-json-section" hidden>
-          <p class="text-muted" style="font-size:.8125rem">Raw envelope data as stored. Download to use with ha_washdata.</p>
+          <p class="text-muted" style="font-size:.8125rem">Raw reference cycle as stored. Download to use with ha_washdata.</p>
           <pre class="envelope-json" id="modal-json-content"></pre>
         </div>
-
-        <!-- Comments section -->
         <div class="modal-section" id="modal-comments-section" hidden>
-          <div id="modal-comments-list" class="comments-list">
-            <!-- populated by app.js -->
-          </div>
-
+          <div id="modal-comments-list" class="comments-list"></div>
           <div class="add-comment" id="modal-add-comment">
             <div class="reply-indicator" id="reply-indicator" hidden>
               <span id="reply-indicator-text"></span>
               <button class="reply-btn" id="cancel-reply-btn" hidden>Cancel reply</button>
             </div>
-            <div id="comment-auth-notice" class="text-muted" style="font-size:.875rem" hidden>
-              Sign in to post a comment.
-            </div>
+            <div id="comment-auth-notice" class="text-muted" style="font-size:.875rem" hidden>Sign in to post a comment.</div>
             <textarea id="comment-input" placeholder="Write a comment..." rows="3" hidden></textarea>
             <div class="btn-row" id="comment-submit-row" hidden>
               <button class="btn btn-primary btn-sm" id="submit-comment-btn">Post comment</button>
@@ -235,7 +191,6 @@
           </div>
         </div>
       </div>
-
       <div class="modal-footer">
         <button class="btn btn-ghost btn-sm" id="modal-close-footer">Close</button>
         <button class="btn btn-primary btn-sm" id="modal-download-btn">Download JSON</button>
@@ -244,7 +199,6 @@
   </div>
 
   <div class="toast-container" id="toasts" aria-live="assertive" aria-atomic="true"></div>
-
   <script type="module" src="app.js"></script>
 </body>
 </html>
