@@ -1437,3 +1437,12 @@ input[type="url"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
   flex-basis: 100%;
   margin-top: 0.35rem;
 }
+
+/* ---- Interactive cycle graph (detail modal) ---- */
+.cycle-graph { width: 100%; }
+.cycle-graph-svg { width: 100%; height: 170px; display: block; background: var(--bg-surface); border-radius: var(--radius); cursor: crosshair; touch-action: none; }
+.cg-area { fill: var(--accent-dim); stroke: none; }
+.cg-line { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linejoin: round; }
+.cg-cross { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 3 3; opacity: .7; }
+.cg-dot { fill: var(--accent); stroke: var(--bg-surface); stroke-width: 1.5; }
+.cycle-graph-readout { font-size: .8125rem; margin-top: .5rem; font-family: 'JetBrains Mono', monospace; }

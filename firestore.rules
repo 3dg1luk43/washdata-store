@@ -63,6 +63,12 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['favoriteCount'])
         && (request.resource.data.favoriteCount == resource.data.favoriteCount + 1
             || request.resource.data.favoriteCount == resource.data.favoriteCount - 1);
+      // profileCount display counter: any GitHub user may nudge it by exactly +/-1
+      // (bumped when a profile is added under this device).
+      allow update: if isGithubUser()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['profileCount'])
+        && (request.resource.data.profileCount == resource.data.profileCount + 1
+            || request.resource.data.profileCount == resource.data.profileCount - 1);
       // Honest confirm-count bump: +1 on confirmCount ONLY when the same batch creates
       // this user's confirmation doc that did not already exist. One per uid, un-gameable.
       allow update: if isGithubUser()
@@ -112,19 +118,28 @@ service cloud.firestore {
         && request.resource.data.program_lc == request.resource.data.program.lower()
         && request.resource.data.cycleCount == 0
         && request.resource.data.createdAt == request.time;
+      // cycleCount display counter: any GitHub user may nudge it by exactly +/-1
+      // (bumped when a cycle is uploaded to this profile).
+      allow update: if isGithubUser()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cycleCount'])
+        && (request.resource.data.cycleCount == resource.data.cycleCount + 1
+            || request.resource.data.cycleCount == resource.data.cycleCount - 1);
       allow update: if isAdmin();
       allow delete: if isAdmin();
     }
 
-    // cycles (reference golden cycles)
+    // cycles (reference golden cycles) - community-voted like devices (no admin review)
     match /cycles/{cycleId} {
       function isOwner() { return isSignedIn() && resource.data.uploaderUid == request.auth.uid; }
-      allow read: if resource.data.status == 'approved' || isOwner() || isAdmin();
+      // Pending is public (browseable with an "awaiting approval" tag) so the
+      // community can confirm it; removed stays hidden.
+      allow read: if resource.data.status in ['approved', 'pending'] || isOwner() || isAdmin();
       allow create: if canContribute()
         && request.resource.data.uploaderUid == request.auth.uid
         && request.resource.data.status == 'pending'
         && request.resource.data.downloads == 0
         && request.resource.data.commentCount == 0
+        && request.resource.data.confirmCount == 0
         && request.resource.data.cycleSchemaVersion is number
         && request.resource.data.applianceType in ['washer', 'dryer', 'dishwasher', 'washer_dryer']
         && request.resource.data.deviceId is string
@@ -147,8 +162,32 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commentCount'])
         && (request.resource.data.commentCount == resource.data.commentCount + 1
             || request.resource.data.commentCount == resource.data.commentCount - 1);
+      // Honest confirm-count bump: +1 only in the batch that creates this user's
+      // one-per-uid confirmation doc (un-gameable), exactly like devices.
+      allow update: if isGithubUser()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['confirmCount'])
+        && request.resource.data.confirmCount == resource.data.confirmCount + 1
+        && !exists(/databases/$(database)/documents/cycles/$(cycleId)/confirmations/$(request.auth.uid))
+        && existsAfter(/databases/$(database)/documents/cycles/$(cycleId)/confirmations/$(request.auth.uid));
+      // Community auto-promotion: any github user may flip pending -> approved once
+      // the honest confirmCount reaches the admin-tunable threshold. status-only change.
+      allow update: if isGithubUser()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+        && resource.data.status == 'pending'
+        && request.resource.data.status == 'approved'
+        && resource.data.confirmCount >= confirmThreshold();
       allow update: if isAdmin();
       allow delete: if (isSignedIn() && isOwner()) || isAdmin();
+
+      // One-way confirmation doc (create-only, own uid); the un-gameable vote source.
+      match /confirmations/{uid} {
+        allow read: if true;
+        allow create: if canContribute() && request.auth.uid == uid
+          && request.resource.data.uid == uid
+          && request.resource.data.createdAt == request.time;
+        allow update: if false;
+        allow delete: if isAdmin();
+      }
 
       match /comments/{commentId} {
         allow read: if true;

@@ -7,6 +7,7 @@ import {
   addComment, listComments, deleteComment,
   submitRating, getUserRating, getRatingSummary,
   confirmDevice, rateDevice, getDeviceQuality, getUserDeviceRating, hasConfirmedDevice,
+  confirmCycle, hasConfirmedCycle,
   applianceLabel, confirmThresholdValue,
   saveAsFile, getSiteConfig,
 } from './washstore.js';
@@ -100,6 +101,49 @@ function sparklineSVG(record, w = 160, h = 48) {
   const sy = (y) => h - pad - (y / yMax) * (h - 2 * pad);
   const d = pts.map((p, i) => `${i ? 'L' : 'M'}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(' ');
   return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg"><path d="${d}" stroke="var(--accent)" stroke-width="1.5" fill="none" stroke-linejoin="round"/></svg>`;
+}
+
+// Simple interactive power graph for the cycle detail modal: hover/drag to read the
+// power at any point in the cycle (vertical crosshair + dot + a time/watts readout).
+function interactiveGraph(container, cycle) {
+  const raw = cycle && cycle.trace && cycle.trace.points;
+  if (!Array.isArray(raw) || raw.length < 2) { container.innerHTML = '<div class="text-muted" style="padding:1rem">No trace data.</div>'; return; }
+  let pts = raw;
+  if (pts.length > 600) { const step = Math.ceil(pts.length / 600); pts = pts.filter((_, i) => i % step === 0); }
+  const W = 640, H = 170, pad = 8;
+  const xs = pts.map((p) => p[0]); const ys = pts.map((p) => p[1]);
+  const x0 = xs[0]; const xN = xs[xs.length - 1] || 1; const yMax = Math.max(...ys, 1);
+  const sx = (x) => pad + ((x - x0) / ((xN - x0) || 1)) * (W - 2 * pad);
+  const sy = (y) => H - pad - (y / yMax) * (H - 2 * pad);
+  const d = pts.map((p, i) => `${i ? 'L' : 'M'}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(' ');
+  const area = `M${sx(x0).toFixed(1)},${(H - pad).toFixed(1)} ` + pts.map((p) => `L${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(' ') + ` L${sx(xN).toFixed(1)},${(H - pad).toFixed(1)} Z`;
+  container.innerHTML = `<div class="cycle-graph">
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="cycle-graph-svg">
+      <path d="${area}" class="cg-area"/>
+      <path d="${d}" class="cg-line"/>
+      <line class="cg-cross" x1="0" x2="0" y1="${pad}" y2="${H - pad}" hidden/>
+      <circle class="cg-dot" r="3.5" hidden/>
+    </svg>
+    <div class="cycle-graph-readout text-muted" data-readout>&#128072; Hover the graph to read power at any point</div>
+  </div>`;
+  const svg = container.querySelector('svg');
+  const cross = svg.querySelector('.cg-cross');
+  const dot = svg.querySelector('.cg-dot');
+  const readout = container.querySelector('[data-readout]');
+  const at = (clientX) => {
+    const rect = svg.getBoundingClientRect();
+    const vx = ((clientX - rect.left) / (rect.width || 1)) * W;
+    const tx = x0 + ((vx - pad) / ((W - 2 * pad) || 1)) * (xN - x0);
+    let best = 0; let bd = Infinity;
+    for (let i = 0; i < pts.length; i++) { const dd = Math.abs(pts[i][0] - tx); if (dd < bd) { bd = dd; best = i; } }
+    const p = pts[best]; const X = sx(p[0]); const Y = sy(p[1]);
+    cross.setAttribute('x1', X); cross.setAttribute('x2', X); cross.hidden = false;
+    dot.setAttribute('cx', X); dot.setAttribute('cy', Y); dot.hidden = false;
+    readout.textContent = `${formatDuration(p[0])} into the cycle - ${Math.round(p[1])} W`;
+  };
+  svg.addEventListener('mousemove', (e) => at(e.clientX));
+  svg.addEventListener('mouseleave', () => { cross.hidden = true; dot.hidden = true; readout.innerHTML = '&#128072; Hover the graph to read power at any point'; });
+  svg.addEventListener('touchmove', (e) => { if (e.touches[0]) { e.preventDefault(); at(e.touches[0].clientX); } }, { passive: false });
 }
 
 // Rating summaries are fetched lazily only when the details modal opens (not per card),
@@ -457,8 +501,8 @@ async function openProfile(p) {
   const body = $('browse-body');
   body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
   try {
-    const { items } = await getReferenceCycles(p.id);
-    if (items.length === 0) { body.innerHTML = emptyHTML('&#128200;', 'No reference cycles', 'No approved reference cycles for this profile yet.'); return; }
+    const { items } = await getReferenceCycles(p.id, { includePending: !_browseFilters.approvedOnly });
+    if (items.length === 0) { body.innerHTML = emptyHTML('&#128200;', 'No reference cycles', 'No reference cycles for this profile yet. Upload one from the ha_washdata integration.'); return; }
     const grid = document.createElement('div');
     grid.className = 'card-grid';
     items.forEach((c) => grid.appendChild(buildCycleCard(c)));
@@ -474,9 +518,10 @@ function buildCycleCard(c) {
   el.innerHTML = `
     <div class="card-sparkline">${sparklineSVG(c, 160, 48)}</div>
     <div class="card-body">
-      <div class="card-title">${esc(_profile ? _profile.program : c.program_lc)}</div>
+      <div class="card-title">${esc(_profile ? _profile.program : c.program_lc)}${statusBadge(c)}</div>
       <div class="card-subtitle mono-data">${formatDuration(st.duration)} &middot; ${st.energy_wh != null ? (st.energy_wh / 1000).toFixed(2) + ' kWh' : '-'}</div>
       <div class="card-meta"><span>by ${esc(c.uploaderName || 'Anonymous')}</span><span>&middot; ${c.downloads || 0} dl</span></div>
+      <div class="card-community" data-community></div>
     </div>
     <div class="card-actions">
       <button class="btn btn-primary btn-sm" data-details>Details</button>
@@ -484,7 +529,34 @@ function buildCycleCard(c) {
     </div>`;
   el.querySelector('[data-details]').addEventListener('click', () => openDetails(c));
   el.querySelector('[data-dl]').addEventListener('click', () => doDownload(c));
+  renderCycleCommunity(el.querySelector('[data-community]'), c);
   return el;
+}
+
+// Confirm ("I have this appliance and this cycle looks right") for pending cycles,
+// mirroring the device confirm flow. Approved cycles show nothing here.
+function renderCycleCommunity(box, c) {
+  if (!box || c.status !== 'pending') return;
+  if (!_user) {
+    box.innerHTML = `<span class="text-muted" style="font-size:.75rem">Sign in to confirm this cycle.</span>`;
+    return;
+  }
+  box.innerHTML = `<button class="btn btn-ghost btn-sm" data-confirm>Confirm this cycle</button><span class="community-msg text-muted" data-msg></span>`;
+  const btn = box.querySelector('[data-confirm]');
+  hasConfirmedCycle(c.id).then((did) => { if (did) { btn.disabled = true; btn.textContent = 'You confirmed this'; } }).catch(() => {});
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const res = await confirmCycle(c.id);
+      c.confirmCount = res.confirmCount; c.status = res.status;
+      btn.textContent = 'You confirmed this';
+      const badges = box.closest('.card') ? box.closest('.card').querySelector('.card-title .badge-pending') : null;
+      const msg = box.querySelector('[data-msg]');
+      if (res.status === 'approved') { if (badges) badges.remove(); if (msg) msg.textContent = 'Approved by the community'; }
+      else if (msg) msg.textContent = `${res.confirmCount}/${_confirmThreshold} confirmations`;
+      toast('Thanks for confirming');
+    } catch (e) { btn.disabled = false; toast(e.message, 'error'); }
+  });
 }
 
 async function doDownload(c) {
@@ -519,7 +591,7 @@ async function openDetails(c) {
   $('modal-title').textContent = `${prettyBrand(c)} ${prettyModel(c)}`.trim() || 'Reference cycle';
   $('modal-program').textContent = _profile ? _profile.program : (c.program_lc || '');
   $('modal-badges').innerHTML = `<span class="badge badge-type">${esc(typeLabel(c.applianceType))}</span>`;
-  $('modal-sparkline').innerHTML = sparklineSVG(c, 320, 80);
+  interactiveGraph($('modal-sparkline'), c);
   $('modal-detail-content').innerHTML = buildDetailGrid(c);
   switchModalTab('detail');
   $('modal-json-content').textContent = JSON.stringify({ trace: c.trace, stats: c.stats, cycleSchemaVersion: c.cycleSchemaVersion }, null, 2);

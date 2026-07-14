@@ -40,7 +40,6 @@
     <div id="admin-panel" hidden>
       <div class="tabs" role="tablist">
         <button class="tab-btn active" id="overview-btn" role="tab">Overview</button>
-        <button class="tab-btn" id="review-btn" role="tab">Review Queue</button>
         <button class="tab-btn" id="cycles-btn" role="tab">Cycles</button>
         <button class="tab-btn" id="brands-btn" role="tab">Brands</button>
         <button class="tab-btn" id="devices-btn" role="tab">Devices</button>
@@ -74,13 +73,6 @@
             <button class="btn btn-primary btn-sm" id="threshold-save-btn" disabled>Save</button>
           </div>
         </div>
-      </div>
-
-      <!-- Review Queue -->
-      <div class="tab-panel" id="review-tab" role="tabpanel" hidden>
-        <div class="section-header"><h2 class="section-title">Pending Reference Cycles</h2></div>
-        <div id="review-list"></div>
-        <div class="load-more-area"><button class="btn btn-ghost" id="review-load-more" hidden>Load more</button></div>
       </div>
 
       <!-- Cycles table -->
@@ -153,9 +145,18 @@
       <!-- Profiles table -->
       <div class="tab-panel" id="profiles-tab" role="tabpanel" hidden>
         <div class="section-header"><h2 class="section-title">Profiles</h2></div>
+        <div class="merge-bar">
+          <span class="text-muted" style="font-size:.8125rem">Merge reassigns all cycles from the source profile into the target, then deletes the source.</span>
+          <div class="merge-controls">
+            <input type="text" id="pmerge-from" placeholder="source profileId" autocomplete="off">
+            <span>&rarr;</span>
+            <input type="text" id="pmerge-to" placeholder="target profileId" autocomplete="off">
+            <button class="btn btn-danger btn-sm" id="pmerge-btn">Merge</button>
+          </div>
+        </div>
         <div class="admin-table-wrap">
           <table class="admin-table"><thead><tr>
-            <th>Profile</th><th>Device</th><th>Status</th><th>Contributor</th><th>Actions</th>
+            <th>Profile</th><th>Device</th><th>ID</th><th>Status</th><th>Contributor</th><th>Actions</th>
           </tr></thead><tbody id="profiles-tbody"></tbody></table>
         </div>
       </div>
@@ -187,8 +188,6 @@
       <div class="modal-body"><div id="review-modal-body"></div></div>
       <div class="modal-footer">
         <button class="btn btn-ghost btn-sm" id="review-modal-close-footer">Close</button>
-        <button class="btn btn-danger btn-sm" id="review-reject-btn">Reject</button>
-        <button class="btn btn-primary btn-sm" id="review-approve-btn">Approve</button>
       </div>
     </div>
   </div>

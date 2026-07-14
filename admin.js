@@ -3,7 +3,7 @@ import {
   init, onAuth, signIn, signOutUser, isAdmin, ensureUserProfile,
   deleteCycle, qcLabel,
   adminListCycles, adminSetCycleStatus,
-  adminListDevices, adminSetDeviceStatus, adminSetProfileStatus, adminSetBrandStatus, adminMergeDevices,
+  adminListDevices, adminSetDeviceStatus, adminSetProfileStatus, adminSetBrandStatus, adminMergeDevices, adminMergeProfiles,
   adminListBrands, adminListProfiles,
   adminListUsers, adminBanUser, adminUnbanUser, adminGetStats,
   getSiteConfig, setMaintenance, setConfirmThreshold,
@@ -13,7 +13,6 @@ init(firebaseConfig);
 
 // ============================================================ state
 let _isAdmin = false;
-let _reviewCursor = null;
 let _cyCursor = null;
 let _devCursor = null;
 let _userCursor = null;
@@ -113,7 +112,7 @@ onAuth(async (user) => {
 });
 
 // ============================================================ tabs
-const TABS = ['overview', 'review', 'cycles', 'brands', 'devices', 'profiles', 'users'];
+const TABS = ['overview', 'cycles', 'brands', 'devices', 'profiles', 'users'];
 function switchTab(name) {
   TABS.forEach((t) => {
     $(`${t}-tab`).toggleAttribute('hidden', t !== name);
@@ -123,7 +122,6 @@ function switchTab(name) {
 }
 TABS.forEach((name) => $(`${name}-btn`).addEventListener('click', () => {
   switchTab(name);
-  if (name === 'review' && !$('review-list').hasChildNodes()) loadReview(true);
   if (name === 'cycles' && !$('cycles-tbody').hasChildNodes()) loadCycles(true);
   if (name === 'brands' && !$('brands-tbody').hasChildNodes()) loadBrands();
   if (name === 'devices' && !$('devices-tbody').hasChildNodes()) loadDevices(true);
@@ -193,78 +191,9 @@ $('maint-toggle-btn').addEventListener('click', async () => {
   } catch (e) { $('maint-toggle-btn').disabled = false; toast(e.message, 'error'); }
 });
 
-// ============================================================ review queue
-async function loadReview(reset = false) {
-  if (reset) { _reviewCursor = null; $('review-list').innerHTML = ''; $('review-load-more').setAttribute('hidden', ''); }
-  const spinner = document.createElement('div');
-  spinner.className = 'loading-center'; spinner.innerHTML = '<div class="loading-spinner"></div>';
-  $('review-list').appendChild(spinner);
-  try {
-    const { items, cursor } = await adminListCycles({ status: 'pending', pageSize: 12, cursor: _reviewCursor });
-    spinner.remove();
-    if (items.length === 0 && !_reviewCursor) { $('review-list').innerHTML = reviewEmpty(); }
-    else { items.forEach((c) => $('review-list').appendChild(buildReviewCard(c))); }
-    _reviewCursor = cursor; $('review-load-more').toggleAttribute('hidden', !cursor);
-  } catch (e) { spinner.remove(); toast(e.message, 'error'); }
-}
-function reviewEmpty() {
-  return `<div class="empty-state"><div class="empty-icon">&#9989;</div><div class="empty-title">Queue is clear</div><div class="empty-text">No cycles pending review.</div></div>`;
-}
-
-function buildReviewCard(c) {
-  const el = document.createElement('div');
-  el.className = 'review-card'; el.id = `review-card-${c.id}`;
-  el.innerHTML = `
-    <div class="review-card-spark">${sparklineSVG(c, 100, 60)}</div>
-    <div class="review-card-body">
-      <div class="review-card-title">${esc(deviceLabel(c))}</div>
-      <div class="text-muted" style="font-size:.8125rem">${esc(c.program_lc || '')}</div>
-      <div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.25rem">
-        <span class="badge badge-type">${esc(typeLabel(c.applianceType))}</span>
-        <span class="badge badge-pending">Pending</span>
-        <span class="badge">${esc(qcLabel(c.qc))}</span>
-      </div>
-      <div class="text-muted" style="font-size:.75rem;margin-top:.3rem">by ${esc(c.uploaderName || 'Anonymous')} &middot; ${formatDate(c.createdAt)}</div>
-    </div>
-    <div class="review-card-actions">
-      <button class="btn btn-primary btn-sm" data-approve>Approve</button>
-      <button class="btn btn-danger btn-sm" data-reject>Reject</button>
-      <button class="btn btn-ghost btn-sm" data-view>View</button>
-    </div>`;
-  el.querySelector('[data-approve]').addEventListener('click', (ev) => approveCycle(c, ev.currentTarget, el));
-  el.querySelector('[data-reject]').addEventListener('click', (ev) => rejectCycle(c, ev.currentTarget, el));
-  el.querySelector('[data-view]').addEventListener('click', () => openReviewModal(c));
-  return el;
-}
-
-// Approving a cycle must also approve its parent brand + device + profile, or the
-// approved cycle would be unreachable via browse (which filters status==approved).
-async function cascadeApprove(c) {
-  try { if (c.brand_lc) await adminSetBrandStatus(c.brand_lc, 'approved'); } catch (_) {}
-  try { if (c.deviceId) await adminSetDeviceStatus(c.deviceId, 'approved'); } catch (_) {}
-  try { if (c.profileId) await adminSetProfileStatus(c.profileId, 'approved'); } catch (_) {}
-}
-
-async function approveCycle(c, btn, card) {
-  if (btn) btn.disabled = true;
-  try {
-    await adminSetCycleStatus(c.id, 'approved');
-    await cascadeApprove(c);
-    toast(`Approved: ${deviceLabel(c)}`);
-    if (card) { card.remove(); if (!$('review-list').hasChildNodes()) $('review-list').innerHTML = reviewEmpty(); }
-  } catch (e) { if (btn) btn.disabled = false; toast(e.message, 'error'); }
-}
-async function rejectCycle(c, btn, card) {
-  const reason = prompt('Rejection reason (shown to uploader):');
-  if (reason === null) return;
-  if (btn) btn.disabled = true;
-  try {
-    await adminSetCycleStatus(c.id, 'rejected', reason || '');
-    toast('Rejected');
-    if (card) { card.remove(); if (!$('review-list').hasChildNodes()) $('review-list').innerHTML = reviewEmpty(); }
-  } catch (e) { if (btn) btn.disabled = false; toast(e.message, 'error'); }
-}
-$('review-load-more').addEventListener('click', () => loadReview(false));
+// Cycles are community-voted (auto-approve at the confirm threshold), like devices,
+// so there is no admin review queue. Admins can still View / Remove / Delete a cycle
+// from the Cycles tab for moderation.
 
 // ============================================================ cycles table
 async function loadCycles(reset = false) {
@@ -300,12 +229,10 @@ function buildCycleRow(c) {
 
 function buildCycleActions(container, c, tr) {
   container.innerHTML = '';
-  const setStatus = (status, needReason) => async () => {
-    let reason = null;
-    if (needReason) { reason = prompt('Reason:'); if (reason === null) return; }
+  // Cycles auto-approve by community vote; admins only moderate (remove / delete).
+  const setStatus = (status) => async () => {
     try {
-      await adminSetCycleStatus(c.id, status, reason);
-      if (status === 'approved') await cascadeApprove(c);
+      await adminSetCycleStatus(c.id, status);
       c.status = status;
       const badge = tr.children[4].querySelector('.badge');
       badge.className = `badge badge-${status}`; badge.textContent = status;
@@ -314,9 +241,8 @@ function buildCycleActions(container, c, tr) {
     } catch (e) { toast(e.message, 'error'); }
   };
   const mk = (label, cls, handler) => { const b = document.createElement('button'); b.className = `btn ${cls} btn-sm`; b.textContent = label; b.addEventListener('click', handler); container.appendChild(b); };
-  if (c.status !== 'approved') mk('Approve', 'btn-ghost', setStatus('approved', false));
-  if (c.status !== 'rejected') mk('Reject', 'btn-ghost', setStatus('rejected', true));
-  if (c.status === 'approved') mk('Remove', 'btn-ghost', setStatus('removed', false));
+  if (c.status !== 'removed') mk('Remove', 'btn-ghost', setStatus('removed'));
+  else mk('Restore', 'btn-ghost', setStatus('approved'));
   mk('View', 'btn-ghost', () => openReviewModal(c));
   mk('Delete', 'btn-danger', async () => {
     if (!confirm(`Permanently delete this cycle (${deviceLabel(c)} - ${c.program_lc})?`)) return;
@@ -447,6 +373,7 @@ function buildProfileRow(p) {
   tr.innerHTML = `
     <td>${esc(p.program || '')}</td>
     <td class="text-muted">${esc(dev)}</td>
+    <td><code class="mono" style="font-size:.68rem">${esc(truncate(p.id, 30))}</code></td>
     <td><span class="badge badge-${esc(p.status)}">${esc(p.status)}</span></td>
     <td class="text-muted" style="font-size:.75rem">${esc(p.createdByName || '-')}</td>
     <td><div class="action-cell"></div></td>`;
@@ -456,7 +383,7 @@ function buildProfileRow(p) {
     btn.addEventListener('click', async () => {
       try {
         await adminSetProfileStatus(p.id, status); p.status = status;
-        const badge = tr.children[2].querySelector('.badge'); badge.className = `badge badge-${status}`; badge.textContent = status;
+        const badge = tr.children[3].querySelector('.badge'); badge.className = `badge badge-${status}`; badge.textContent = status;
         toast(`Profile ${status}`);
       } catch (e) { toast(e.message, 'error'); }
     });
@@ -464,8 +391,21 @@ function buildProfileRow(p) {
   };
   if (p.status !== 'approved') mk('Approve', 'approved');
   if (p.status !== 'removed') mk('Remove', 'removed');
+  const target = document.createElement('button');
+  target.className = 'btn btn-ghost btn-sm'; target.textContent = 'Merge target';
+  target.addEventListener('click', () => { $('pmerge-to').value = p.id; });
+  cell.appendChild(target);
   return tr;
 }
+
+$('pmerge-btn').addEventListener('click', async () => {
+  const from = $('pmerge-from').value.trim();
+  const to = $('pmerge-to').value.trim();
+  if (!from || !to) { toast('Enter both source and target profileId', 'error'); return; }
+  if (!confirm(`Merge ${from} into ${to}? All its cycles are reassigned and the source profile is deleted.`)) return;
+  try { await adminMergeProfiles(from, to); toast('Merged'); $('pmerge-from').value = ''; $('pmerge-to').value = ''; loadProfiles(); }
+  catch (e) { toast(e.message, 'error'); }
+});
 
 // ============================================================ users table
 async function loadUsers(reset = false) {
@@ -552,16 +492,3 @@ $('review-modal-close').addEventListener('click', closeReviewModal);
 $('review-modal-close-footer').addEventListener('click', closeReviewModal);
 $('review-modal').addEventListener('click', (e) => { if (e.target === $('review-modal')) closeReviewModal(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('review-modal').hasAttribute('hidden')) closeReviewModal(); });
-
-$('review-approve-btn').addEventListener('click', async () => {
-  if (!_reviewRecord) return;
-  const c = _reviewRecord;
-  await approveCycle(c, $('review-approve-btn'), $(`review-card-${c.id}`));
-  closeReviewModal();
-});
-$('review-reject-btn').addEventListener('click', async () => {
-  if (!_reviewRecord) return;
-  const c = _reviewRecord;
-  await rejectCycle(c, $('review-reject-btn'), $(`review-card-${c.id}`));
-  closeReviewModal();
-});

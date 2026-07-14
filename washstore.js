@@ -278,6 +278,38 @@ export async function confirmDevice(deviceId) {
   return { confirmed: true, confirmCount: count, status };
 }
 
+export async function hasConfirmedCycle(cycleId) {
+  const user = _auth.currentUser;
+  if (!user) return false;
+  const rec = await restGet(`cycles/${cycleId}/confirmations/${user.uid}`);
+  return !!rec;
+}
+
+// Confirm a reference cycle (one per user); crossing the threshold auto-approves it.
+// Same voting model as devices - no admin review.
+export async function confirmCycle(cycleId) {
+  const user = _auth.currentUser;
+  if (!user) throw new Error('Not signed in');
+  _rateGuard();
+  const confRef = doc(_db, 'cycles', cycleId, 'confirmations', user.uid);
+  const cyc0 = await restGet(`cycles/${cycleId}`);
+  if (!(await getDoc(confRef)).exists()) {
+    const batch = writeBatch(_db);
+    batch.set(confRef, { uid: user.uid, createdAt: serverTimestamp() });
+    batch.update(doc(_db, 'cycles', cycleId), { confirmCount: increment(1) });
+    await batch.commit();
+  }
+  const cyc = await restGet(`cycles/${cycleId}`);
+  const count = (cyc && cyc.confirmCount) || 0;
+  let status = cyc ? cyc.status : (cyc0 && cyc0.status);
+  const threshold = await confirmThresholdValue();
+  if (status === 'pending' && count >= threshold) {
+    try { await updateDoc(doc(_db, 'cycles', cycleId), { status: 'approved' }); status = 'approved'; }
+    catch (_) { /* rule guards it; ignore */ }
+  }
+  return { confirmed: true, confirmCount: count, status };
+}
+
 // Optional 5-star quality score (info only). One per user, editable.
 export async function rateDevice(deviceId, rating) {
   const user = _auth.currentUser;
@@ -318,6 +350,8 @@ export async function ensureProfile({ deviceId, program, description = '' }) {
       createdAt: serverTimestamp(),
       cycleCount: 0,
     });
+    // Bump the device's profileCount for the browse count (best-effort, new only).
+    try { await updateDoc(doc(_db, 'devices', deviceId), { profileCount: increment(1) }); } catch (_) {}
   }
   return id;
 }
@@ -524,6 +558,7 @@ export async function uploadReferenceCycle(meta, tracePoints, stats, qc = 3) {
     cycleSchemaVersion: CYCLE_SCHEMA_VERSION,
     downloads: 0,
     commentCount: 0,
+    confirmCount: 0,
     qc: qcCode,
     createdAt: serverTimestamp(),
   };
@@ -533,10 +568,21 @@ export async function uploadReferenceCycle(meta, tracePoints, stats, qc = 3) {
   }
 
   const ref = await addDoc(collection(_db, 'cycles'), docData);
+  // Bump the profile's cycleCount so the browse count reflects reality (best-effort).
+  try { await updateDoc(doc(_db, 'profiles', profId), { cycleCount: increment(1) }); } catch (_) {}
   return ref.id;
 }
 
-export async function getReferenceCycles(profileId, { pageSize = 24, cursor = null } = {}) {
+export async function getReferenceCycles(profileId, { pageSize = 24, cursor = null, includePending = false } = {}) {
+  const fetch = (status) => getDocs(query(collection(_db, 'cycles'),
+    where('profileId', '==', profileId), where('status', '==', status),
+    orderBy('createdAt', 'desc'), limit(pageSize)));
+  if (includePending) {
+    const [a, p] = await Promise.all([fetch('approved'), fetch('pending')]);
+    const byId = new Map();
+    for (const d of [...a.docs, ...p.docs]) if (!byId.has(d.id)) byId.set(d.id, hydrateCycle({ id: d.id, ...d.data() }));
+    return { items: [...byId.values()], cursor: null };
+  }
   const cons = [
     where('profileId', '==', profileId),
     where('status', '==', 'approved'),
@@ -751,6 +797,17 @@ export async function adminMergeDevices(fromId, toId) {
     batch.update(doc(_db, 'cycles', c.id), { deviceId: toId, profileId: newPid });
   }
   batch.delete(doc(_db, 'devices', fromId));
+  await batch.commit();
+}
+
+// Reassign a profile's cycles to another profile, then delete the empty source.
+// Admin-only; for deduping near-duplicate profiles (e.g. "Eco 50" / "Eco 50C").
+export async function adminMergeProfiles(fromId, toId) {
+  if (fromId === toId) throw new Error('Cannot merge a profile into itself');
+  const cycSnap = await getDocs(query(collection(_db, 'cycles'), where('profileId', '==', fromId)));
+  const batch = writeBatch(_db);
+  for (const c of cycSnap.docs) batch.update(doc(_db, 'cycles', c.id), { profileId: toId });
+  batch.delete(doc(_db, 'profiles', fromId));
   await batch.commit();
 }
 
