@@ -24,13 +24,11 @@ import {
   serverTimestamp,
   increment,
   getCountFromServer,
-  getAggregateFromServer,
-  average,
-  count,
   writeBatch,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
 import { deviceId as mkDeviceId, profileId as mkProfileId } from './lib/ids.js';
 import { downsampleCycle, parseCycle, cycleStats } from './lib/trace.js';
+import { restQuery, restGet, restRatingSummary } from './firestore-rest.js';
 
 export { downsampleCycle, parseCycle, cycleStats };
 
@@ -213,23 +211,27 @@ export async function ensureProfile({ deviceId, program, description = '' }) {
 }
 
 export async function getDevice(id) {
-  const snap = await getDoc(doc(_db, 'devices', id));
-  if (!snap.exists()) throw new Error('Device not found');
-  return { id: snap.id, ...snap.data() };
+  const rec = await restGet(`devices/${id}`);
+  if (!rec) throw new Error('Device not found');
+  return rec;
 }
 
-// List approved brands, optional case-insensitive prefix search on brand_lc.
+// List approved brands, optional case-insensitive prefix search on brand_lc. REST read.
 export async function listBrands({ search = null, pageSize = 60, cursor = null } = {}) {
-  const cons = [where('status', '==', 'approved')];
+  const filters = [{ field: 'status', op: 'EQUAL', value: 'approved' }];
   if (search) {
     const p = search.toLowerCase();
-    cons.push(where('brand_lc', '>=', p), where('brand_lc', '<=', p + '\uf8ff'));
+    filters.push({ field: 'brand_lc', op: 'GREATER_THAN_OR_EQUAL', value: p });
+    filters.push({ field: 'brand_lc', op: 'LESS_THAN_OR_EQUAL', value: p + '\uf8ff' });
   }
-  cons.push(orderBy('brand_lc', 'asc'), limit(pageSize));
-  if (cursor) cons.push(startAfter(cursor));
-  const snap = await getDocs(query(collection(_db, 'brands'), ...cons));
-  const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  return { items, cursor: snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null };
+  const items = await restQuery('brands', {
+    filters,
+    orderBy: [{ field: 'brand_lc', dir: 'ASCENDING' }],
+    limit: pageSize,
+    startAfter: cursor ? [cursor] : null,
+  });
+  const next = items.length === pageSize ? items[items.length - 1].brand_lc : null;
+  return { items, cursor: next };
 }
 
 // Approved devices for a brand (used by brand -> devices browse and by upload autocomplete).
@@ -237,34 +239,36 @@ export async function getDevicesByBrand(brandLc, { applianceType = null, pageSiz
   return searchDevices({ brand: brandLc, applianceType, pageSize, cursor });
 }
 
-export async function searchDevices({ applianceType = null, brand = null, favoritesOnly = false, pageSize = 24, cursor = null } = {}) {
+export async function searchDevices({ applianceType = null, brand = null, favoritesOnly = false, pageSize = 60 } = {}) {
   if (favoritesOnly) {
     const favs = await getFavorites();
     const items = [];
     for (const id of favs.slice(0, pageSize)) {
-      const s = await getDoc(doc(_db, 'devices', id));
-      if (s.exists()) items.push({ id: s.id, ...s.data() });
+      const rec = await restGet(`devices/${id}`);
+      if (rec) items.push(rec);
     }
     return { items, cursor: null };
   }
-  const cons = [where('status', '==', 'approved')];
-  if (applianceType) cons.push(where('applianceType', '==', applianceType));
-  if (brand) cons.push(where('brand_lc', '==', brand.toLowerCase()));
-  cons.push(orderBy('favoriteCount', 'desc'), limit(pageSize));
-  if (cursor) cons.push(startAfter(cursor));
-  const snap = await getDocs(query(collection(_db, 'devices'), ...cons));
-  const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  return { items, cursor: snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null };
+  const filters = [{ field: 'status', op: 'EQUAL', value: 'approved' }];
+  if (applianceType) filters.push({ field: 'applianceType', op: 'EQUAL', value: applianceType });
+  if (brand) filters.push({ field: 'brand_lc', op: 'EQUAL', value: brand.toLowerCase() });
+  const items = await restQuery('devices', {
+    filters,
+    orderBy: [{ field: 'favoriteCount', dir: 'DESCENDING' }],
+    limit: pageSize,
+  });
+  return { items, cursor: null };
 }
 
 export async function getProfiles(deviceId) {
-  const snap = await getDocs(query(
-    collection(_db, 'profiles'),
-    where('deviceId', '==', deviceId),
-    where('status', '==', 'approved'),
-    orderBy('createdAt', 'desc'),
-  ));
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  return restQuery('profiles', {
+    filters: [
+      { field: 'deviceId', op: 'EQUAL', value: deviceId },
+      { field: 'status', op: 'EQUAL', value: 'approved' },
+    ],
+    orderBy: [{ field: 'createdAt', dir: 'DESCENDING' }],
+    limit: 100,
+  });
 }
 
 export async function favoriteDevice(id, on) {
@@ -367,9 +371,9 @@ export async function myCycles({ pageSize = 24, cursor = null } = {}) {
 }
 
 export async function getCycle(id) {
-  const snap = await getDoc(doc(_db, 'cycles', id));
-  if (!snap.exists()) throw new Error('Cycle not found');
-  return { id: snap.id, ...snap.data() };
+  const rec = await restGet(`cycles/${id}`);
+  if (!rec) throw new Error('Cycle not found');
+  return rec;
 }
 
 export async function deleteCycle(id) {
@@ -413,11 +417,12 @@ export async function addComment(cycleId, text, parentId = null) {
 }
 
 export async function listComments(cycleId, pageSize = 50) {
-  const q = query(collection(_db, 'cycles', cycleId, 'comments'), orderBy('createdAt', 'asc'), limit(pageSize));
-  const snap = await getDocs(q);
-  const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  const nextCursor = snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null;
-  return { items, cursor: nextCursor };
+  const items = await restQuery('comments', {
+    parent: `cycles/${cycleId}`,
+    orderBy: [{ field: 'createdAt', dir: 'ASCENDING' }],
+    limit: pageSize,
+  });
+  return { items, cursor: null };
 }
 
 export async function deleteComment(cycleId, commentId) {
@@ -448,21 +453,13 @@ export async function submitRating(cycleId, rating) {
 export async function getUserRating(cycleId) {
   const user = _auth.currentUser;
   if (!user) return null;
-  const snap = await getDoc(doc(_db, 'cycles', cycleId, 'ratings', user.uid));
-  return snap.exists() ? snap.data().rating : null;
+  const rec = await restGet(`cycles/${cycleId}/ratings/${user.uid}`);
+  return rec ? rec.rating : null;
 }
 
-// Authoritative rating summary from the ratings subcollection via one aggregation query.
+// Authoritative rating summary from the ratings subcollection (REST aggregation query).
 export async function getRatingSummary(cycleId) {
-  const col = collection(_db, 'cycles', cycleId, 'ratings');
-  try {
-    const snap = await getAggregateFromServer(col, { avg: average('rating'), cnt: count() });
-    const cnt = snap.data().cnt || 0;
-    const avg = snap.data().avg;
-    return { avg: cnt > 0 && avg != null ? avg : null, count: cnt };
-  } catch (_) {
-    return { avg: null, count: 0 };
-  }
+  return restRatingSummary(cycleId);
 }
 
 // ------------------------------------------------------------------
