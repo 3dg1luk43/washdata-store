@@ -1313,6 +1313,22 @@ input[type="file"]:hover {
   font-family: var(--font-mono);
 }
 
+/* Centered container: bars stay full-width (backgrounds edge-to-edge) while their
+   content and the main column align to a comfortable max width with sane gutters. */
+.topbar,
+main,
+.site-footer,
+.maint-banner {
+  padding-inline: max(1.25rem, calc((100% - 1180px) / 2));
+}
+main {
+  display: block;
+  padding-block: 1.75rem 3.5rem;
+}
+@media (max-width: 640px) {
+  main { padding-block: 1.25rem 2.5rem; }
+}
+
 /* Footer credits */
 .site-footer {
   display: flex;
