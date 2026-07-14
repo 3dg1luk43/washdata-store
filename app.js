@@ -6,6 +6,8 @@ import {
   bumpDownload, favoriteDevice, getFavorites,
   addComment, listComments, deleteComment,
   submitRating, getUserRating, getRatingSummary,
+  confirmDevice, rateDevice, getDeviceQuality, getUserDeviceRating, hasConfirmedDevice,
+  applianceLabel, confirmThresholdValue,
   saveAsFile, getSiteConfig,
 } from './washstore.js';
 
@@ -19,8 +21,9 @@ let _brand = null;
 let _device = null;
 let _profile = null;
 let _browseCursor = null;
-let _browseFilters = { search: '', favoritesOnly: false };
+let _browseFilters = { search: '', favoritesOnly: false, approvedOnly: false };
 let _favorites = new Set();
+let _confirmThreshold = 5;
 let _openRecord = null;
 let _replyToId = null;
 let _browseLoaded = false;
@@ -187,7 +190,7 @@ async function loadBrands(reset = false) {
       $('load-more-btn').setAttribute('hidden', '');
       return;
     }
-    const { items, cursor } = await listBrands({ search: _browseFilters.search || null, pageSize: 60, cursor: _browseCursor });
+    const { items, cursor } = await listBrands({ search: _browseFilters.search || null, pageSize: 60, cursor: _browseCursor, includePending: !_browseFilters.approvedOnly });
     spinner.remove();
     if (items.length === 0 && !_browseCursor) grid.innerHTML = emptyHTML('&#128269;', 'No brands found', 'Try a different search. The library grows as people contribute.');
     else items.forEach((b) => grid.appendChild(buildBrandCard(b)));
@@ -201,6 +204,19 @@ async function loadBrands(reset = false) {
   }
 }
 
+// Awaiting-approval badge with the live confirm progress (pending only).
+function statusBadge(rec) {
+  if (rec && rec.status === 'pending') {
+    const c = rec.confirmCount || 0;
+    return `<span class="badge badge-pending">Awaiting approval &middot; ${c}/${_confirmThreshold}</span>`;
+  }
+  return '';
+}
+function addApplianceCTA(brand) {
+  const q = brand ? `?brand=${encodeURIComponent(brand)}` : '';
+  return `<div class="add-cta"><span class="text-muted">Can't find your appliance?</span> <a class="btn btn-ghost btn-sm" href="create.html${q}">Add it</a></div>`;
+}
+
 function buildBrandCard(b) {
   const el = document.createElement('div');
   el.className = 'card device-card';
@@ -208,6 +224,7 @@ function buildBrandCard(b) {
     <div class="card-body">
       <span class="eyebrow">Brand</span>
       <div class="card-title">${esc(b.brand)}</div>
+      <div class="card-badges">${statusBadge(b)}</div>
       <div class="card-subtitle">Browse models &rsaquo;</div>
     </div>
     <div class="card-actions"><button class="btn btn-primary btn-sm" data-open>Open</button></div>`;
@@ -224,13 +241,16 @@ async function openBrand(b) {
   const body = $('browse-body');
   body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
   try {
-    const { items } = await getDevicesByBrand(b.brand_lc, { pageSize: 60 });
-    if (items.length === 0) { body.innerHTML = emptyHTML('&#128203;', 'No models yet', 'No approved models for this brand yet.'); return; }
+    const { items } = await getDevicesByBrand(b.brand_lc, { pageSize: 60, includePending: !_browseFilters.approvedOnly });
+    if (items.length === 0) { body.innerHTML = emptyHTML('&#128203;', 'No models yet', 'No models for this brand yet.') + addApplianceCTA(b.brand); return; }
     const grid = document.createElement('div');
     grid.className = 'card-grid';
     items.forEach((d) => grid.appendChild(buildDeviceCard(d)));
     body.innerHTML = '';
     body.appendChild(grid);
+    const cta = document.createElement('div');
+    cta.innerHTML = addApplianceCTA(b.brand);
+    body.appendChild(cta);
   } catch (e) { body.innerHTML = emptyHTML('&#9888;', 'Failed to load', esc(e.message)); }
 }
 
@@ -238,14 +258,19 @@ function buildDeviceCard(d) {
   const el = document.createElement('div');
   el.className = 'card device-card';
   const starred = _favorites.has(d.id);
+  const manual = d.manualUrl
+    ? `<span><a class="card-manual" href="${esc(d.manualUrl)}" target="_blank" rel="noopener noreferrer nofollow">Manual &#8599;</a></span>`
+    : '';
   el.innerHTML = `
     <div class="card-body">
       <span class="eyebrow">${esc(typeLabel(d.applianceType))}</span>
       <div class="card-title">${esc(d.brand)} ${esc(modelOf(d))}</div>
       <div class="card-badges">
+        ${statusBadge(d)}
         ${d.profileCount ? `<span class="badge">${d.profileCount} program${d.profileCount > 1 ? 's' : ''}</span>` : ''}
       </div>
-      <div class="card-meta"><span>&#11088; ${d.favoriteCount || 0}</span></div>
+      <div class="card-meta"><span>&#11088; ${d.favoriteCount || 0}</span><span>by ${esc(d.createdByName || 'Anonymous')}</span>${manual}</div>
+      <div class="card-community" data-community></div>
     </div>
     <div class="card-actions">
       <button class="btn btn-primary btn-sm" data-open>Open</button>
@@ -253,7 +278,73 @@ function buildDeviceCard(d) {
     </div>`;
   el.querySelector('[data-open]').addEventListener('click', () => openDevice(d));
   el.querySelector('[data-star]').addEventListener('click', (ev) => toggleStar(ev.currentTarget, d));
+  renderDeviceCommunity(el.querySelector('[data-community]'), d);
   return el;
+}
+
+// Confirm ("I have this appliance / this entry is correct") + optional 5-star quality.
+// Kept cheap: the quality aggregation is fetched only when the user opens the stars.
+function renderDeviceCommunity(box, d) {
+  if (!box) return;
+  if (!_user) {
+    box.innerHTML = `<span class="text-muted" style="font-size:.75rem">Sign in to confirm or rate this appliance.</span>`;
+    return;
+  }
+  box.innerHTML = `
+    <button class="btn btn-ghost btn-sm" data-confirm>${d.status === 'pending' ? 'Confirm this appliance' : 'Confirm'}</button>
+    <button class="btn btn-ghost btn-sm" data-rate>Rate quality</button>
+    <span class="community-msg text-muted" data-msg></span>
+    <div class="device-stars" data-stars hidden></div>`;
+  const confirmBtn = box.querySelector('[data-confirm]');
+  confirmBtn.addEventListener('click', () => doConfirmDevice(box, d, confirmBtn));
+  hasConfirmedDevice(d.id)
+    .then((did) => { if (did) { confirmBtn.disabled = true; confirmBtn.textContent = 'You confirmed this'; } })
+    .catch(() => {});
+  box.querySelector('[data-rate]').addEventListener('click', () => toggleDeviceStars(box, d));
+}
+
+async function doConfirmDevice(box, d, btn) {
+  btn.disabled = true;
+  try {
+    const res = await confirmDevice(d.id);
+    d.confirmCount = res.confirmCount; d.status = res.status;
+    btn.textContent = 'You confirmed this';
+    const msg = box.querySelector('[data-msg]');
+    if (msg) msg.textContent = res.status === 'approved' ? 'Approved by the community' : `${res.confirmCount}/${_confirmThreshold} confirmations`;
+    const badges = box.closest('.card') ? box.closest('.card').querySelector('.card-badges') : null;
+    if (badges) {
+      const b = badges.querySelector('.badge-pending');
+      if (res.status === 'approved') { if (b) b.remove(); }
+      else if (b) b.innerHTML = `Awaiting approval &middot; ${res.confirmCount}/${_confirmThreshold}`;
+    }
+    toast('Thanks for confirming');
+  } catch (e) { btn.disabled = false; toast(e.message, 'error'); }
+}
+
+async function toggleDeviceStars(box, d) {
+  const wrap = box.querySelector('[data-stars]');
+  if (!wrap.hasAttribute('hidden')) { wrap.setAttribute('hidden', ''); return; }
+  wrap.removeAttribute('hidden');
+  wrap.innerHTML = '<span class="text-muted" style="font-size:.75rem">Loading...</span>';
+  let current = 0; let summary = { avg: null, count: 0 };
+  try { current = (await getUserDeviceRating(d.id)) || 0; } catch (_) {}
+  try { summary = await getDeviceQuality(d.id); } catch (_) {}
+  renderDeviceStars(wrap, d, current, summary);
+}
+
+function renderDeviceStars(wrap, d, current, summary) {
+  const avgInfo = summary.avg != null ? `Avg ${summary.avg.toFixed(1)} (${summary.count})` : 'No ratings yet';
+  wrap.innerHTML = `<div class="rating-stars">${[1, 2, 3, 4, 5].map((n) => `<button class="star${n <= current ? ' filled' : ''}" data-n="${n}" aria-label="${n} star${n > 1 ? 's' : ''}">&#9733;</button>`).join('')}</div><span class="rating-info">${esc(avgInfo)}</span>`;
+  wrap.querySelectorAll('.star').forEach((btn) => btn.addEventListener('click', async () => {
+    const n = +btn.dataset.n;
+    try {
+      await rateDevice(d.id, n);
+      toast('Quality rating saved');
+      let fresh = { avg: null, count: 0 };
+      try { fresh = await getDeviceQuality(d.id); } catch (_) {}
+      renderDeviceStars(wrap, d, n, fresh);
+    } catch (e) { toast(e.message, 'error'); }
+  }));
 }
 
 async function toggleStar(btn, d) {
@@ -337,12 +428,17 @@ async function doDownload(c) {
 }
 
 $('filter-apply').addEventListener('click', () => {
-  _browseFilters = { search: $('filter-brand').value.trim(), favoritesOnly: $('filter-favorites').checked };
+  _browseFilters = {
+    search: $('filter-brand').value.trim(),
+    favoritesOnly: $('filter-favorites').checked,
+    approvedOnly: $('filter-approved') ? $('filter-approved').checked : false,
+  };
   loadBrands(true);
 });
 $('filter-clear').addEventListener('click', () => {
   $('filter-brand').value = ''; $('filter-favorites').checked = false;
-  _browseFilters = { search: '', favoritesOnly: false };
+  if ($('filter-approved')) $('filter-approved').checked = false;
+  _browseFilters = { search: '', favoritesOnly: false, approvedOnly: false };
   loadBrands(true);
 });
 $('filter-brand').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('filter-apply').click(); });
@@ -517,6 +613,7 @@ $('submit-comment-btn').addEventListener('click', async () => {
 // Show the boot splash until the live maintenance flag is known (and, if on, whether
 // the viewer is an admin). Never paints the homepage or maintenance screen prematurely.
 reconcile();
+confirmThresholdValue().then((v) => { _confirmThreshold = v; }).catch(() => {});
 getSiteConfig().then((cfg) => {
   _maintenance = ('maintenance' in cfg) ? !!cfg.maintenance : MAINTENANCE;
 }).catch(() => {}).finally(() => {

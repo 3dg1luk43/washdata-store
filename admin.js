@@ -5,7 +5,7 @@ import {
   adminListCycles, adminSetCycleStatus,
   adminListDevices, adminSetDeviceStatus, adminSetProfileStatus, adminSetBrandStatus, adminMergeDevices,
   adminListUsers, adminBanUser, adminUnbanUser, adminGetStats,
-  getSiteConfig, setMaintenance,
+  getSiteConfig, setMaintenance, setConfirmThreshold,
 } from './washstore.js';
 
 init(firebaseConfig);
@@ -146,17 +146,29 @@ async function loadOverview() {
 }
 $('stats-refresh-btn').addEventListener('click', loadOverview);
 
-// --- maintenance toggle ---
+// --- maintenance toggle + auto-approve threshold ---
 let _maintOn = false;
 async function loadMaintenance() {
   const btn = $('maint-toggle-btn');
   btn.disabled = true;
-  try {
-    const cfg = await getSiteConfig();
-    _maintOn = !!cfg.maintenance;
-  } catch (_) { _maintOn = false; }
+  let cfg = {};
+  try { cfg = await getSiteConfig(); } catch (_) { cfg = {}; }
+  _maintOn = !!cfg.maintenance;
   renderMaintenance();
+  const thr = Number(cfg.confirmThreshold);
+  $('threshold-input').value = Number.isFinite(thr) && thr > 0 ? thr : 5;
+  $('threshold-input').disabled = false;
+  $('threshold-save-btn').disabled = false;
 }
+$('threshold-save-btn').addEventListener('click', async () => {
+  const n = Math.max(1, Math.round(Number($('threshold-input').value) || 5));
+  $('threshold-save-btn').disabled = true;
+  try {
+    const saved = await setConfirmThreshold(n);
+    $('threshold-input').value = saved;
+    toast(`Auto-approve threshold set to ${saved}`);
+  } catch (e) { toast(e.message, 'error'); } finally { $('threshold-save-btn').disabled = false; }
+});
 function renderMaintenance() {
   const state = $('maint-state');
   const btn = $('maint-toggle-btn');
@@ -315,15 +327,15 @@ $('cycles-load-more').addEventListener('click', () => loadCycles(false));
 
 // ============================================================ devices table
 async function loadDevices(reset = false) {
-  if (reset) { _devCursor = null; $('devices-tbody').innerHTML = `<tr><td colspan="7" class="tbl-msg">Loading...</td></tr>`; $('devices-load-more').setAttribute('hidden', ''); }
+  if (reset) { _devCursor = null; $('devices-tbody').innerHTML = `<tr><td colspan="8" class="tbl-msg">Loading...</td></tr>`; $('devices-load-more').setAttribute('hidden', ''); }
   try {
     const { items, cursor } = await adminListDevices({ pageSize: 40, cursor: _devCursor });
     if (reset) $('devices-tbody').innerHTML = '';
-    if (items.length === 0 && !_devCursor) { $('devices-tbody').innerHTML = `<tr><td colspan="7" class="tbl-msg">No devices found.</td></tr>`; }
+    if (items.length === 0 && !_devCursor) { $('devices-tbody').innerHTML = `<tr><td colspan="8" class="tbl-msg">No devices found.</td></tr>`; }
     else { items.forEach((d) => $('devices-tbody').appendChild(buildDeviceRow(d))); }
     _devCursor = cursor; $('devices-load-more').toggleAttribute('hidden', !cursor);
   } catch (e) {
-    if (reset) $('devices-tbody').innerHTML = `<tr><td colspan="7" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
+    if (reset) $('devices-tbody').innerHTML = `<tr><td colspan="8" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
     toast(e.message, 'error');
   }
 }
@@ -337,6 +349,7 @@ function buildDeviceRow(d) {
     <td><span class="badge badge-type">${esc(typeLabel(d.applianceType))}</span></td>
     <td><span class="badge badge-${esc(d.status)}">${esc(d.status)}</span></td>
     <td class="text-muted">${d.favoriteCount || 0}</td>
+    <td class="text-muted">${d.confirmCount || 0}</td>
     <td><div class="action-cell"></div></td>`;
   const cell = tr.querySelector('.action-cell');
   const mkBtn = (label, status) => {

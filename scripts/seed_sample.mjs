@@ -50,6 +50,11 @@ const SAMPLES = [
 ];
 
 async function run() {
+  // config/site must exist for the auto-promotion rule's confirmThreshold() lookup.
+  await db.collection('config').doc('site').set({
+    maintenance: false, confirmThreshold: 5, updatedAt: now,
+  }, { merge: true });
+
   let n = 0;
   for (const s of SAMPLES) {
     const brandLc = s.brand.toLowerCase();
@@ -60,11 +65,12 @@ async function run() {
     const cid = `seed_${profId}`.slice(0, 480);
 
     await db.collection('brands').doc(brandLc).set({
-      brand: s.brand, brand_lc: brandLc, status: 'approved', createdByUid: 'seed', createdAt: now,
+      brand: s.brand, brand_lc: brandLc, status: 'approved', createdByUid: 'seed', createdByName: null, createdAt: now,
     }, { merge: true });
     await db.collection('devices').doc(devId).set({
       applianceType: s.type, brand: s.brand, brand_lc: brandLc, model: s.model, model_lc: s.model.toLowerCase(),
-      status: 'approved', createdByUid: 'seed', createdAt: now, profileCount: 0, favoriteCount: 0,
+      status: 'approved', createdByUid: 'seed', createdByName: null, manualUrl: null, createdAt: now,
+      profileCount: 0, favoriteCount: 0, confirmCount: 0,
     }, { merge: true });
     await db.collection('profiles').doc(profId).set({
       deviceId: devId, applianceType: s.type, program: s.program, program_lc: s.program.toLowerCase(),

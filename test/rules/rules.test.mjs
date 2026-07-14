@@ -6,7 +6,7 @@ import {
   initializeTestEnvironment, assertFails, assertSucceeds,
 } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
-import { doc, setDoc, updateDoc } from 'firebase/firestore';
+import { doc, setDoc, updateDoc, writeBatch, getDoc } from 'firebase/firestore';
 
 let env;
 const PID = 'washdata-store';
@@ -66,12 +66,82 @@ test('a user may update their own favorites', async () => {
   await assertSucceeds(updateDoc(doc(gh('u2').firestore(), 'users/u2'), { favorites: ['washer__bosch__wat'] }));
 });
 
+const validDevice = (uid, over = {}) => ({
+  applianceType: 'washer', brand: 'Bosch', brand_lc: 'bosch', model: 'WAT', model_lc: 'wat',
+  status: 'pending', createdByUid: uid, createdByName: null, manualUrl: null,
+  createdAt: new Date(), profileCount: 0, favoriteCount: 0, confirmCount: 0, ...over,
+});
+
 test('device create requires github + matching brand_lc; anon denied', async () => {
-  const dev = {
-    applianceType: 'washer', brand: 'Bosch', brand_lc: 'bosch', model: 'WAT', model_lc: 'wat',
-    status: 'pending', createdByUid: 'u1', createdAt: new Date(), profileCount: 0, favoriteCount: 0,
-  };
-  await assertSucceeds(setDoc(doc(gh('u1').firestore(), 'devices/washer__bosch__wat'), dev));
-  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/x'), { ...dev, brand_lc: 'WRONG' }));
-  await assertFails(setDoc(doc(anon().firestore(), 'devices/y'), dev));
+  await assertSucceeds(setDoc(doc(gh('u1').firestore(), 'devices/washer__bosch__wat'), validDevice('u1')));
+  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/x'), validDevice('u1', { brand_lc: 'WRONG' })));
+  await assertFails(setDoc(doc(anon().firestore(), 'devices/y'), validDevice('anon')));
+});
+
+test('device create validates confirmCount, manualUrl and createdByName', async () => {
+  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/d_cc'), validDevice('u1', { confirmCount: 3 })));
+  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/d_url'), validDevice('u1', { manualUrl: 'javascript:alert(1)' })));
+  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/d_url2'), validDevice('u1', { manualUrl: 'a'.repeat(501) })));
+  await assertSucceeds(setDoc(doc(gh('u1').firestore(), 'devices/d_url_ok'), validDevice('u1', { manualUrl: 'https://example.com/manual.pdf', createdByName: 'Alice' })));
+  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/d_name'), validDevice('u1', { createdByName: 'x'.repeat(101) })));
+});
+
+test('pending device is publicly readable; removed is not', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'devices/d_pending'), validDevice('u9', { status: 'pending' }));
+    await setDoc(doc(ctx.firestore(), 'devices/d_removed'), validDevice('u9', { status: 'removed' }));
+  });
+  await assertSucceeds(getDoc(doc(anon().firestore(), 'devices/d_pending')));
+  await assertFails(getDoc(doc(anon().firestore(), 'devices/d_removed')));
+});
+
+test('confirm is honest: +1 only with the matching confirmation doc, once per user', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'config/site'), { maintenance: false, confirmThreshold: 5 });
+    await setDoc(doc(ctx.firestore(), 'devices/d_conf'), validDevice('owner', { confirmCount: 0 }));
+  });
+  const db = gh('voter1').firestore();
+  // Bare +1 without creating the confirmation doc -> denied.
+  await assertFails(updateDoc(doc(db, 'devices/d_conf'), { confirmCount: 1 }));
+  // Batch: create my confirmation doc + increment -> allowed.
+  const b1 = writeBatch(db);
+  b1.set(doc(db, 'devices/d_conf/confirmations/voter1'), { uid: 'voter1', createdAt: new Date() });
+  b1.update(doc(db, 'devices/d_conf'), { confirmCount: 1 });
+  await assertSucceeds(b1.commit());
+  // Same user cannot bump again (confirmation doc already exists).
+  const b2 = writeBatch(db);
+  b2.set(doc(db, 'devices/d_conf/confirmations/voter1'), { uid: 'voter1', createdAt: new Date() });
+  b2.update(doc(db, 'devices/d_conf'), { confirmCount: 2 });
+  await assertFails(b2.commit());
+  // Bumping by more than 1 -> denied.
+  const db2 = gh('voter2').firestore();
+  const b3 = writeBatch(db2);
+  b3.set(doc(db2, 'devices/d_conf/confirmations/voter2'), { uid: 'voter2', createdAt: new Date() });
+  b3.update(doc(db2, 'devices/d_conf'), { confirmCount: 4 });
+  await assertFails(b3.commit());
+});
+
+test('auto-promotion: only status flip, only at/above threshold', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'config/site'), { maintenance: false, confirmThreshold: 5 });
+    await setDoc(doc(ctx.firestore(), 'devices/d_lo'), validDevice('o', { status: 'pending', confirmCount: 4 }));
+    await setDoc(doc(ctx.firestore(), 'devices/d_hi'), validDevice('o', { status: 'pending', confirmCount: 5 }));
+  });
+  const db = gh('promoter').firestore();
+  await assertFails(updateDoc(doc(db, 'devices/d_lo'), { status: 'approved' }));       // below threshold
+  await assertSucceeds(updateDoc(doc(db, 'devices/d_hi'), { status: 'approved' }));     // at threshold
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'devices/d_hi2'), validDevice('o', { status: 'pending', confirmCount: 6 }));
+  });
+  // status + another field together is not a bare status flip -> denied for non-admin.
+  await assertFails(updateDoc(doc(db, 'devices/d_hi2'), { status: 'approved', favoriteCount: 9 }));
+});
+
+test('device quality rating: own uid, 1-5 only', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'devices/d_rate'), validDevice('o'));
+  });
+  await assertSucceeds(setDoc(doc(gh('r1').firestore(), 'devices/d_rate/ratings/r1'), { uid: 'r1', rating: 4, updatedAt: new Date() }));
+  await assertFails(setDoc(doc(gh('r1').firestore(), 'devices/d_rate/ratings/r1'), { uid: 'r1', rating: 9, updatedAt: new Date() }));
+  await assertFails(setDoc(doc(gh('r1').firestore(), 'devices/d_rate/ratings/r2'), { uid: 'r2', rating: 3, updatedAt: new Date() }));
 });
