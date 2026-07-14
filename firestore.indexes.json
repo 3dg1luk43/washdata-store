@@ -1,43 +1,51 @@
 {
   "indexes": [
     {
-      "collectionGroup": "envelopes",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "status", "order": "ASCENDING" },
-        { "fieldPath": "createdAt", "order": "DESCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "envelopes",
+      "collectionGroup": "devices",
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "status", "order": "ASCENDING" },
         { "fieldPath": "applianceType", "order": "ASCENDING" },
-        { "fieldPath": "createdAt", "order": "DESCENDING" }
+        { "fieldPath": "brand_lc", "order": "ASCENDING" }
       ]
     },
     {
-      "collectionGroup": "envelopes",
+      "collectionGroup": "devices",
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "status", "order": "ASCENDING" },
-        { "fieldPath": "brand_lc", "order": "ASCENDING" },
-        { "fieldPath": "createdAt", "order": "DESCENDING" }
+        { "fieldPath": "favoriteCount", "order": "DESCENDING" }
       ]
     },
     {
-      "collectionGroup": "envelopes",
+      "collectionGroup": "devices",
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "status", "order": "ASCENDING" },
         { "fieldPath": "applianceType", "order": "ASCENDING" },
-        { "fieldPath": "brand_lc", "order": "ASCENDING" },
+        { "fieldPath": "favoriteCount", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "profiles",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "deviceId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
         { "fieldPath": "createdAt", "order": "DESCENDING" }
       ]
     },
     {
-      "collectionGroup": "envelopes",
+      "collectionGroup": "cycles",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "profileId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "cycles",
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "uploaderUid", "order": "ASCENDING" },
@@ -45,10 +53,10 @@
       ]
     },
     {
-      "collectionGroup": "users",
+      "collectionGroup": "cycles",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "banned", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
         { "fieldPath": "createdAt", "order": "DESCENDING" }
       ]
     }
