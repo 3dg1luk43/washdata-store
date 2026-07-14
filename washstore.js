@@ -24,9 +24,10 @@ import {
   serverTimestamp,
   increment,
   getCountFromServer,
-  runTransaction,
+  getAggregateFromServer,
+  average,
+  count,
   writeBatch,
-  collectionGroup,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
 
 export const STORE_SCHEMA_VERSION = 1;
@@ -38,6 +39,27 @@ export const ENVELOPE_SCHEMA_VERSIONS = {
 let _app = null;
 let _auth = null;
 let _db = null;
+
+// Client size cap. Firestore hard-caps a document at 1 MiB server-side; this is a
+// friendlier client-side gate well below that so uploads fail early with a clear message.
+export const MAX_DOC_BYTES = 900 * 1024;
+
+// Best-effort in-memory write rate limit. This is NOT a security control (a scripted
+// client bypasses it); it stops accidental/casual flooding through the UI. Real
+// server-side quota protection is Firebase App Check - see SECURITY.md.
+const _WRITE_WINDOW_MS = 60 * 1000;
+const _WRITE_MAX_PER_WINDOW = 20;
+const _writeTimes = [];
+const _bumpedThisSession = new Set();
+
+function _rateGuard() {
+  const now = Date.now();
+  while (_writeTimes.length && now - _writeTimes[0] > _WRITE_WINDOW_MS) _writeTimes.shift();
+  if (_writeTimes.length >= _WRITE_MAX_PER_WINDOW) {
+    throw new Error('Too many actions in a short time. Please wait a moment and try again.');
+  }
+  _writeTimes.push(now);
+}
 
 export function init(config) {
   _app = initializeApp(config);
@@ -166,6 +188,7 @@ function _estimateDocSize(data) {
 export async function uploadEnvelope(meta, envelope, cyclePoints = null) {
   const user = _auth.currentUser;
   if (!user) throw new Error('Not signed in');
+  _rateGuard();
 
   const {
     applianceType,
@@ -227,14 +250,12 @@ export async function uploadEnvelope(meta, envelope, cyclePoints = null) {
     cycle: cycleField,
     status: 'pending',
     downloads: 0,
-    ratingCount: 0,
     commentCount: 0,
-    avgRating: null,
     createdAt: serverTimestamp(),
   };
 
-  if (_estimateDocSize(docData) > 800 * 1024) {
-    throw new Error('Document exceeds 800KB size limit');
+  if (_estimateDocSize(docData) > MAX_DOC_BYTES) {
+    throw new Error(`Document exceeds the ${Math.round(MAX_DOC_BYTES / 1024)}KB size limit. Upload without the raw cycle, or downsample it further.`);
   }
 
   const ref = await addDoc(collection(_db, 'envelopes'), docData);
@@ -277,6 +298,9 @@ export async function deleteEnvelope(id) {
 }
 
 export async function bumpDownload(id) {
+  // Count each envelope at most once per browser session to curb accidental inflation.
+  if (_bumpedThisSession.has(id)) return;
+  _bumpedThisSession.add(id);
   try {
     await updateDoc(doc(_db, 'envelopes', id), { downloads: increment(1) });
   } catch (_) {
@@ -287,6 +311,7 @@ export async function bumpDownload(id) {
 export async function addComment(envelopeId, text, parentId = null) {
   const user = _auth.currentUser;
   if (!user) throw new Error('Not signed in');
+  _rateGuard();
 
   const commentData = {
     authorUid: user.uid,
@@ -324,41 +349,17 @@ export async function submitRating(envelopeId, rating) {
   const user = _auth.currentUser;
   if (!user) throw new Error('Not signed in');
   if (![1, 2, 3, 4, 5].includes(rating)) throw new Error('Rating must be 1-5');
+  _rateGuard();
 
+  // Each user owns exactly one rating doc (keyed by uid) - the source of truth.
+  // The average is derived on read (see getRatingSummary), never stored client-side,
+  // so it cannot be forged.
   const ratingRef = doc(_db, 'envelopes', envelopeId, 'ratings', user.uid);
-  const envelopeRef = doc(_db, 'envelopes', envelopeId);
-
-  await runTransaction(_db, async (tx) => {
-    const existingSnap = await tx.get(ratingRef);
-    const envSnap = await tx.get(envelopeRef);
-    if (!envSnap.exists()) throw new Error('Envelope not found');
-
-    const { ratingCount = 0, avgRating = null } = envSnap.data();
-
-    let newCount;
-    let newAvg;
-
-    if (existingSnap.exists()) {
-      const oldRating = existingSnap.data().rating;
-      newCount = ratingCount;
-      newAvg = newCount > 1
-        ? ((avgRating * ratingCount) - oldRating + rating) / ratingCount
-        : rating;
-    } else {
-      newCount = ratingCount + 1;
-      newAvg = avgRating == null
-        ? rating
-        : ((avgRating * ratingCount) + rating) / newCount;
-    }
-
-    tx.set(ratingRef, {
-      uid: user.uid,
-      rating,
-      createdAt: existingSnap.exists() ? existingSnap.data().createdAt : serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-    tx.update(envelopeRef, { avgRating: newAvg, ratingCount: newCount });
-  });
+  await setDoc(ratingRef, {
+    uid: user.uid,
+    rating,
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
 }
 
 export async function getUserRating(envelopeId) {
@@ -366,6 +367,21 @@ export async function getUserRating(envelopeId) {
   if (!user) return null;
   const snap = await getDoc(doc(_db, 'envelopes', envelopeId, 'ratings', user.uid));
   return snap.exists() ? snap.data().rating : null;
+}
+
+// Authoritative rating summary computed from the ratings subcollection via a single
+// server-side aggregation query (~1 read). Tamper-proof: reflects the actual per-user
+// rating docs, not any denormalized value a client could write.
+export async function getRatingSummary(envelopeId) {
+  const col = collection(_db, 'envelopes', envelopeId, 'ratings');
+  try {
+    const snap = await getAggregateFromServer(col, { avg: average('rating'), cnt: count() });
+    const cnt = snap.data().cnt || 0;
+    const avg = snap.data().avg;
+    return { avg: cnt > 0 && avg != null ? avg : null, count: cnt };
+  } catch (_) {
+    return { avg: null, count: 0 };
+  }
 }
 
 export async function getRatings(envelopeId) {

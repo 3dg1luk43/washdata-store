@@ -75,9 +75,7 @@ service cloud.firestore {
               && request.resource.data.cycle.points.size() <= 3000)
         )
         && request.resource.data.createdAt == request.time
-        && request.resource.data.ratingCount == 0
-        && request.resource.data.commentCount == 0
-        && request.resource.data.avgRating == null;
+        && request.resource.data.commentCount == 0;
 
       // download bump - public vanity counter, exactly +1 and no other field.
       // Intentionally unauthenticated (browsing needs no account); see SECURITY.md
@@ -85,17 +83,9 @@ service cloud.firestore {
       allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['downloads'])
         && request.resource.data.downloads == resource.data.downloads + 1;
 
-      // rating aggregate - a signed-in GitHub user updates the denormalized average.
-      // The ratings subcollection is the source of truth; values are bounded here.
-      allow update: if isGithubUser()
-        && !isBanned()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['avgRating', 'ratingCount'])
-        && request.resource.data.ratingCount is number
-        && request.resource.data.ratingCount >= 0
-        && (request.resource.data.avgRating == null
-            || (request.resource.data.avgRating is number
-                && request.resource.data.avgRating >= 1
-                && request.resource.data.avgRating <= 5));
+      // Ratings are NOT denormalized onto the envelope. The average is derived on read
+      // from the tamper-proof ratings subcollection (see washstore.js getRatingSummary),
+      // so there is no client-writable aggregate to forge.
 
       // comment count - exactly +/-1 by a GitHub user (no arbitrary values)
       allow update: if isGithubUser()

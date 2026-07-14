@@ -3,7 +3,7 @@ import {
   init, onAuth, signIn, signOutUser, isAdmin, ensureUserProfile,
   uploadEnvelope, listEnvelopes, deleteEnvelope, bumpDownload,
   addComment, listComments, deleteComment,
-  submitRating, getUserRating,
+  submitRating, getUserRating, getRatingSummary,
   parseCycle, saveAsFile,
 } from './washstore.js';
 
@@ -25,6 +25,28 @@ let _replyToId = null;
 // DOM shorthand
 // ============================================================
 function $(id) { return document.getElementById(id); }
+
+// ============================================================
+// Rating summaries (derived from the ratings subcollection, cached per session)
+// ============================================================
+const _ratingCache = new Map();
+function fetchRatingSummary(id) {
+  if (!_ratingCache.has(id)) _ratingCache.set(id, getRatingSummary(id));
+  return _ratingCache.get(id);
+}
+async function populateCardRating(el, id) {
+  try {
+    const { avg, count } = await fetchRatingSummary(id);
+    if (avg == null) return;
+    const badge = el.querySelector('[data-rating]');
+    if (badge) {
+      badge.innerHTML = `&#9733; ${avg.toFixed(1)}`;
+      badge.removeAttribute('hidden');
+    }
+    const meta = el.querySelector('[data-rating-meta]');
+    if (meta) meta.textContent = `· ${count} rating${count > 1 ? 's' : ''}`;
+  } catch (_) {}
+}
 
 // ============================================================
 // Toast
@@ -224,7 +246,6 @@ async function loadBrowse(reset = false) {
 function buildCard(rec) {
   const el = document.createElement('div');
   el.className = 'card';
-  const stars = rec.avgRating != null ? `&#9733; ${rec.avgRating.toFixed(1)}` : '';
   el.innerHTML = `
     <div class="card-sparkline">${sparklineSVG(rec, 160, 48)}</div>
     <div class="card-body">
@@ -232,12 +253,12 @@ function buildCard(rec) {
       <div class="card-subtitle">${esc(rec.program)}</div>
       <div class="card-badges">
         <span class="badge badge-type">${esc(typeLabel(rec.applianceType))}</span>
-        ${stars ? `<span class="badge badge-rating">${stars}</span>` : ''}
+        <span class="badge badge-rating" data-rating hidden></span>
       </div>
       <div class="card-meta">
         <span>by ${esc(rec.uploaderName || 'Anonymous')}</span>
         <span>&middot; ${rec.downloads || 0} dl</span>
-        ${rec.ratingCount ? `<span>&middot; ${rec.ratingCount} rating${rec.ratingCount > 1 ? 's' : ''}</span>` : ''}
+        <span data-rating-meta></span>
       </div>
     </div>
     <div class="card-actions">
@@ -248,6 +269,7 @@ function buildCard(rec) {
   const [detailsBtn, downloadBtn] = el.querySelectorAll('.card-actions .btn');
   detailsBtn.addEventListener('click', () => openDetails(rec));
   downloadBtn.addEventListener('click', () => doDownload(rec));
+  populateCardRating(el, rec.id);
   return el;
 }
 
@@ -560,23 +582,31 @@ $('modal-comments-tab-btn').addEventListener('click', () => switchModalTab('comm
 // ============================================================
 async function loadRatingSection(envelopeId) {
   const section = $('modal-rating-section');
-  if (!_user) {
-    section.innerHTML = `<div class="text-muted" style="font-size:.875rem">Sign in to rate this envelope.</div>`;
-    return;
-  }
+  let summary = { avg: null, count: 0 };
   try {
-    const current = (await getUserRating(envelopeId)) || 0;
-    renderStars(current, envelopeId);
-  } catch (_) {
-    section.innerHTML = `<div class="text-muted" style="font-size:.875rem">Could not load rating.</div>`;
+    summary = await fetchRatingSummary(envelopeId);
+  } catch (_) {}
+  let current = 0;
+  if (_user) {
+    try { current = (await getUserRating(envelopeId)) || 0; } catch (_) {}
   }
+  renderStars(summary, current, envelopeId);
 }
 
-function renderStars(current, envelopeId) {
+function renderStars(summary, current, envelopeId) {
   const section = $('modal-rating-section');
-  const avgInfo = _openRecord?.avgRating != null
-    ? `Avg ${_openRecord.avgRating.toFixed(1)} from ${_openRecord.ratingCount} rating${_openRecord.ratingCount > 1 ? 's' : ''}`
+  const avgInfo = summary.avg != null
+    ? `Avg ${summary.avg.toFixed(1)} from ${summary.count} rating${summary.count > 1 ? 's' : ''}`
     : 'No ratings yet';
+
+  if (!_user) {
+    section.innerHTML = `
+      <div class="rating-row">
+        <span class="rating-info">${summary.avg != null ? '&#9733; ' : ''}${esc(avgInfo)}</span>
+      </div>
+      <div class="text-muted" style="font-size:.8125rem">Sign in to rate this envelope.</div>`;
+    return;
+  }
 
   section.innerHTML = `
     <div class="rating-row">
@@ -603,8 +633,11 @@ function renderStars(current, envelopeId) {
       const n = +btn.dataset.n;
       try {
         await submitRating(envelopeId, n);
+        _ratingCache.delete(envelopeId);
         toast('Rating saved');
-        renderStars(n, envelopeId);
+        let fresh = { avg: null, count: 0 };
+        try { fresh = await fetchRatingSummary(envelopeId); } catch (_) {}
+        renderStars(fresh, n, envelopeId);
       } catch (e) {
         toast(e.message, 'error');
       }

@@ -34,25 +34,47 @@ is not protected, and the residual risks an operator should know about.
 - **Field validation** (types, length caps, allowed appliance types, `*_lc` consistency) is
   enforced by the rules on create, so malformed or oversized documents are rejected regardless
   of what a client sends.
+- **Ratings cannot be forged.** Each user has exactly one rating document (keyed by their UID,
+  value constrained to 1-5) in the `ratings` subcollection. There is no denormalized average
+  stored on the envelope. The displayed average and count are computed at read time with a
+  server-side aggregation query over that subcollection, so they always reflect the real
+  per-user ratings.
 
-## Residual and accepted risks
+## Document size
 
-- **Download counter is a public, unauthenticated `+1`.** Anyone can inflate it, and a script
-  could spend the project's daily free write quota by spamming increments. Impact is bounded:
-  on the Spark free plan quota exhaustion just pauses writes until the next day (no bill, no
-  data loss), and the counter is a vanity metric. Mitigations if abused: enable
-  [Firebase App Check](https://firebase.google.com/docs/app-check), or drop the public counter.
-- **Rating aggregate is best-effort.** The per-user rating in the `ratings` subcollection is
-  authoritative and constrained (1-5, one per user). The denormalized `avgRating`/`ratingCount`
-  on the envelope is client-written and bounded (0..count, 1..5 avg) but not proven to match
-  the subcollection, because Firestore rules cannot aggregate across documents. A determined
-  signed-in user could skew a displayed average. To eliminate this, compute the average at read
-  time from the `ratings` subcollection, or aggregate it in a Cloud Function (requires the Blaze
-  plan). Low stakes for a community library.
-- **Direct-API document size.** The client guards uploads at ~800 KB, but a caller hitting the
-  API directly is bounded only by Firestore's 1 MiB hard per-document limit and the field caps
-  in the rules. Oversized uploads still land in `pending` (never public) and cost storage until
-  a moderator deletes them.
+Firestore enforces a hard **1 MiB (about 1.05 MB) per-document limit** server-side. That is
+the real backend ceiling and it cannot be raised - a 5 MB document simply cannot be created in
+Firestore. WashData Store therefore keeps envelopes small:
+
+- The client rejects an upload larger than ~900 KB (`MAX_DOC_BYTES` in `washstore.js`) with a
+  clear message, before it reaches the backend.
+- The rules cap the raw cycle trace at 3000 points and bound every metadata string, so a
+  direct-API caller still cannot create a document anywhere near the 1 MiB limit with valid
+  data.
+- Any oversized or malformed write is rejected by Firestore. Uploads that do get through always
+  land in `pending` (never public) and can be deleted by a moderator.
+
+If you ever need to store payloads larger than ~1 MiB (e.g. full-resolution raw traces), that
+requires Cloud Storage, which needs the Blaze plan - out of scope for the zero-cost design.
+
+## Rate limiting and quota
+
+There is no application server, so true server-side rate limiting is not available without
+Cloud Functions (Blaze) or Firebase App Check. The current controls:
+
+- **Client-side throttle (best-effort).** `washstore.js` limits writes to 20 per rolling minute
+  per browser session and counts each envelope's download at most once per session. This stops
+  accidental or casual flooding through the UI. It is **not** a security control - a scripted
+  client that bypasses the UI is unaffected.
+- **Public download counter** remains an unauthenticated `+1`. A determined script could still
+  spend the daily free write quota. Impact is bounded: on the Spark plan, quota exhaustion just
+  pauses writes until the next day (no bill, no data loss), and the counter is a vanity metric.
+
+For real server-side protection against scripted abuse, enable
+[Firebase App Check](https://firebase.google.com/docs/app-check) (reCAPTCHA provider for the web
+app). Note that enforcing App Check will block the anonymous Python read client unless it is
+given a debug/exempt token, so enable enforcement deliberately. Also set a Firestore usage
+budget alert in the Google Cloud console so you are notified of unusual traffic.
 
 ## Operator hardening checklist
 
