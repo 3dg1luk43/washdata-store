@@ -446,7 +446,7 @@ function buildProfileRow(p) {
   const dev = String(p.deviceId || '').split('__').slice(1).join(' ').trim() || p.deviceId || '-';
   tr.innerHTML = `
     <td>${esc(p.program || '')}</td>
-    <td class="text-muted truncate" title="${esc(p.deviceId || '')}">${esc(truncate(dev, 24))}</td>
+    <td class="text-muted">${esc(dev)}</td>
     <td><span class="badge badge-${esc(p.status)}">${esc(p.status)}</span></td>
     <td class="text-muted" style="font-size:.75rem">${esc(p.createdByName || '-')}</td>
     <td><div class="action-cell"></div></td>`;

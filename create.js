@@ -6,7 +6,7 @@ import firebaseConfig from './config.js';
 import { MAINTENANCE } from './site-config.js';
 import {
   init, onAuth, signIn, signOutUser, isAdmin, ensureUserProfile,
-  createDevice, createBrand, listBrands, applianceLabel, confirmThresholdValue,
+  createDevice, createBrand, createProfile, listBrands, applianceLabel, confirmThresholdValue,
   getSiteConfig,
 } from './washstore.js';
 
@@ -14,10 +14,11 @@ init(firebaseConfig);
 
 const params = new URLSearchParams(location.search);
 const PREFILL = {
-  mode: params.get('mode') || 'device',   // 'device' (appliance) | 'brand'
+  mode: params.get('mode') || 'device',   // 'device' (appliance) | 'brand' | 'profile'
   type: params.get('type') || '',
   brand: params.get('brand') || '',
   model: params.get('model') || '',
+  device: params.get('device') || '',     // deviceId, for mode=profile
 };
 const OPENER_ORIGIN = params.get('origin') || '';
 
@@ -115,7 +116,15 @@ function switchTab(name) {
 document.querySelectorAll('[data-ctab]').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.ctab)));
 
 // Preselect the tab from ?mode= so entry points can deep-link straight to brand.
+// Profile creation is device-scoped (opened from the integration), so it hides the
+// appliance/brand tabs and shows only the profile form.
 if (PREFILL.mode === 'brand') switchTab('brand');
+else if (PREFILL.mode === 'profile') {
+  switchTab('profile');
+  const tabs = document.querySelector('.tabs'); if (tabs) tabs.hidden = true;
+  const appliance = `${PREFILL.brand} ${PREFILL.model}`.trim();
+  $('prof-device').value = appliance || PREFILL.device || '(this appliance)';
+}
 
 if (['washer', 'dryer', 'dishwasher', 'washer_dryer'].includes(PREFILL.type)) $('dev-type').value = PREFILL.type;
 if (PREFILL.brand) $('dev-brand').value = PREFILL.brand;
@@ -155,28 +164,54 @@ $('brand-form').addEventListener('submit', async (ev) => {
     await createBrand({ brand, showName });
     toast('Brand added - awaiting approval');
     await showResult({ kind: 'brand', brand });
+    if (CAN_POST_BACK) window.opener.postMessage({ type: 'washdata-brand-created', brand, status: 'pending' }, OPENER_ORIGIN);
     // Refresh the appliance-form autocomplete so the new brand is pickable.
     _brandsLoaded = false; loadBrandOptions();
   } catch (e) { toast(e.message, 'error'); } finally { btn.disabled = false; }
 });
 
+// ---------------------------------------------------------------- submit: profile
+$('profile-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  if (!_user) { toast('Sign in to contribute', 'error'); return; }
+  const program = $('prof-name').value.trim();
+  const description = $('prof-desc').value.trim();
+  const btn = $('prof-submit'); btn.disabled = true;
+  try {
+    await createProfile({ deviceId: PREFILL.device, program, description });
+    toast('Profile added - awaiting approval');
+    await showResult({ kind: 'profile', program });
+    if (CAN_POST_BACK) window.opener.postMessage({ type: 'washdata-profile-created', deviceId: PREFILL.device, program, status: 'pending' }, OPENER_ORIGIN);
+  } catch (e) { toast(e.message, 'error'); } finally { btn.disabled = false; }
+});
+
 async function showResult(res) {
   const box = $('create-result');
-  let threshold = 5;
-  try { threshold = await confirmThresholdValue(); } catch (_) {}
-  const title = res.kind === 'device'
-    ? `${esc(res.brand)} ${esc(res.model)} added`
-    : `${esc(res.brand)} added`;
-  const sub = res.kind === 'device'
-    ? `${esc(applianceLabel(res.applianceType))} &middot; awaiting approval (0 of ${threshold} confirmations)`
-    : 'Brand awaiting approval';
+  let title;
+  let sub;
+  let note;
+  if (res.kind === 'device') {
+    let threshold = 5;
+    try { threshold = await confirmThresholdValue(); } catch (_) {}
+    title = `${esc(res.brand)} ${esc(res.model)} added`;
+    sub = `${esc(applianceLabel(res.applianceType))} &middot; awaiting approval (0 of ${threshold} confirmations)`;
+    note = `It is already visible and searchable with an "awaiting approval" tag, and becomes approved once ${threshold} signed-in users confirm it.`;
+  } else if (res.kind === 'brand') {
+    title = `${esc(res.brand)} added`;
+    sub = 'Brand awaiting approval';
+    note = 'It is visible with an "awaiting approval" tag until an admin approves it.';
+  } else {
+    title = `${esc(res.program)} added`;
+    sub = 'Profile awaiting approval';
+    note = 'It is visible with an "awaiting approval" tag until an admin approves it.';
+  }
   const backHint = CAN_POST_BACK
     ? `<div class="text-muted" style="font-size:.8125rem;margin-top:.5rem">You can return to Home Assistant - it will be selected automatically.</div>
        <div class="btn-row"><button class="btn btn-primary btn-sm" id="result-close">Close this window</button></div>`
     : `<div class="btn-row"><a class="btn btn-ghost btn-sm" href="index.html">Back to browse</a></div>`;
   box.innerHTML = `<div class="result-title">${title}</div>
     <div class="text-muted" style="font-size:.875rem">${sub}</div>
-    <div class="text-muted" style="font-size:.8125rem;margin-top:.5rem">It is already visible and searchable with an "awaiting approval" tag. It becomes approved once ${threshold} signed-in users confirm it.</div>
+    <div class="text-muted" style="font-size:.8125rem;margin-top:.5rem">${note}</div>
     ${backHint}`;
   box.removeAttribute('hidden');
   const closeBtn = $('result-close');

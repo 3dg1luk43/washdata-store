@@ -109,6 +109,26 @@
           </div>
         </form>
 
+        <!-- Add profile (device-scoped; opened with ?mode=profile&device=... from the integration) -->
+        <form class="contribute-card" id="profile-form" data-cpanel="profile" hidden>
+          <div class="form-group">
+            <label for="prof-device">Appliance</label>
+            <input type="text" id="prof-device" autocomplete="off" disabled>
+          </div>
+          <div class="form-group">
+            <label for="prof-name">Profile name</label>
+            <input type="text" id="prof-name" maxlength="60" placeholder="e.g. Cotton 40" autocomplete="off" required>
+            <div class="form-hint">The program / cycle name, as shown on the appliance (e.g. "Eco 50", "Cottons 60").</div>
+          </div>
+          <div class="form-group">
+            <label for="prof-desc">Description <span class="text-muted">(optional)</span></label>
+            <textarea id="prof-desc" rows="2"></textarea>
+          </div>
+          <div class="btn-row">
+            <button type="submit" class="btn btn-primary" id="prof-submit">Add profile</button>
+          </div>
+        </form>
+
         <div id="create-result" class="contribute-result" hidden></div>
       </div>
     </main>
