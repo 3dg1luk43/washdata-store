@@ -781,10 +781,12 @@ export async function adminDeleteComment(cycleId, commentId) {
 }
 
 export async function adminGetStats() {
-  const st = (s) => restCount('cycles', [{ field: 'status', op: 'EQUAL', value: s }], { auth: true });
-  const [pending, approved, rejected, removed, bannedUsers] = await Promise.all([
-    st('pending'), st('approved'), st('rejected'), st('removed'),
+  const c = (coll, s) => restCount(coll, [{ field: 'status', op: 'EQUAL', value: s }], { auth: true });
+  const [pb, pd, pp, pc, approved, rejected, removed, bannedUsers] = await Promise.all([
+    // "Pending review" spans the whole catalog, not just cycles.
+    c('brands', 'pending'), c('devices', 'pending'), c('profiles', 'pending'), c('cycles', 'pending'),
+    c('cycles', 'approved'), c('cycles', 'rejected'), c('cycles', 'removed'),
     restCount('users', [{ field: 'banned', op: 'EQUAL', value: true }], { auth: true }),
   ]);
-  return { pending, approved, rejected, removed, bannedUsers };
+  return { pending: pb + pd + pp + pc, approved, rejected, removed, bannedUsers };
 }

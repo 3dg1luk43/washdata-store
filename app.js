@@ -206,10 +206,16 @@ async function loadBrands(reset = false) {
 
 // Awaiting-approval badge with the live confirm progress (pending only).
 function statusBadge(rec) {
-  if (rec && rec.status === 'pending') {
-    const c = rec.confirmCount || 0;
-    return `<span class="badge badge-pending">Awaiting approval &middot; ${c}/${_confirmThreshold}</span>`;
+  if (!rec) return '';
+  if (rec.status === 'pending') {
+    // Only devices auto-promote via confirmations, so only they show the N/threshold
+    // progress. Brands/profiles are admin-approved -> just "awaiting approval".
+    const label = (typeof rec.confirmCount === 'number')
+      ? `Awaiting approval &middot; ${rec.confirmCount}/${_confirmThreshold}`
+      : 'Awaiting approval';
+    return `<span class="badge badge-pending">${label}</span>`;
   }
+  if (rec.status === 'approved') return `<span class="badge badge-approved">Approved</span>`;
   return '';
 }
 function addApplianceCTA(brand) {
