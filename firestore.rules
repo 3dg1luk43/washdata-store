@@ -53,7 +53,6 @@ service cloud.firestore {
         && request.resource.data.brand_lc == request.resource.data.brand.lower()
         && request.resource.data.model_lc == request.resource.data.model.lower()
         && request.resource.data.favoriteCount == 0
-        && request.resource.data.profileCount == 0
         && request.resource.data.confirmCount == 0
         && optUrl(request.resource.data.get('manualUrl', null))
         && optName(request.resource.data.get('createdByName', null))
@@ -63,12 +62,8 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['favoriteCount'])
         && (request.resource.data.favoriteCount == resource.data.favoriteCount + 1
             || request.resource.data.favoriteCount == resource.data.favoriteCount - 1);
-      // profileCount display counter: any GitHub user may nudge it by exactly +/-1
-      // (bumped when a profile is added under this device).
-      allow update: if isGithubUser()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['profileCount'])
-        && (request.resource.data.profileCount == resource.data.profileCount + 1
-            || request.resource.data.profileCount == resource.data.profileCount - 1);
+      // NB: profileCount is no longer stored -- the browse count is CALCULATED via a
+      // COUNT aggregation over this device's approved+pending profiles (client side).
       // Honest confirm-count bump: +1 on confirmCount ONLY when the same batch creates
       // this user's confirmation doc that did not already exist. One per uid, un-gameable.
       allow update: if isGithubUser()
@@ -116,14 +111,9 @@ service cloud.firestore {
         && request.resource.data.deviceId is string
         && strLen(request.resource.data.program, 60)
         && request.resource.data.program_lc == request.resource.data.program.lower()
-        && request.resource.data.cycleCount == 0
         && request.resource.data.createdAt == request.time;
-      // cycleCount display counter: any GitHub user may nudge it by exactly +/-1
-      // (bumped when a cycle is uploaded to this profile).
-      allow update: if isGithubUser()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cycleCount'])
-        && (request.resource.data.cycleCount == resource.data.cycleCount + 1
-            || request.resource.data.cycleCount == resource.data.cycleCount - 1);
+      // NB: cycleCount is no longer stored -- the browse count is CALCULATED via a
+      // COUNT aggregation over this profile's approved+pending cycles (client side).
       allow update: if isAdmin();
       allow delete: if isAdmin();
     }

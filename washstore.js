@@ -194,7 +194,6 @@ export async function ensureDevice({ applianceType, brand, model, manualUrl = nu
       createdByName: createdByName || null,
       manualUrl: manualUrl || null,
       createdAt: serverTimestamp(),
-      profileCount: 0,
       favoriteCount: 0,
       confirmCount: 0,
     });
@@ -348,10 +347,10 @@ export async function ensureProfile({ deviceId, program, description = '' }) {
       status: 'pending',
       createdByUid: user.uid,
       createdAt: serverTimestamp(),
-      cycleCount: 0,
     });
-    // Bump the device's profileCount for the browse count (best-effort, new only).
-    try { await updateDoc(doc(_db, 'devices', deviceId), { profileCount: increment(1) }); } catch (_) {}
+    // Counts (profiles per device, cycles per profile) are CALCULATED on read via
+    // countVisibleProfiles/countVisibleCycles -- never a stored running total, which
+    // silently drifted to 0 when a best-effort increment was denied by rules.
   }
   return id;
 }
@@ -568,9 +567,26 @@ export async function uploadReferenceCycle(meta, tracePoints, stats, qc = 3) {
   }
 
   const ref = await addDoc(collection(_db, 'cycles'), docData);
-  // Bump the profile's cycleCount so the browse count reflects reality (best-effort).
-  try { await updateDoc(doc(_db, 'profiles', profId), { cycleCount: increment(1) }); } catch (_) {}
   return ref.id;
+}
+
+// Calculated counts (not stored running totals). Both the approved and the
+// still-pending docs are visible in browse, so the honest count sums the two.
+// Uses the same (field, status) composite index the browse queries already rely on.
+export async function countVisibleCycles(profileId) {
+  const [a, p] = await Promise.all([
+    restCount('cycles', [{ field: 'profileId', op: 'EQUAL', value: profileId }, { field: 'status', op: 'EQUAL', value: 'approved' }]),
+    restCount('cycles', [{ field: 'profileId', op: 'EQUAL', value: profileId }, { field: 'status', op: 'EQUAL', value: 'pending' }]),
+  ]);
+  return (a || 0) + (p || 0);
+}
+
+export async function countVisibleProfiles(deviceId) {
+  const [a, p] = await Promise.all([
+    restCount('profiles', [{ field: 'deviceId', op: 'EQUAL', value: deviceId }, { field: 'status', op: 'EQUAL', value: 'approved' }]),
+    restCount('profiles', [{ field: 'deviceId', op: 'EQUAL', value: deviceId }, { field: 'status', op: 'EQUAL', value: 'pending' }]),
+  ]);
+  return (a || 0) + (p || 0);
 }
 
 export async function getReferenceCycles(profileId, { pageSize = 24, cursor = null, includePending = false } = {}) {

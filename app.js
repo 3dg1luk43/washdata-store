@@ -7,7 +7,7 @@ import {
   addComment, listComments, deleteComment,
   submitRating, getUserRating, getRatingSummary,
   confirmDevice, rateDevice, getDeviceQuality, getUserDeviceRating, hasConfirmedDevice,
-  confirmCycle, hasConfirmedCycle,
+  confirmCycle, hasConfirmedCycle, countVisibleCycles, countVisibleProfiles,
   applianceLabel, confirmThresholdValue,
   saveAsFile, getSiteConfig,
 } from './washstore.js';
@@ -343,7 +343,7 @@ function buildDeviceCard(d) {
       <div class="card-title">${esc(d.brand)} ${esc(modelOf(d))}</div>
       <div class="card-badges">
         ${statusBadge(d)}
-        ${d.profileCount ? `<span class="badge">${d.profileCount} profile${d.profileCount > 1 ? 's' : ''}</span>` : ''}
+        <span class="badge" data-pcount hidden></span>
       </div>
       <div class="card-meta"><span>&#11088; ${d.favoriteCount || 0}</span><span>by ${esc(d.createdByName || 'Anonymous')}</span>${manual}</div>
       <div class="card-community" data-community></div>
@@ -355,6 +355,11 @@ function buildDeviceCard(d) {
   el.querySelector('[data-open]').addEventListener('click', () => openDevice(d));
   el.querySelector('[data-star]').addEventListener('click', (ev) => toggleStar(ev.currentTarget, d));
   renderDeviceCommunity(el.querySelector('[data-community]'), d);
+  // Profile count is calculated (approved + pending), not a stored total.
+  countVisibleProfiles(d.id).then((n) => {
+    const badge = el.querySelector('[data-pcount]');
+    if (badge && n > 0) { badge.textContent = `${n} profile${n > 1 ? 's' : ''}`; badge.hidden = false; }
+  }).catch(() => {});
   return el;
 }
 
@@ -461,8 +466,16 @@ function buildProfileRow(p) {
   const el = document.createElement('button');
   el.className = 'profile-row';
   el.innerHTML = `<span class="profile-name">${esc(p.program)}${statusBadge(p)}</span>
-    <span class="profile-meta">${p.cycleCount || 0} cycle${p.cycleCount === 1 ? '' : 's'} &rsaquo;</span>`;
+    <span class="profile-meta" data-count>&hellip; &rsaquo;</span>`;
   el.addEventListener('click', () => openProfile(p));
+  // Count is calculated (approved + pending), not a stored total; fill in on arrival.
+  countVisibleCycles(p.id).then((n) => {
+    const meta = el.querySelector('[data-count]');
+    if (meta) meta.innerHTML = `${n} cycle${n === 1 ? '' : 's'} &rsaquo;`;
+  }).catch(() => {
+    const meta = el.querySelector('[data-count]');
+    if (meta) meta.innerHTML = '&rsaquo;';
+  });
   return el;
 }
 
@@ -515,10 +528,12 @@ function buildCycleCard(c) {
   const el = document.createElement('div');
   el.className = 'card';
   const st = c.stats || {};
+  const badge = statusBadge(c);
   el.innerHTML = `
     <div class="card-sparkline">${sparklineSVG(c, 160, 48)}</div>
     <div class="card-body">
-      <div class="card-title">${esc(_profile ? _profile.program : c.program_lc)}${statusBadge(c)}</div>
+      <div class="card-title">${esc(_profile ? _profile.program : c.program_lc)}</div>
+      ${badge ? `<div class="card-badges">${badge}</div>` : ''}
       <div class="card-subtitle mono-data">${formatDuration(st.duration)} &middot; ${st.energy_wh != null ? (st.energy_wh / 1000).toFixed(2) + ' kWh' : '-'}</div>
       <div class="card-meta"><span>by ${esc(c.uploaderName || 'Anonymous')}</span><span>&middot; ${c.downloads || 0} dl</span></div>
       <div class="card-community" data-community></div>
@@ -550,7 +565,7 @@ function renderCycleCommunity(box, c) {
       const res = await confirmCycle(c.id);
       c.confirmCount = res.confirmCount; c.status = res.status;
       btn.textContent = 'You confirmed this';
-      const badges = box.closest('.card') ? box.closest('.card').querySelector('.card-title .badge-pending') : null;
+      const badges = box.closest('.card') ? box.closest('.card').querySelector('.badge-pending') : null;
       const msg = box.querySelector('[data-msg]');
       if (res.status === 'approved') { if (badges) badges.remove(); if (msg) msg.textContent = 'Approved by the community'; }
       else if (msg) msg.textContent = `${res.confirmCount}/${_confirmThreshold} confirmations`;
