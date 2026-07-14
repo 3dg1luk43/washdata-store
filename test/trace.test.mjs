@@ -1,0 +1,40 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { downsampleCycle, parseCycle, cycleStats } from '../lib/trace.js';
+
+test('downsampleCycle caps to max points, keeps short traces intact', () => {
+  const short = [[0, 1], [1, 2]];
+  assert.equal(downsampleCycle(short, 3000), short);
+  const long = Array.from({ length: 10000 }, (_, i) => [i, i]);
+  assert.equal(downsampleCycle(long, 3000).length, 3000);
+});
+
+test('parseCycle handles JSON array of pairs', () => {
+  assert.deepEqual(parseCycle('[[0,1],[5,100]]'), [[0, 1], [5, 100]]);
+});
+
+test('parseCycle handles CSV with header comment lines skipped', () => {
+  assert.deepEqual(parseCycle('# t,w\n0,1\n5,100'), [[0, 1], [5, 100]]);
+});
+
+test('parseCycle handles {times,values} object form', () => {
+  assert.deepEqual(parseCycle('{"times":[0,5],"values":[1,100]}'), [[0, 1], [5, 100]]);
+});
+
+test('parseCycle throws on empty input', () => {
+  assert.throws(() => parseCycle(''));
+});
+
+test('cycleStats integrates energy (Wh) via trapezoid and reports duration/peak/mean', () => {
+  // Constant 3600 W for 3600 s = 3600 Wh.
+  const pts = [[0, 3600], [1800, 3600], [3600, 3600]];
+  const s = cycleStats(pts);
+  assert.equal(s.duration, 3600);
+  assert.equal(s.energy_wh, 3600);
+  assert.equal(s.peak_w, 3600);
+  assert.equal(s.mean_w, 3600);
+});
+
+test('cycleStats returns zeros for degenerate input', () => {
+  assert.deepEqual(cycleStats([[0, 5]]), { duration: 0, energy_wh: 0, peak_w: 0, mean_w: 0 });
+});

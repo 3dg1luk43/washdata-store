@@ -29,20 +29,19 @@ import {
   count,
   writeBatch,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
+import { deviceId as mkDeviceId, profileId as mkProfileId } from './lib/ids.js';
+import { downsampleCycle, parseCycle, cycleStats } from './lib/trace.js';
 
-export const STORE_SCHEMA_VERSION = 1;
-export const ENVELOPE_SCHEMA_VERSION = 1;
-export const ENVELOPE_SCHEMA_VERSIONS = {
-  1: { fields: ['avg', 'min', 'max', 'target_duration', 'avg_energy', 'duration_std_dev', 'cycle_count'] },
-};
+export { downsampleCycle, parseCycle, cycleStats };
 
-let _app = null;
-let _auth = null;
-let _db = null;
+export const STORE_SCHEMA_VERSION = 2;
+export const CYCLE_SCHEMA_VERSION = 1;
 
 // Client size cap. Firestore hard-caps a document at 1 MiB server-side; this is a
 // friendlier client-side gate well below that so uploads fail early with a clear message.
 export const MAX_DOC_BYTES = 900 * 1024;
+
+const APPLIANCE_TYPES = ['washer', 'dryer', 'dishwasher', 'washer_dryer'];
 
 // Best-effort in-memory write rate limit. This is NOT a security control (a scripted
 // client bypasses it); it stops accidental/casual flooding through the UI. Real
@@ -60,6 +59,10 @@ function _rateGuard() {
   }
   _writeTimes.push(now);
 }
+
+let _app = null;
+let _auth = null;
+let _db = null;
 
 export function init(config) {
   _app = initializeApp(config);
@@ -104,73 +107,22 @@ export async function ensureUserProfile(user) {
       lastSeen: now,
       banned: false,
       banReason: null,
+      favorites: [],
     }, { merge: true });
   } else {
     await updateDoc(ref, { lastSeen: now });
   }
 }
 
-export function downsampleCycle(points, max = 3000) {
-  if (!Array.isArray(points) || points.length <= max) return points;
-  const step = points.length / max;
-  const result = [];
-  for (let i = 0; i < max; i++) {
-    result.push(points[Math.floor(i * step)]);
-  }
-  return result;
-}
-
-export function parseCycle(text) {
-  if (!text || !text.trim()) throw new Error('Empty input');
-  const trimmed = text.trim();
-
-  // Try JSON first
-  if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
-    const parsed = JSON.parse(trimmed);
-    if (Array.isArray(parsed)) {
-      // Array of [t,v] pairs or array of objects
-      if (parsed.length === 0) throw new Error('Empty array');
-      if (Array.isArray(parsed[0])) return parsed;
-      // Array of {t, v} or {time, value} objects
-      return parsed.map((p) => {
-        const t = p.t ?? p.time ?? p.x ?? 0;
-        const v = p.v ?? p.value ?? p.y ?? p.power ?? 0;
-        return [t, v];
-      });
-    }
-    if (typeof parsed === 'object' && parsed !== null) {
-      // {times: [...], values: [...]} or similar
-      const times = parsed.times ?? parsed.t ?? parsed.x ?? [];
-      const values = parsed.values ?? parsed.v ?? parsed.y ?? parsed.power ?? [];
-      if (!Array.isArray(times) || !Array.isArray(values)) {
-        throw new Error('Unrecognised object structure');
-      }
-      return times.map((t, i) => [t, values[i] ?? 0]);
-    }
-    throw new Error('Unrecognised JSON structure');
-  }
-
-  // CSV/TSV
-  const lines = trimmed.split(/\r?\n/).filter((l) => l.trim() && !l.trim().startsWith('#'));
-  if (lines.length === 0) throw new Error('No data rows');
-  const sep = lines[0].includes('\t') ? '\t' : ',';
-  const result = [];
-  for (const line of lines) {
-    const parts = line.split(sep).map((s) => s.trim());
-    if (parts.length < 2) continue;
-    const t = parseFloat(parts[0]);
-    const v = parseFloat(parts[1]);
-    if (isNaN(t) || isNaN(v)) continue;
-    result.push([t, v]);
-  }
-  if (result.length === 0) throw new Error('No valid numeric rows found');
-  return result;
-}
+// ------------------------------------------------------------------
+// Helpers (downsampleCycle / parseCycle / cycleStats imported from lib/trace.js above)
+// ------------------------------------------------------------------
 
 export function saveAsFile(record) {
-  const brand = (record.brand_lc || record.brand || 'unknown').replace(/\s+/g, '_');
-  const model = (record.model_lc || record.model || 'unknown').replace(/\s+/g, '_');
-  const program = (record.program || 'unknown').replace(/\s+/g, '_');
+  const parts = String(record.deviceId || '').split('__');
+  const brand = (record.brand_lc || parts[1] || 'unknown').replace(/[^a-z0-9]+/gi, '-');
+  const model = (parts[2] || 'unknown').replace(/[^a-z0-9]+/gi, '-');
+  const program = (record.program_lc || 'unknown').replace(/[^a-z0-9]+/gi, '-');
   const filename = `${brand}_${model}_${program}.json`;
   const blob = new Blob([JSON.stringify(record, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -185,130 +137,215 @@ function _estimateDocSize(data) {
   return new Blob([JSON.stringify(data)]).size;
 }
 
-export async function uploadEnvelope(meta, envelope, cyclePoints = null) {
+// ------------------------------------------------------------------
+// Devices / profiles
+// ------------------------------------------------------------------
+
+export async function ensureDevice({ applianceType, brand, model }) {
+  const id = mkDeviceId(applianceType, brand, model);
+  const ref = doc(_db, 'devices', id);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) {
+    const user = _auth.currentUser;
+    if (!user) throw new Error('Not signed in');
+    await setDoc(ref, {
+      applianceType,
+      brand,
+      brand_lc: brand.toLowerCase(),
+      model,
+      model_lc: model.toLowerCase(),
+      status: 'pending',
+      createdByUid: user.uid,
+      createdAt: serverTimestamp(),
+      profileCount: 0,
+      favoriteCount: 0,
+    });
+  }
+  return id;
+}
+
+export async function ensureProfile({ deviceId, program, description = '' }) {
+  const id = mkProfileId(deviceId, program);
+  const ref = doc(_db, 'profiles', id);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) {
+    const user = _auth.currentUser;
+    if (!user) throw new Error('Not signed in');
+    await setDoc(ref, {
+      deviceId,
+      applianceType: deviceId.split('__')[0],
+      program,
+      program_lc: program.toLowerCase(),
+      description,
+      status: 'pending',
+      createdByUid: user.uid,
+      createdAt: serverTimestamp(),
+      cycleCount: 0,
+    });
+  }
+  return id;
+}
+
+export async function getDevice(id) {
+  const snap = await getDoc(doc(_db, 'devices', id));
+  if (!snap.exists()) throw new Error('Device not found');
+  return { id: snap.id, ...snap.data() };
+}
+
+export async function searchDevices({ applianceType = null, brand = null, favoritesOnly = false, pageSize = 24, cursor = null } = {}) {
+  if (favoritesOnly) {
+    const favs = await getFavorites();
+    const items = [];
+    for (const id of favs.slice(0, pageSize)) {
+      const s = await getDoc(doc(_db, 'devices', id));
+      if (s.exists()) items.push({ id: s.id, ...s.data() });
+    }
+    return { items, cursor: null };
+  }
+  const cons = [where('status', '==', 'approved')];
+  if (applianceType) cons.push(where('applianceType', '==', applianceType));
+  if (brand) cons.push(where('brand_lc', '==', brand.toLowerCase()));
+  cons.push(orderBy('favoriteCount', 'desc'), limit(pageSize));
+  if (cursor) cons.push(startAfter(cursor));
+  const snap = await getDocs(query(collection(_db, 'devices'), ...cons));
+  const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  return { items, cursor: snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null };
+}
+
+export async function getProfiles(deviceId) {
+  const snap = await getDocs(query(
+    collection(_db, 'profiles'),
+    where('deviceId', '==', deviceId),
+    where('status', '==', 'approved'),
+    orderBy('createdAt', 'desc'),
+  ));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+export async function favoriteDevice(id, on) {
+  const user = _auth.currentUser;
+  if (!user) throw new Error('Not signed in');
+  const ref = doc(_db, 'users', user.uid);
+  const snap = await getDoc(ref);
+  const favs = new Set((snap.exists() && snap.data().favorites) || []);
+  if (on) favs.add(id); else favs.delete(id);
+  await updateDoc(ref, { favorites: [...favs] });
+}
+
+export async function getFavorites() {
+  const user = _auth.currentUser;
+  if (!user) return [];
+  const s = await getDoc(doc(_db, 'users', user.uid));
+  return (s.exists() && s.data().favorites) || [];
+}
+
+// ------------------------------------------------------------------
+// Reference cycles
+// ------------------------------------------------------------------
+
+// meta: { applianceType, brand, model, program, sampleIntervalSec, description? }
+// tracePoints: [[offset_s, watts], ...]; stats: { duration, energy_wh, peak_w, mean_w, signature? }
+// qc: obfuscated provenance code 1-3 (set by the integration; website uploads pass 3).
+export async function uploadReferenceCycle(meta, tracePoints, stats, qc = 3) {
   const user = _auth.currentUser;
   if (!user) throw new Error('Not signed in');
   _rateGuard();
 
-  const {
-    applianceType,
-    brand,
-    model,
-    program,
-    sensor = '',
-    metric = 'power_w',
-    sampleIntervalSec,
-    notes = null,
-    envelopeSchemaVersion = ENVELOPE_SCHEMA_VERSION,
-  } = meta;
-
+  const { applianceType, brand, model, program, sampleIntervalSec, description = '' } = meta;
   if (!applianceType || !brand || !model || !program || !sampleIntervalSec) {
     throw new Error('Missing required fields');
   }
-  if (!['washer', 'dryer', 'dishwasher', 'washer_dryer'].includes(applianceType)) {
-    throw new Error('Invalid applianceType');
-  }
-  if (typeof brand !== 'string' || brand.length < 1 || brand.length > 40) {
-    throw new Error('brand must be 1-40 chars');
-  }
-  if (typeof model !== 'string' || model.length < 1 || model.length > 60) {
-    throw new Error('model must be 1-60 chars');
-  }
-  if (typeof program !== 'string' || program.length < 1 || program.length > 60) {
-    throw new Error('program must be 1-60 chars');
-  }
-  if (notes !== null && (typeof notes !== 'string' || notes.length > 500)) {
-    throw new Error('notes must be null or string <= 500 chars');
-  }
+  if (!APPLIANCE_TYPES.includes(applianceType)) throw new Error('Invalid applianceType');
+  if (typeof brand !== 'string' || brand.length < 1 || brand.length > 40) throw new Error('brand must be 1-40 chars');
+  if (typeof model !== 'string' || model.length < 1 || model.length > 60) throw new Error('model must be 1-60 chars');
+  if (typeof program !== 'string' || program.length < 1 || program.length > 60) throw new Error('program must be 1-60 chars');
   if (typeof sampleIntervalSec !== 'number' || sampleIntervalSec <= 0 || sampleIntervalSec > 3600) {
-    throw new Error('sampleIntervalSec must be number in (0, 3600]');
+    throw new Error('sampleIntervalSec must be a number in (0, 3600]');
   }
-  if (!envelope || typeof envelope !== 'object') {
-    throw new Error('envelope must be a map');
-  }
+  if (!Array.isArray(tracePoints) || tracePoints.length < 2) throw new Error('Trace must have at least 2 points');
 
-  const cycleField = cyclePoints != null
-    ? { points: downsampleCycle(cyclePoints) }
-    : null;
+  const devId = await ensureDevice({ applianceType, brand, model });
+  const profId = await ensureProfile({ deviceId: devId, program, description });
+  const points = downsampleCycle(tracePoints, 3000);
+  const qcCode = (qc >= 1 && qc <= 3) ? qc : 3;
 
   const docData = {
-    schemaVersion: STORE_SCHEMA_VERSION,
-    envelopeSchemaVersion,
+    profileId: profId,
+    deviceId: devId,
+    brand_lc: brand.toLowerCase(),
+    program_lc: program.toLowerCase(),
+    applianceType,
     uploaderUid: user.uid,
     uploaderName: user.displayName || null,
-    applianceType,
-    brand,
-    brand_lc: brand.toLowerCase(),
-    model,
-    model_lc: model.toLowerCase(),
-    program,
-    sensor,
-    metric,
-    sampleIntervalSec,
-    notes: notes ?? null,
-    envelope,
-    cycle: cycleField,
     status: 'pending',
+    rejectionReason: null,
+    trace: { points, sampleIntervalSec },
+    stats: stats && typeof stats === 'object' ? stats : cycleStats(points),
+    cycleSchemaVersion: CYCLE_SCHEMA_VERSION,
     downloads: 0,
     commentCount: 0,
+    qc: qcCode,
     createdAt: serverTimestamp(),
   };
 
   if (_estimateDocSize(docData) > MAX_DOC_BYTES) {
-    throw new Error(`Document exceeds the ${Math.round(MAX_DOC_BYTES / 1024)}KB size limit. Upload without the raw cycle, or downsample it further.`);
+    throw new Error(`Cycle exceeds the ${Math.round(MAX_DOC_BYTES / 1024)}KB size limit. Downsample the trace further.`);
   }
 
-  const ref = await addDoc(collection(_db, 'envelopes'), docData);
+  const ref = await addDoc(collection(_db, 'cycles'), docData);
   return ref.id;
 }
 
-export async function listEnvelopes({ applianceType = null, brand = null, mine = false, pageSize = 24, cursor = null } = {}) {
-  const constraints = [];
-
-  if (mine) {
-    const user = _auth.currentUser;
-    if (!user) throw new Error('Not signed in');
-    constraints.push(where('uploaderUid', '==', user.uid));
-  } else {
-    constraints.push(where('status', '==', 'approved'));
-    if (applianceType) constraints.push(where('applianceType', '==', applianceType));
-    if (brand) constraints.push(where('brand_lc', '==', brand.toLowerCase()));
-  }
-
-  constraints.push(orderBy('createdAt', 'desc'));
-  constraints.push(limit(pageSize));
-
-  if (cursor) constraints.push(startAfter(cursor));
-
-  const q = query(collection(_db, 'envelopes'), ...constraints);
-  const snap = await getDocs(q);
+export async function getReferenceCycles(profileId, { pageSize = 24, cursor = null } = {}) {
+  const cons = [
+    where('profileId', '==', profileId),
+    where('status', '==', 'approved'),
+    orderBy('createdAt', 'desc'),
+    limit(pageSize),
+  ];
+  if (cursor) cons.push(startAfter(cursor));
+  const snap = await getDocs(query(collection(_db, 'cycles'), ...cons));
   const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  const nextCursor = snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null;
-  return { items, cursor: nextCursor };
+  return { items, cursor: snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null };
 }
 
-export async function getEnvelope(id) {
-  const snap = await getDoc(doc(_db, 'envelopes', id));
-  if (!snap.exists()) throw new Error('Envelope not found');
+// A signed-in user's own uploaded cycles (any status).
+export async function myCycles({ pageSize = 24, cursor = null } = {}) {
+  const user = _auth.currentUser;
+  if (!user) throw new Error('Not signed in');
+  const cons = [where('uploaderUid', '==', user.uid), orderBy('createdAt', 'desc'), limit(pageSize)];
+  if (cursor) cons.push(startAfter(cursor));
+  const snap = await getDocs(query(collection(_db, 'cycles'), ...cons));
+  const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  return { items, cursor: snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null };
+}
+
+export async function getCycle(id) {
+  const snap = await getDoc(doc(_db, 'cycles', id));
+  if (!snap.exists()) throw new Error('Cycle not found');
   return { id: snap.id, ...snap.data() };
 }
 
-export async function deleteEnvelope(id) {
-  await deleteDoc(doc(_db, 'envelopes', id));
+export async function deleteCycle(id) {
+  await deleteDoc(doc(_db, 'cycles', id));
 }
 
 export async function bumpDownload(id) {
-  // Count each envelope at most once per browser session to curb accidental inflation.
+  // Count each cycle at most once per browser session to curb accidental inflation.
   if (_bumpedThisSession.has(id)) return;
   _bumpedThisSession.add(id);
   try {
-    await updateDoc(doc(_db, 'envelopes', id), { downloads: increment(1) });
+    await updateDoc(doc(_db, 'cycles', id), { downloads: increment(1) });
   } catch (_) {
     // best-effort
   }
 }
 
-export async function addComment(envelopeId, text, parentId = null) {
+// ------------------------------------------------------------------
+// Comments (cycles/{id}/comments)
+// ------------------------------------------------------------------
+
+export async function addComment(cycleId, text, parentId = null) {
   const user = _auth.currentUser;
   if (!user) throw new Error('Not signed in');
   _rateGuard();
@@ -322,39 +359,39 @@ export async function addComment(envelopeId, text, parentId = null) {
   if (parentId != null) commentData.parentId = parentId;
 
   const batch = writeBatch(_db);
-  const commentRef = doc(collection(_db, 'envelopes', envelopeId, 'comments'));
+  const commentRef = doc(collection(_db, 'cycles', cycleId, 'comments'));
   batch.set(commentRef, commentData);
-  batch.update(doc(_db, 'envelopes', envelopeId), { commentCount: increment(1) });
+  batch.update(doc(_db, 'cycles', cycleId), { commentCount: increment(1) });
   await batch.commit();
   return commentRef.id;
 }
 
-export async function listComments(envelopeId, pageSize = 50) {
-  const constraints = [orderBy('createdAt', 'asc'), limit(pageSize)];
-  const q = query(collection(_db, 'envelopes', envelopeId, 'comments'), ...constraints);
+export async function listComments(cycleId, pageSize = 50) {
+  const q = query(collection(_db, 'cycles', cycleId, 'comments'), orderBy('createdAt', 'asc'), limit(pageSize));
   const snap = await getDocs(q);
   const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
   const nextCursor = snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null;
   return { items, cursor: nextCursor };
 }
 
-export async function deleteComment(envelopeId, commentId) {
+export async function deleteComment(cycleId, commentId) {
   const batch = writeBatch(_db);
-  batch.delete(doc(_db, 'envelopes', envelopeId, 'comments', commentId));
-  batch.update(doc(_db, 'envelopes', envelopeId), { commentCount: increment(-1) });
+  batch.delete(doc(_db, 'cycles', cycleId, 'comments', commentId));
+  batch.update(doc(_db, 'cycles', cycleId), { commentCount: increment(-1) });
   await batch.commit();
 }
 
-export async function submitRating(envelopeId, rating) {
+// ------------------------------------------------------------------
+// Ratings (cycles/{id}/ratings), derived-on-read
+// ------------------------------------------------------------------
+
+export async function submitRating(cycleId, rating) {
   const user = _auth.currentUser;
   if (!user) throw new Error('Not signed in');
   if (![1, 2, 3, 4, 5].includes(rating)) throw new Error('Rating must be 1-5');
   _rateGuard();
 
-  // Each user owns exactly one rating doc (keyed by uid) - the source of truth.
-  // The average is derived on read (see getRatingSummary), never stored client-side,
-  // so it cannot be forged.
-  const ratingRef = doc(_db, 'envelopes', envelopeId, 'ratings', user.uid);
+  const ratingRef = doc(_db, 'cycles', cycleId, 'ratings', user.uid);
   await setDoc(ratingRef, {
     uid: user.uid,
     rating,
@@ -362,18 +399,16 @@ export async function submitRating(envelopeId, rating) {
   }, { merge: true });
 }
 
-export async function getUserRating(envelopeId) {
+export async function getUserRating(cycleId) {
   const user = _auth.currentUser;
   if (!user) return null;
-  const snap = await getDoc(doc(_db, 'envelopes', envelopeId, 'ratings', user.uid));
+  const snap = await getDoc(doc(_db, 'cycles', cycleId, 'ratings', user.uid));
   return snap.exists() ? snap.data().rating : null;
 }
 
-// Authoritative rating summary computed from the ratings subcollection via a single
-// server-side aggregation query (~1 read). Tamper-proof: reflects the actual per-user
-// rating docs, not any denormalized value a client could write.
-export async function getRatingSummary(envelopeId) {
-  const col = collection(_db, 'envelopes', envelopeId, 'ratings');
+// Authoritative rating summary from the ratings subcollection via one aggregation query.
+export async function getRatingSummary(cycleId) {
+  const col = collection(_db, 'cycles', cycleId, 'ratings');
   try {
     const snap = await getAggregateFromServer(col, { avg: average('rating'), cnt: count() });
     const cnt = snap.data().cnt || 0;
@@ -384,42 +419,80 @@ export async function getRatingSummary(envelopeId) {
   }
 }
 
-export async function getRatings(envelopeId) {
-  const snap = await getDocs(collection(_db, 'envelopes', envelopeId, 'ratings'));
-  return snap.docs.map((d) => ({ uid: d.id, ...d.data() }));
-}
+// ------------------------------------------------------------------
+// Admin
+// ------------------------------------------------------------------
 
-// Admin functions
+// Obfuscated provenance mapping - documented ONLY here + in the design spec, never in
+// public docs. Regular store UI never shows this; approved cycles are public-read so it
+// is obscured, not secret.
+const _QC_LABEL = { 1: 'Recording', 2: 'Edited', 3: 'Manual' };
+export function qcLabel(qc) { return _QC_LABEL[qc] || 'Unknown'; }
 
-export async function adminListEnvelopes({ status = null, applianceType = null, pageSize = 24, cursor = null } = {}) {
-  const constraints = [];
-  if (status) constraints.push(where('status', '==', status));
-  if (applianceType) constraints.push(where('applianceType', '==', applianceType));
-  constraints.push(orderBy('createdAt', 'desc'));
-  constraints.push(limit(pageSize));
-  if (cursor) constraints.push(startAfter(cursor));
-
-  const q = query(collection(_db, 'envelopes'), ...constraints);
-  const snap = await getDocs(q);
+export async function adminListCycles({ status = null, applianceType = null, pageSize = 24, cursor = null } = {}) {
+  const cons = [];
+  if (status) cons.push(where('status', '==', status));
+  if (applianceType) cons.push(where('applianceType', '==', applianceType));
+  cons.push(orderBy('createdAt', 'desc'), limit(pageSize));
+  if (cursor) cons.push(startAfter(cursor));
+  const snap = await getDocs(query(collection(_db, 'cycles'), ...cons));
   const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  const nextCursor = snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null;
-  return { items, cursor: nextCursor };
+  return { items, cursor: snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null };
 }
 
-export async function adminUpdateStatus(id, status, reason = null) {
+export async function adminSetCycleStatus(id, status, reason = null) {
   const update = { status };
   if (reason != null) update.rejectionReason = reason;
-  await updateDoc(doc(_db, 'envelopes', id), update);
+  await updateDoc(doc(_db, 'cycles', id), update);
+}
+
+export async function adminListDevices({ status = null, pageSize = 50, cursor = null } = {}) {
+  const cons = [];
+  if (status) cons.push(where('status', '==', status));
+  cons.push(orderBy('favoriteCount', 'desc'), limit(pageSize));
+  if (cursor) cons.push(startAfter(cursor));
+  const snap = await getDocs(query(collection(_db, 'devices'), ...cons));
+  const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  return { items, cursor: snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null };
+}
+
+export async function adminSetDeviceStatus(id, status) {
+  await updateDoc(doc(_db, 'devices', id), { status });
+}
+
+// Reassign fromId's profiles + cycles to toId, then delete the empty source device.
+// Admin-only, rare; kept within a single batch (Firestore 500-op limit - fine for
+// the small clusters near-duplicate devices produce).
+export async function adminMergeDevices(fromId, toId) {
+  if (fromId === toId) throw new Error('Cannot merge a device into itself');
+  const [profSnap, cycSnap] = await Promise.all([
+    getDocs(query(collection(_db, 'profiles'), where('deviceId', '==', fromId))),
+    getDocs(query(collection(_db, 'cycles'), where('deviceId', '==', fromId))),
+  ]);
+  const batch = writeBatch(_db);
+  const remap = {};
+  for (const p of profSnap.docs) {
+    const data = p.data();
+    const newPid = mkProfileId(toId, data.program || '');
+    remap[p.id] = newPid;
+    batch.set(doc(_db, 'profiles', newPid), { ...data, deviceId: toId }, { merge: true });
+    batch.delete(doc(_db, 'profiles', p.id));
+  }
+  for (const c of cycSnap.docs) {
+    const data = c.data();
+    const newPid = remap[data.profileId] || mkProfileId(toId, (data.program_lc || '').replace(/-/g, ' '));
+    batch.update(doc(_db, 'cycles', c.id), { deviceId: toId, profileId: newPid });
+  }
+  batch.delete(doc(_db, 'devices', fromId));
+  await batch.commit();
 }
 
 export async function adminListUsers({ pageSize = 50, cursor = null } = {}) {
-  const constraints = [orderBy('createdAt', 'desc'), limit(pageSize)];
-  if (cursor) constraints.push(startAfter(cursor));
-  const q = query(collection(_db, 'users'), ...constraints);
-  const snap = await getDocs(q);
+  const cons = [orderBy('createdAt', 'desc'), limit(pageSize)];
+  if (cursor) cons.push(startAfter(cursor));
+  const snap = await getDocs(query(collection(_db, 'users'), ...cons));
   const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  const nextCursor = snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null;
-  return { items, cursor: nextCursor };
+  return { items, cursor: snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null };
 }
 
 export async function adminBanUser(uid, reason = '') {
@@ -442,22 +515,20 @@ export async function adminUnbanUser(uid) {
   });
 }
 
-export async function adminDeleteComment(envelopeId, commentId) {
-  await deleteComment(envelopeId, commentId);
+export async function adminDeleteComment(cycleId, commentId) {
+  await deleteComment(cycleId, commentId);
 }
 
 export async function adminGetStats() {
-  const envelopesCol = collection(_db, 'envelopes');
+  const cyclesCol = collection(_db, 'cycles');
   const usersCol = collection(_db, 'users');
-
   const [pending, approved, rejected, removed, bannedUsers] = await Promise.all([
-    getCountFromServer(query(envelopesCol, where('status', '==', 'pending'))),
-    getCountFromServer(query(envelopesCol, where('status', '==', 'approved'))),
-    getCountFromServer(query(envelopesCol, where('status', '==', 'rejected'))),
-    getCountFromServer(query(envelopesCol, where('status', '==', 'removed'))),
+    getCountFromServer(query(cyclesCol, where('status', '==', 'pending'))),
+    getCountFromServer(query(cyclesCol, where('status', '==', 'approved'))),
+    getCountFromServer(query(cyclesCol, where('status', '==', 'rejected'))),
+    getCountFromServer(query(cyclesCol, where('status', '==', 'removed'))),
     getCountFromServer(query(usersCol, where('banned', '==', true))),
   ]);
-
   return {
     pending: pending.data().count,
     approved: approved.data().count,
