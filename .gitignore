@@ -1,0 +1,15 @@
+# Dependencies (not used at runtime - the site loads Firebase from the gstatic CDN)
+node_modules/
+
+# Internal planning / dev notes - not for the public repo
+washdata-store-plan.md
+SETUP.md
+
+# Firebase CLI local state
+.firebase/
+firebase-debug.log
+firestore-debug.log
+
+# OS / editor cruft
+.DS_Store
+*.swp

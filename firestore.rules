@@ -1,0 +1,184 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Contributions require a real GitHub sign-in. Anonymous sessions (used by the
+    // read-only Python client) may browse approved envelopes but cannot write.
+    function isGithubUser() {
+      return isSignedIn() && request.auth.token.firebase.sign_in_provider == 'github.com';
+    }
+
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function isBanned() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('banned', false) == true;
+    }
+
+    // envelopes collection
+    match /envelopes/{docId} {
+
+      function isOwner() {
+        return isSignedIn() && resource.data.uploaderUid == request.auth.uid;
+      }
+
+      allow read: if resource.data.status == 'approved'
+        || (isSignedIn() && resource.data.uploaderUid == request.auth.uid)
+        || isAdmin();
+
+      allow create: if isGithubUser()
+        && !isBanned()
+        && request.resource.data.uploaderUid == request.auth.uid
+        && request.resource.data.downloads == 0
+        && request.resource.data.schemaVersion == 1
+        && request.resource.data.envelopeSchemaVersion is number
+        && request.resource.data.envelopeSchemaVersion >= 1
+        && request.resource.data.envelopeSchemaVersion <= 100
+        && request.resource.data.status == 'pending'
+        && request.resource.data.applianceType in ['washer', 'dryer', 'dishwasher', 'washer_dryer']
+        && request.resource.data.brand is string
+        && request.resource.data.brand.size() >= 1
+        && request.resource.data.brand.size() <= 40
+        && request.resource.data.brand_lc == request.resource.data.brand.lower()
+        && request.resource.data.model is string
+        && request.resource.data.model.size() >= 1
+        && request.resource.data.model.size() <= 60
+        && request.resource.data.model_lc == request.resource.data.model.lower()
+        && request.resource.data.program is string
+        && request.resource.data.program.size() >= 1
+        && request.resource.data.program.size() <= 60
+        && request.resource.data.sensor is string
+        && request.resource.data.sensor.size() <= 80
+        && request.resource.data.metric is string
+        && request.resource.data.metric.size() <= 40
+        && (request.resource.data.uploaderName == null
+            || (request.resource.data.uploaderName is string && request.resource.data.uploaderName.size() <= 100))
+        && (request.resource.data.notes == null
+            || (request.resource.data.notes is string && request.resource.data.notes.size() <= 500))
+        && request.resource.data.sampleIntervalSec is number
+        && request.resource.data.sampleIntervalSec > 0
+        && request.resource.data.sampleIntervalSec <= 3600
+        && request.resource.data.envelope is map
+        && (
+          !('cycle' in request.resource.data)
+          || request.resource.data.cycle == null
+          || (request.resource.data.cycle is map
+              && request.resource.data.cycle.points is list
+              && request.resource.data.cycle.points.size() <= 3000)
+        )
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.ratingCount == 0
+        && request.resource.data.commentCount == 0
+        && request.resource.data.avgRating == null;
+
+      // download bump - public vanity counter, exactly +1 and no other field.
+      // Intentionally unauthenticated (browsing needs no account); see SECURITY.md
+      // for the quota note.
+      allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['downloads'])
+        && request.resource.data.downloads == resource.data.downloads + 1;
+
+      // rating aggregate - a signed-in GitHub user updates the denormalized average.
+      // The ratings subcollection is the source of truth; values are bounded here.
+      allow update: if isGithubUser()
+        && !isBanned()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['avgRating', 'ratingCount'])
+        && request.resource.data.ratingCount is number
+        && request.resource.data.ratingCount >= 0
+        && (request.resource.data.avgRating == null
+            || (request.resource.data.avgRating is number
+                && request.resource.data.avgRating >= 1
+                && request.resource.data.avgRating <= 5));
+
+      // comment count - exactly +/-1 by a GitHub user (no arbitrary values)
+      allow update: if isGithubUser()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commentCount'])
+        && (request.resource.data.commentCount == resource.data.commentCount + 1
+            || request.resource.data.commentCount == resource.data.commentCount - 1);
+
+      // owner edits notes only
+      allow update: if isOwner()
+        && !isBanned()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['notes'])
+        && (request.resource.data.notes == null
+            || (request.resource.data.notes is string && request.resource.data.notes.size() <= 500));
+
+      // admin can update anything
+      allow update: if isAdmin();
+
+      allow delete: if (isSignedIn() && isOwner()) || isAdmin();
+
+      // comments subcollection
+      match /comments/{commentId} {
+        allow read: if true;
+
+        allow create: if isGithubUser()
+          && !isBanned()
+          && request.resource.data.authorUid == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() >= 1
+          && request.resource.data.text.size() <= 1000
+          && (request.resource.data.authorName == null
+              || (request.resource.data.authorName is string && request.resource.data.authorName.size() <= 100))
+          && request.resource.data.createdAt == request.time
+          && (!('parentId' in request.resource.data)
+              || request.resource.data.parentId == null
+              || request.resource.data.parentId is string);
+
+        allow delete: if (isSignedIn() && resource.data.authorUid == request.auth.uid) || isAdmin();
+
+        allow update: if false;
+      }
+
+      // ratings subcollection - doc ID is the rater's UID
+      match /ratings/{uid} {
+        allow read: if true;
+
+        allow write: if isGithubUser()
+          && !isBanned()
+          && request.auth.uid == uid
+          && request.resource.data.rating in [1, 2, 3, 4, 5];
+      }
+    }
+
+    // admins collection - existence == is admin; no client writes.
+    // A user may check only their own admin status (not enumerate admins).
+    match /admins/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    // users collection
+    match /users/{uid} {
+      allow read: if (isSignedIn() && request.auth.uid == uid) || isAdmin();
+
+      allow create: if isGithubUser()
+        && request.auth.uid == uid
+        && request.resource.data.uid == uid
+        && request.resource.data.get('banned', false) == false;
+
+      // Self-service updates may only touch profile fields, never moderation state.
+      // Only an admin can set/clear banned/banReason/bannedAt/bannedBy.
+      allow update: if isAdmin()
+        || (isGithubUser()
+            && request.auth.uid == uid
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['displayName', 'photoURL', 'lastSeen'])
+            && request.resource.data.banned == resource.data.banned);
+
+      allow delete: if isAdmin();
+    }
+
+    // deny everything else
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
