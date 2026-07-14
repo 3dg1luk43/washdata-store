@@ -100,7 +100,9 @@ service cloud.firestore {
 
     // profiles
     match /profiles/{profileId} {
-      allow read: if resource.data.status == 'approved' || isAdmin()
+      // Pending is public (browseable with an "awaiting approval" tag), like the
+      // brand/device catalog; removed stays hidden. Cycles (the data) stay moderated.
+      allow read: if resource.data.status in ['approved', 'pending'] || isAdmin()
         || (isSignedIn() && resource.data.createdByUid == request.auth.uid);
       allow create: if canContribute()
         && request.resource.data.createdByUid == request.auth.uid

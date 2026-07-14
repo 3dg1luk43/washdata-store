@@ -4,6 +4,7 @@ import {
   deleteCycle, qcLabel,
   adminListCycles, adminSetCycleStatus,
   adminListDevices, adminSetDeviceStatus, adminSetProfileStatus, adminSetBrandStatus, adminMergeDevices,
+  adminListBrands, adminListProfiles,
   adminListUsers, adminBanUser, adminUnbanUser, adminGetStats,
   getSiteConfig, setMaintenance, setConfirmThreshold,
 } from './washstore.js';
@@ -112,7 +113,7 @@ onAuth(async (user) => {
 });
 
 // ============================================================ tabs
-const TABS = ['overview', 'review', 'cycles', 'devices', 'users'];
+const TABS = ['overview', 'review', 'cycles', 'brands', 'devices', 'profiles', 'users'];
 function switchTab(name) {
   TABS.forEach((t) => {
     $(`${t}-tab`).toggleAttribute('hidden', t !== name);
@@ -124,7 +125,9 @@ TABS.forEach((name) => $(`${name}-btn`).addEventListener('click', () => {
   switchTab(name);
   if (name === 'review' && !$('review-list').hasChildNodes()) loadReview(true);
   if (name === 'cycles' && !$('cycles-tbody').hasChildNodes()) loadCycles(true);
+  if (name === 'brands' && !$('brands-tbody').hasChildNodes()) loadBrands();
   if (name === 'devices' && !$('devices-tbody').hasChildNodes()) loadDevices(true);
+  if (name === 'profiles' && !$('profiles-tbody').hasChildNodes()) loadProfiles();
   if (name === 'users' && !$('users-tbody').hasChildNodes()) loadUsers(true);
 }));
 
@@ -381,6 +384,88 @@ $('merge-btn').addEventListener('click', async () => {
   catch (e) { toast(e.message, 'error'); }
 });
 $('devices-load-more').addEventListener('click', () => loadDevices(false));
+
+// ============================================================ brands review
+async function loadBrands() {
+  $('brands-tbody').innerHTML = `<tr><td colspan="5" class="tbl-msg">Loading...</td></tr>`;
+  try {
+    const { items } = await adminListBrands();
+    $('brands-tbody').innerHTML = '';
+    if (items.length === 0) { $('brands-tbody').innerHTML = `<tr><td colspan="5" class="tbl-msg">No brands found.</td></tr>`; return; }
+    // Pending first so they are easy to review.
+    items.sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1));
+    items.forEach((b) => $('brands-tbody').appendChild(buildBrandRow(b)));
+  } catch (e) {
+    $('brands-tbody').innerHTML = `<tr><td colspan="5" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
+    toast(e.message, 'error');
+  }
+}
+
+function buildBrandRow(b) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td>${esc(b.brand || '')}</td>
+    <td><code class="mono" style="font-size:.7rem">${esc(b.id || '')}</code></td>
+    <td><span class="badge badge-${esc(b.status)}">${esc(b.status)}</span></td>
+    <td class="text-muted" style="font-size:.75rem">${esc(b.createdByName || '-')}</td>
+    <td><div class="action-cell"></div></td>`;
+  const cell = tr.querySelector('.action-cell');
+  const mk = (label, status) => {
+    const btn = document.createElement('button'); btn.className = 'btn btn-ghost btn-sm'; btn.textContent = label;
+    btn.addEventListener('click', async () => {
+      try {
+        await adminSetBrandStatus(b.id, status); b.status = status;
+        const badge = tr.children[2].querySelector('.badge'); badge.className = `badge badge-${status}`; badge.textContent = status;
+        toast(`Brand ${status}`);
+      } catch (e) { toast(e.message, 'error'); }
+    });
+    cell.appendChild(btn);
+  };
+  if (b.status !== 'approved') mk('Approve', 'approved');
+  if (b.status !== 'removed') mk('Remove', 'removed');
+  return tr;
+}
+
+// ============================================================ profiles review
+async function loadProfiles() {
+  $('profiles-tbody').innerHTML = `<tr><td colspan="5" class="tbl-msg">Loading...</td></tr>`;
+  try {
+    const { items } = await adminListProfiles();
+    $('profiles-tbody').innerHTML = '';
+    if (items.length === 0) { $('profiles-tbody').innerHTML = `<tr><td colspan="5" class="tbl-msg">No profiles found.</td></tr>`; return; }
+    items.sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1));
+    items.forEach((p) => $('profiles-tbody').appendChild(buildProfileRow(p)));
+  } catch (e) {
+    $('profiles-tbody').innerHTML = `<tr><td colspan="5" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
+    toast(e.message, 'error');
+  }
+}
+
+function buildProfileRow(p) {
+  const tr = document.createElement('tr');
+  const dev = String(p.deviceId || '').split('__').slice(1).join(' ').trim() || p.deviceId || '-';
+  tr.innerHTML = `
+    <td>${esc(p.program || '')}</td>
+    <td class="text-muted truncate" title="${esc(p.deviceId || '')}">${esc(truncate(dev, 24))}</td>
+    <td><span class="badge badge-${esc(p.status)}">${esc(p.status)}</span></td>
+    <td class="text-muted" style="font-size:.75rem">${esc(p.createdByName || '-')}</td>
+    <td><div class="action-cell"></div></td>`;
+  const cell = tr.querySelector('.action-cell');
+  const mk = (label, status) => {
+    const btn = document.createElement('button'); btn.className = 'btn btn-ghost btn-sm'; btn.textContent = label;
+    btn.addEventListener('click', async () => {
+      try {
+        await adminSetProfileStatus(p.id, status); p.status = status;
+        const badge = tr.children[2].querySelector('.badge'); badge.className = `badge badge-${status}`; badge.textContent = status;
+        toast(`Profile ${status}`);
+      } catch (e) { toast(e.message, 'error'); }
+    });
+    cell.appendChild(btn);
+  };
+  if (p.status !== 'approved') mk('Approve', 'approved');
+  if (p.status !== 'removed') mk('Remove', 'removed');
+  return tr;
+}
 
 // ============================================================ users table
 async function loadUsers(reset = false) {

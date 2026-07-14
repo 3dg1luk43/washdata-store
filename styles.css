@@ -1377,6 +1377,7 @@ input[type="url"] {
   transition: border-color var(--transition), box-shadow var(--transition);
 }
 input[type="url"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.contribute-card[hidden] { display: none; }
 .contribute-card {
   max-width: 560px;
   display: flex;
@@ -1425,6 +1426,7 @@ input[type="url"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
   gap: 0.4rem 0.6rem;
   margin-top: 0.6rem;
 }
+.add-profile { flex-wrap: wrap; margin-top: 1rem; }
 .card-manual { color: var(--accent); text-decoration: none; }
 .card-manual:hover { text-decoration: underline; }
 .community-msg { font-size: 0.75rem; }
