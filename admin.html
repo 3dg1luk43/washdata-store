@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="WashData Store - Admin Panel">
   <title>WashData Store - Admin</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128268;</text></svg>">
+  <link rel="icon" type="image/png" href="img/icon.png">
+  <link rel="apple-touch-icon" href="img/icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-
   <header class="topbar">
     <a href="index.html" class="brand">
       <svg width="36" height="22" viewBox="0 0 36 22" fill="none" aria-hidden="true">
@@ -21,83 +21,55 @@
       </svg>
       WashData Store
     </a>
-    <nav aria-label="Admin navigation">
-      <span class="nav-link" style="color:var(--text-muted);cursor:default">
-        <span class="pill pill-admin">Admin</span>
-      </span>
+    <nav aria-label="Main navigation">
       <a class="nav-link" href="index.html">Back to Store</a>
     </nav>
-    <div class="user-area" id="auth-status">
-      <!-- populated by admin.js -->
-    </div>
+    <div class="user-area" id="auth-status"></div>
   </header>
 
   <main>
-    <!-- Auth check spinner -->
-    <div id="admin-gate">
-      <div class="loading-center" style="padding:4rem 1rem">
-        <div class="loading-spinner"></div>
-        <span class="text-muted">Checking access...</span>
-      </div>
+    <div id="admin-gate" class="loading-center" style="padding:3rem"><div class="loading-spinner"></div></div>
+
+    <div id="admin-denied" class="empty-state" hidden>
+      <div class="empty-icon">&#128272;</div>
+      <div class="empty-title" id="denied-title">Access Denied</div>
+      <div class="empty-text" id="denied-text"></div>
+      <button class="btn btn-primary mt-1" id="admin-signin-btn" hidden>Sign in with GitHub</button>
     </div>
 
-    <!-- Access denied -->
-    <div id="admin-denied" hidden>
-      <div class="empty-state" style="padding:4rem 1rem">
-        <div class="empty-icon">&#128274;</div>
-        <div class="empty-title" id="denied-title">Access Denied</div>
-        <div class="empty-text" id="denied-text">You do not have admin permissions for this panel.</div>
-        <button class="btn btn-primary mt-2" id="admin-signin-btn" hidden>Sign in with GitHub</button>
-      </div>
-    </div>
-
-    <!-- Admin panel -->
     <div id="admin-panel" hidden>
-
-      <!-- Admin tab bar -->
-      <div class="tabs" role="tablist" aria-label="Admin sections">
-        <button class="tab-btn active" id="overview-btn" role="tab" aria-selected="true" aria-controls="overview-tab">Overview</button>
-        <button class="tab-btn" id="review-btn" role="tab" aria-selected="false" aria-controls="review-tab">Review Queue</button>
-        <button class="tab-btn" id="envelopes-btn" role="tab" aria-selected="false" aria-controls="envelopes-tab">All Envelopes</button>
-        <button class="tab-btn" id="users-btn" role="tab" aria-selected="false" aria-controls="users-tab">Users</button>
+      <div class="tabs" role="tablist">
+        <button class="tab-btn active" id="overview-btn" role="tab">Overview</button>
+        <button class="tab-btn" id="review-btn" role="tab">Review Queue</button>
+        <button class="tab-btn" id="cycles-btn" role="tab">Cycles</button>
+        <button class="tab-btn" id="devices-btn" role="tab">Devices</button>
+        <button class="tab-btn" id="users-btn" role="tab">Users</button>
       </div>
 
-      <!-- Overview tab -->
+      <!-- Overview -->
       <div class="tab-panel" id="overview-tab" role="tabpanel">
         <div class="section-header">
           <h2 class="section-title">Overview</h2>
           <button class="btn btn-ghost btn-sm" id="stats-refresh-btn">Refresh</button>
         </div>
-        <div class="stat-grid" id="stats-grid">
-          <div class="loading-center" style="grid-column:1/-1"><div class="loading-spinner"></div></div>
-        </div>
+        <div class="stat-grid" id="stats-grid"></div>
       </div>
 
-      <!-- Review Queue tab -->
+      <!-- Review Queue -->
       <div class="tab-panel" id="review-tab" role="tabpanel" hidden>
-        <div class="section-header">
-          <h2 class="section-title">Review Queue</h2>
-        </div>
-        <div id="review-list" style="display:flex;flex-direction:column;gap:.875rem">
-          <!-- populated by admin.js -->
-        </div>
-        <div class="load-more-area">
-          <button class="btn btn-ghost" id="review-load-more" hidden>Load more</button>
-        </div>
+        <div class="section-header"><h2 class="section-title">Pending Reference Cycles</h2></div>
+        <div id="review-list"></div>
+        <div class="load-more-area"><button class="btn btn-ghost" id="review-load-more" hidden>Load more</button></div>
       </div>
 
-      <!-- All Envelopes tab -->
-      <div class="tab-panel" id="envelopes-tab" role="tabpanel" hidden>
-        <div class="section-header">
-          <h2 class="section-title">All Envelopes</h2>
-        </div>
-
-        <!-- Envelope filters -->
-        <div class="filter-rail" style="margin-bottom:1rem">
+      <!-- Cycles table -->
+      <div class="tab-panel" id="cycles-tab" role="tabpanel" hidden>
+        <div class="section-header"><h2 class="section-title">All Cycles</h2></div>
+        <div class="filter-rail">
           <div class="form-group">
-            <label for="env-filter-status">Status</label>
-            <select id="env-filter-status">
-              <option value="">All statuses</option>
+            <label for="cy-filter-status">Status</label>
+            <select id="cy-filter-status">
+              <option value="">All</option>
               <option value="pending">Pending</option>
               <option value="approved">Approved</option>
               <option value="rejected">Rejected</option>
@@ -105,9 +77,9 @@
             </select>
           </div>
           <div class="form-group">
-            <label for="env-filter-type">Appliance type</label>
-            <select id="env-filter-type">
-              <option value="">All types</option>
+            <label for="cy-filter-type">Type</label>
+            <select id="cy-filter-type">
+              <option value="">All</option>
               <option value="washer">Washer</option>
               <option value="dryer">Dryer</option>
               <option value="dishwasher">Dishwasher</option>
@@ -115,95 +87,72 @@
             </select>
           </div>
           <div class="filter-actions">
-            <button class="btn btn-primary btn-sm" id="env-filter-apply">Apply</button>
-            <button class="btn btn-ghost btn-sm" id="env-filter-clear">Clear</button>
+            <button class="btn btn-primary btn-sm" id="cy-filter-apply">Apply</button>
+            <button class="btn btn-ghost btn-sm" id="cy-filter-clear">Clear</button>
           </div>
         </div>
-
-        <div class="table-wrap">
-          <table class="admin-table">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Brand / Model</th>
-                <th>Program</th>
-                <th>Type</th>
-                <th>Status</th>
-                <th>Uploader</th>
-                <th>Date</th>
-                <th>DLs</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="envelopes-tbody">
-              <tr><td colspan="9" style="text-align:center;padding:2rem;color:var(--text-muted)">Loading...</td></tr>
-            </tbody>
-          </table>
+        <div class="admin-table-wrap">
+          <table class="admin-table"><thead><tr>
+            <th>ID</th><th>Device</th><th>Program</th><th>Type</th><th>Status</th><th>Src</th><th>Uploader</th><th>Date</th><th>DL</th><th>Actions</th>
+          </tr></thead><tbody id="cycles-tbody"></tbody></table>
         </div>
-        <div class="load-more-area">
-          <button class="btn btn-ghost" id="envelopes-load-more" hidden>Load more</button>
-        </div>
+        <div class="load-more-area"><button class="btn btn-ghost" id="cycles-load-more" hidden>Load more</button></div>
       </div>
 
-      <!-- Users tab -->
+      <!-- Devices table -->
+      <div class="tab-panel" id="devices-tab" role="tabpanel" hidden>
+        <div class="section-header"><h2 class="section-title">Devices</h2></div>
+        <div class="merge-bar">
+          <span class="text-muted" style="font-size:.8125rem">Merge reassigns all profiles/cycles from the source device into the target, then deletes the source.</span>
+          <div class="merge-controls">
+            <input type="text" id="merge-from" placeholder="source deviceId" autocomplete="off">
+            <span>&rarr;</span>
+            <input type="text" id="merge-to" placeholder="target deviceId" autocomplete="off">
+            <button class="btn btn-danger btn-sm" id="merge-btn">Merge</button>
+          </div>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table"><thead><tr>
+            <th>Device ID</th><th>Brand</th><th>Model</th><th>Type</th><th>Status</th><th>&#11088;</th><th>Actions</th>
+          </tr></thead><tbody id="devices-tbody"></tbody></table>
+        </div>
+        <div class="load-more-area"><button class="btn btn-ghost" id="devices-load-more" hidden>Load more</button></div>
+      </div>
+
+      <!-- Users -->
       <div class="tab-panel" id="users-tab" role="tabpanel" hidden>
-        <div class="section-header">
-          <h2 class="section-title">Users</h2>
+        <div class="section-header"><h2 class="section-title">Users</h2></div>
+        <div class="admin-table-wrap">
+          <table class="admin-table"><thead><tr>
+            <th>User</th><th>UID</th><th>Status</th><th>Ban reason</th><th>Joined</th><th>Actions</th>
+          </tr></thead><tbody id="users-tbody"></tbody></table>
         </div>
-        <p class="admin-note" style="margin-bottom:1rem">
-          Banning a user prevents future uploads but does not automatically remove existing approved envelopes. Remove them manually from the All Envelopes tab if needed.
-        </p>
-        <div class="table-wrap">
-          <table class="admin-table">
-            <thead>
-              <tr>
-                <th>User</th>
-                <th>UID</th>
-                <th>Status</th>
-                <th>Ban reason</th>
-                <th>Joined</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="users-tbody">
-              <tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-muted)">Loading...</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="load-more-area">
-          <button class="btn btn-ghost" id="users-load-more" hidden>Load more</button>
-        </div>
+        <div class="load-more-area"><button class="btn btn-ghost" id="users-load-more" hidden>Load more</button></div>
       </div>
-
-    </div><!-- /#admin-panel -->
+    </div>
   </main>
 
   <!-- Review modal -->
-  <div class="modal-overlay" id="review-modal" hidden aria-modal="true" role="dialog" aria-labelledby="review-modal-title">
+  <div class="modal-overlay" id="review-modal" hidden aria-modal="true" role="dialog">
     <div class="modal">
       <div class="modal-header">
         <div>
-          <h2 class="modal-title" id="review-modal-title">Review Envelope</h2>
+          <h2 class="modal-title" id="review-modal-title"></h2>
           <div class="modal-subtitle" id="review-modal-subtitle"></div>
         </div>
         <button class="modal-close" id="review-modal-close" aria-label="Close">&#215;</button>
       </div>
       <div class="modal-sparkline-area" id="review-modal-sparkline"></div>
-      <div class="modal-body">
-        <div class="modal-section" id="review-modal-body">
-          <!-- populated by admin.js -->
-        </div>
-      </div>
+      <div class="modal-body"><div id="review-modal-body"></div></div>
       <div class="modal-footer">
+        <button class="btn btn-ghost btn-sm" id="review-modal-close-footer">Close</button>
         <button class="btn btn-danger btn-sm" id="review-reject-btn">Reject</button>
         <button class="btn btn-primary btn-sm" id="review-approve-btn">Approve</button>
-        <button class="btn btn-ghost btn-sm" id="review-modal-close-footer">Close</button>
       </div>
     </div>
   </div>
 
   <div class="toast-container" id="toasts" aria-live="assertive" aria-atomic="true"></div>
-
   <script type="module" src="admin.js"></script>
 </body>
 </html>
