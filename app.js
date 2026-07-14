@@ -190,7 +190,12 @@ async function loadBrands(reset = false) {
     else items.forEach((b) => grid.appendChild(buildBrandCard(b)));
     _browseCursor = cursor;
     $('load-more-btn').toggleAttribute('hidden', !cursor);
-  } catch (e) { spinner.remove(); toast(e.message, 'error'); }
+  } catch (e) {
+    spinner.remove();
+    const g = $('browse-body').querySelector('.card-grid') || $('browse-body');
+    g.innerHTML = emptyHTML('&#9888;', 'Could not load the library', esc(e.message));
+    toast(e.message, 'error');
+  }
 }
 
 function buildBrandCard(b) {

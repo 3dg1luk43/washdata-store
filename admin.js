@@ -73,7 +73,10 @@ function renderAuthArea(user) {
     area.innerHTML = `${user.photoURL ? `<img class="user-avatar" src="${esc(user.photoURL)}" alt="">` : ''}
       <span class="user-name">${esc(user.displayName || 'User')}</span>
       <button class="btn btn-ghost btn-sm" id="signout-btn">Sign out</button>`;
-    $('signout-btn').addEventListener('click', async () => { try { await signOutUser(); } catch (e) { toast(e.message, 'error'); } });
+    $('signout-btn').addEventListener('click', async () => {
+      try { await signOutUser(); location.href = 'index.html'; }
+      catch (e) { toast(e.message, 'error'); }
+    });
   } else {
     area.innerHTML = `<button class="btn btn-primary btn-sm" id="signin-btn">Sign in with GitHub</button>`;
     $('signin-btn').addEventListener('click', async () => { try { await signIn(); } catch (e) { toast(e.message, 'error'); } });
