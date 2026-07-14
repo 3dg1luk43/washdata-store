@@ -2,24 +2,27 @@
    Design tokens
    ============================================================ */
 :root {
-  --bg: #0d1117;
-  --bg-surface: #161b22;
-  --bg-card: #1c2128;
-  --border: #30363d;
-  --border-subtle: #21262d;
-  --text: #e6edf3;
-  --text-muted: #8b949e;
-  --accent: #00b4d8;
-  --accent-hover: #0096c7;
-  --accent-dim: rgba(0, 180, 216, 0.12);
-  --success: #3fb950;
-  --warning: #d29922;
-  --danger: #f85149;
-  --pending: #388bfd;
-  --radius: 6px;
-  --radius-lg: 12px;
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.6);
+  /* "Signal library" instrument palette: deep navy, electric-indigo signal, energy amber */
+  --bg: #0a0e1a;
+  --bg-surface: #101728;
+  --bg-card: #141d33;
+  --border: #253150;
+  --border-subtle: #1a2338;
+  --text: #e9edf7;
+  --text-muted: #8792ad;
+  --accent: #7c9cff;
+  --accent-hover: #9db4ff;
+  --accent-dim: rgba(124, 156, 255, 0.14);
+  --pulse: #ffb45a;            /* energy accent: watts / kWh / ratings */
+  --pulse-dim: rgba(255, 180, 90, 0.14);
+  --success: #46c98b;
+  --warning: #ffb45a;
+  --danger: #ff6b6b;
+  --pending: #7c9cff;
+  --radius: 8px;
+  --radius-lg: 14px;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.7);
   --transition: 150ms ease;
   --font-heading: 'Space Grotesk', sans-serif;
   --font-body: 'Inter', sans-serif;
@@ -1217,6 +1220,98 @@ input[type="file"]:hover {
 }
 .tbl-msg { text-align: center; padding: 1.75rem; color: var(--text-muted); }
 .admin-table-wrap { overflow-x: auto; }
+
+/* ============================================================
+   v2 design pass: mono eyebrows, page head, energy accents, maintenance
+   ============================================================ */
+
+/* Mono, tracked, uppercase eyebrow - the data-logger signature treatment */
+.eyebrow {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: .6875rem;
+  font-weight: 600;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.page-head {
+  padding: 1.5rem 0 1.75rem;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 1.75rem;
+}
+.page-title {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: clamp(1.6rem, 3.2vw, 2.35rem);
+  line-height: 1.08;
+  letter-spacing: -0.01em;
+  margin: .5rem 0 0;
+}
+.page-lede {
+  color: var(--text-muted);
+  max-width: 46ch;
+  margin: .6rem 0 0;
+  font-size: .95rem;
+}
+
+/* Data values render in mono so numbers align and read as measured output */
+.mono-data { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* Energy accent for the rating badge (star = energy amber) */
+.badge-rating { color: var(--pulse); border-color: var(--pulse-dim); background: var(--pulse-dim); }
+
+/* Card top edge glows as a faint signal line */
+.card { position: relative; }
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  opacity: .35;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+/* Maintenance */
+#maintenance-screen:not([hidden]) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 2rem;
+  background:
+    radial-gradient(1200px 600px at 50% -10%, rgba(124, 156, 255, 0.10), transparent 60%),
+    var(--bg);
+}
+.maint-inner { text-align: center; max-width: 34rem; }
+.maint-wave { filter: drop-shadow(0 0 14px rgba(124, 156, 255, 0.45)); }
+.maint-eyebrow {
+  font-family: var(--font-mono);
+  font-size: .75rem;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-top: 1.25rem;
+}
+.maint-title {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: clamp(1.6rem, 4vw, 2.5rem);
+  margin: .5rem 0 0;
+}
+.maint-text { color: var(--text-muted); margin-top: .85rem; line-height: 1.6; }
+
+.maint-banner {
+  background: var(--pulse-dim);
+  color: var(--pulse);
+  border-bottom: 1px solid var(--pulse-dim);
+  text-align: center;
+  padding: .5rem 1rem;
+  font-size: .8125rem;
+  font-family: var(--font-mono);
+}
 
 /* Footer credits */
 .site-footer {

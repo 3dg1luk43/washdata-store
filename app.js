@@ -1,11 +1,12 @@
 import firebaseConfig from './config.js';
+import { MAINTENANCE } from './site-config.js';
 import {
   init, onAuth, signIn, signOutUser, isAdmin, ensureUserProfile,
-  listBrands, searchDevices, getDevicesByBrand, getDevice, getProfiles, getReferenceCycles, getCycle,
-  uploadReferenceCycle, deleteCycle, bumpDownload, favoriteDevice, getFavorites, myCycles,
+  listBrands, searchDevices, getDevicesByBrand, getProfiles, getReferenceCycles,
+  bumpDownload, favoriteDevice, getFavorites,
   addComment, listComments, deleteComment,
   submitRating, getUserRating, getRatingSummary,
-  parseCycle, cycleStats, saveAsFile,
+  saveAsFile,
 } from './washstore.js';
 
 init(firebaseConfig);
@@ -14,23 +15,20 @@ init(firebaseConfig);
 let _user = null;
 let _adminFlag = false;
 let _view = 'brands';             // brands | brand | device | profile
-let _brand = null;                // { id, brand, brand_lc, ... }
-let _device = null;               // { id, brand, model, applianceType, ... }
-let _profile = null;              // { id, program, ... }
+let _brand = null;
+let _device = null;
+let _profile = null;
 let _browseCursor = null;
 let _browseFilters = { search: '', favoritesOnly: false };
 let _favorites = new Set();
-let _mineLoadedUid = null;
-let _mineCursor = null;
 let _openRecord = null;
 let _replyToId = null;
-let _parsedUpload = null;         // { points, stats }
+let _browseLoaded = false;
 
 const _ratingCache = new Map();
 
 // ============================================================ dom + toast
 function $(id) { return document.getElementById(id); }
-
 function toast(msg, type = 'success') {
   const el = document.createElement('div');
   el.className = `toast toast-${type}`;
@@ -39,63 +37,61 @@ function toast(msg, type = 'success') {
   setTimeout(() => el.remove(), 4000);
 }
 
+// ============================================================ maintenance gate
+if (MAINTENANCE) { $('maintenance-screen').hidden = false; $('app-shell').hidden = true; }
+
+function applyMaintenance() {
+  if (!MAINTENANCE) return;
+  if (_adminFlag) {
+    $('maintenance-screen').hidden = true;
+    $('app-shell').hidden = false;
+    $('maint-banner').hidden = false;
+  } else {
+    $('maintenance-screen').hidden = false;
+    $('app-shell').hidden = true;
+  }
+}
+
+function browseVisible() { return !MAINTENANCE || _adminFlag; }
+
 // ============================================================ helpers
 function esc(str) {
   if (str == null) return '';
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
-
 function formatDate(ts) {
   if (!ts) return '-';
   const d = ts.toDate ? ts.toDate() : new Date(typeof ts === 'number' ? ts * 1000 : ts);
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
-
 function formatDuration(sec) {
   if (sec == null || isNaN(sec)) return '-';
-  const s = Math.round(sec);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const rem = s % 60;
+  const s = Math.round(sec); const h = Math.floor(s / 3600); const m = Math.floor((s % 3600) / 60); const rem = s % 60;
   if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m ${rem}s`;
   return `${rem}s`;
 }
-
 function typeLabel(t) {
   return { washer: 'Washer', dryer: 'Dryer', dishwasher: 'Dishwasher', washer_dryer: 'Washer-Dryer' }[t] || t;
 }
+function modelOf(device) { return device.model || String(device.id || '').split('__')[2] || ''; }
 
-function modelOf(device) {
-  return device.model || String(device.id || '').split('__')[2] || '';
-}
-
-// Sparkline drawn from a reference cycle's trace points.
 function sparklineSVG(record, w = 160, h = 48) {
   let pts = record?.trace?.points;
-  if (!Array.isArray(pts) || pts.length < 2) {
-    return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"></svg>`;
-  }
-  if (pts.length > 200) {
-    const step = Math.ceil(pts.length / 200);
-    pts = pts.filter((_, i) => i % step === 0);
-  }
-  const xs = pts.map((p) => p[0]);
-  const ys = pts.map((p) => p[1]);
-  const x0 = xs[0], xN = xs[xs.length - 1], yMax = Math.max(...ys) || 1;
-  const pad = 3;
+  if (!Array.isArray(pts) || pts.length < 2) return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"></svg>`;
+  if (pts.length > 200) { const step = Math.ceil(pts.length / 200); pts = pts.filter((_, i) => i % step === 0); }
+  const xs = pts.map((p) => p[0]); const ys = pts.map((p) => p[1]);
+  const x0 = xs[0], xN = xs[xs.length - 1], yMax = Math.max(...ys) || 1; const pad = 3;
   const sx = (x) => pad + ((x - x0) / (xN - x0 || 1)) * (w - 2 * pad);
   const sy = (y) => h - pad - (y / yMax) * (h - 2 * pad);
   const d = pts.map((p, i) => `${i ? 'L' : 'M'}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(' ');
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">
-    <path d="${d}" stroke="var(--accent)" stroke-width="1.5" fill="none" stroke-linejoin="round"/></svg>`;
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg"><path d="${d}" stroke="var(--accent)" stroke-width="1.5" fill="none" stroke-linejoin="round"/></svg>`;
 }
 
 function fetchRatingSummary(id) {
   if (!_ratingCache.has(id)) _ratingCache.set(id, getRatingSummary(id));
   return _ratingCache.get(id);
 }
-
 async function populateCardRating(el, id) {
   try {
     const { avg, count } = await fetchRatingSummary(id);
@@ -109,12 +105,10 @@ async function populateCardRating(el, id) {
 
 function loadingPlaceholder() {
   const el = document.createElement('div');
-  el.className = 'loading-center';
-  el.style.gridColumn = '1 / -1';
+  el.className = 'loading-center'; el.style.gridColumn = '1 / -1';
   el.innerHTML = '<div class="loading-spinner"></div>';
   return el;
 }
-
 function emptyHTML(icon, title, text) {
   return `<div class="empty-state" style="grid-column:1/-1"><div class="empty-icon">${icon}</div>
     <div class="empty-title">${esc(title)}</div><div class="empty-text">${esc(text)}</div></div>`;
@@ -133,7 +127,6 @@ function renderAuthArea(user) {
     $('signin-btn').addEventListener('click', doSignIn);
   }
 }
-
 async function doSignIn() { try { await signIn(); } catch (e) { toast(e.message, 'error'); } }
 
 onAuth(async (user) => {
@@ -141,34 +134,15 @@ onAuth(async (user) => {
   _adminFlag = false;
   _favorites = new Set();
   renderAuthArea(user);
-  updateUploadAuth();
-  updateMineAuth();
   if (user) {
     try { await ensureUserProfile(user); } catch (_) {}
     try { _adminFlag = await isAdmin(); } catch (_) {}
     try { _favorites = new Set(await getFavorites()); } catch (_) {}
   }
   $('admin-link').toggleAttribute('hidden', !_adminFlag);
-  if (!$('mine-tab').hasAttribute('hidden')) maybeLoadMine();
+  applyMaintenance();
+  if (browseVisible() && !_browseLoaded) { _browseLoaded = true; loadBrands(true); }
   updateCommentFormAuth();
-});
-
-// ============================================================ tabs
-function switchTab(name) {
-  ['browse', 'upload', 'mine'].forEach((t) => {
-    $(`${t}-tab`).toggleAttribute('hidden', t !== name);
-    $(`${t}-btn`).classList.toggle('active', t === name);
-    $(`${t}-btn`).setAttribute('aria-selected', t === name ? 'true' : 'false');
-    $(`${t}-nav`).classList.toggle('active', t === name);
-  });
-  if (name === 'browse' && !$('browse-body').hasChildNodes()) loadBrands(true);
-  if (name === 'upload') populateBrandDatalist();
-  if (name === 'mine') maybeLoadMine();
-}
-
-['browse', 'upload', 'mine'].forEach((n) => {
-  $(`${n}-btn`).addEventListener('click', () => switchTab(n));
-  $(`${n}-nav`).addEventListener('click', () => switchTab(n));
 });
 
 // ============================================================ breadcrumb
@@ -188,7 +162,7 @@ function renderBreadcrumb() {
   }));
 }
 
-// ============================================================ browse: brands (top level)
+// ============================================================ browse: brands
 async function loadBrands(reset = false) {
   _view = 'brands'; _brand = null; _device = null; _profile = null;
   $('filter-rail').removeAttribute('hidden');
@@ -200,21 +174,20 @@ async function loadBrands(reset = false) {
   const spinner = loadingPlaceholder();
   grid.appendChild(spinner);
   try {
-    // Favorites shortcut: jump straight to favorite devices, skipping the brand level.
     if (favoritesOnly) {
       if (!_user) { spinner.remove(); grid.innerHTML = emptyHTML('&#11088;', 'Sign in for favorites', 'Sign in to save and browse favorite devices.'); return; }
       const { items } = await searchDevices({ favoritesOnly: true, pageSize: 60 });
       spinner.remove();
       grid.innerHTML = '';
-      if (items.length === 0) { grid.innerHTML = emptyHTML('&#11088;', 'No favorites yet', 'Star a device to find it here quickly.'); }
-      else { items.forEach((d) => grid.appendChild(buildDeviceCard(d))); }
+      if (items.length === 0) grid.innerHTML = emptyHTML('&#11088;', 'No favorites yet', 'Star a device to find it here quickly.');
+      else items.forEach((d) => grid.appendChild(buildDeviceCard(d)));
       $('load-more-btn').setAttribute('hidden', '');
       return;
     }
     const { items, cursor } = await listBrands({ search: _browseFilters.search || null, pageSize: 60, cursor: _browseCursor });
     spinner.remove();
-    if (items.length === 0 && !_browseCursor) { grid.innerHTML = emptyHTML('&#128269;', 'No brands found', 'Try a different search, or upload the first cycle for your appliance.'); }
-    else { items.forEach((b) => grid.appendChild(buildBrandCard(b))); }
+    if (items.length === 0 && !_browseCursor) grid.innerHTML = emptyHTML('&#128269;', 'No brands found', 'Try a different search. The library grows as people contribute.');
+    else items.forEach((b) => grid.appendChild(buildBrandCard(b)));
     _browseCursor = cursor;
     $('load-more-btn').toggleAttribute('hidden', !cursor);
   } catch (e) { spinner.remove(); toast(e.message, 'error'); }
@@ -225,6 +198,7 @@ function buildBrandCard(b) {
   el.className = 'card device-card';
   el.innerHTML = `
     <div class="card-body">
+      <span class="eyebrow">Brand</span>
       <div class="card-title">${esc(b.brand)}</div>
       <div class="card-subtitle">Browse models &rsaquo;</div>
     </div>
@@ -258,9 +232,9 @@ function buildDeviceCard(d) {
   const starred = _favorites.has(d.id);
   el.innerHTML = `
     <div class="card-body">
+      <span class="eyebrow">${esc(typeLabel(d.applianceType))}</span>
       <div class="card-title">${esc(d.brand)} ${esc(modelOf(d))}</div>
       <div class="card-badges">
-        <span class="badge badge-type">${esc(typeLabel(d.applianceType))}</span>
         ${d.profileCount ? `<span class="badge">${d.profileCount} program${d.profileCount > 1 ? 's' : ''}</span>` : ''}
       </div>
       <div class="card-meta"><span>&#11088; ${d.favoriteCount || 0}</span></div>
@@ -295,7 +269,7 @@ async function openDevice(d) {
   body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
   try {
     const profiles = await getProfiles(d.id);
-    if (profiles.length === 0) { body.innerHTML = emptyHTML('&#128203;', 'No programs yet', 'No approved programs for this device yet. Be the first to upload one.'); return; }
+    if (profiles.length === 0) { body.innerHTML = emptyHTML('&#128203;', 'No programs yet', 'No approved programs for this device yet.'); return; }
     const list = document.createElement('div');
     list.className = 'profile-list';
     profiles.forEach((p) => list.appendChild(buildProfileRow(p)));
@@ -338,7 +312,7 @@ function buildCycleCard(c) {
     <div class="card-sparkline">${sparklineSVG(c, 160, 48)}</div>
     <div class="card-body">
       <div class="card-title">${esc(_profile ? _profile.program : c.program_lc)}</div>
-      <div class="card-subtitle">${formatDuration(st.duration)} &middot; ${st.energy_wh != null ? (st.energy_wh / 1000).toFixed(2) + ' kWh' : '-'}</div>
+      <div class="card-subtitle mono-data">${formatDuration(st.duration)} &middot; ${st.energy_wh != null ? (st.energy_wh / 1000).toFixed(2) + ' kWh' : '-'}</div>
       <div class="card-badges"><span class="badge badge-rating" data-rating hidden></span></div>
       <div class="card-meta"><span>by ${esc(c.uploaderName || 'Anonymous')}</span><span>&middot; ${c.downloads || 0} dl</span><span data-rating-meta></span></div>
     </div>
@@ -368,153 +342,13 @@ $('filter-clear').addEventListener('click', () => {
 $('filter-brand').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('filter-apply').click(); });
 $('load-more-btn').addEventListener('click', () => { if (_view === 'brands') loadBrands(false); });
 
-// ============================================================ upload
-function updateUploadAuth() {
-  $('upload-auth-notice').toggleAttribute('hidden', !!_user);
-  $('upload-form').toggleAttribute('hidden', !_user);
-}
-$('upload-signin-btn').addEventListener('click', doSignIn);
-
-// Autocomplete existing brands/models so uploads converge onto existing devices
-// instead of creating near-duplicates.
-async function populateBrandDatalist() {
-  const dl = $('brand-list');
-  if (!dl) return;
-  try {
-    const { items } = await listBrands({ pageSize: 100 });
-    dl.innerHTML = items.map((b) => `<option value="${esc(b.brand)}"></option>`).join('');
-  } catch (_) {}
-}
-async function populateModelDatalist(brand) {
-  const dl = $('model-list');
-  if (!dl) return;
-  dl.innerHTML = '';
-  const b = (brand || '').trim();
-  if (!b) return;
-  try {
-    const { items } = await getDevicesByBrand(b.toLowerCase(), { pageSize: 100 });
-    dl.innerHTML = items.map((d) => `<option value="${esc(d.model || '')}"></option>`).join('');
-  } catch (_) {}
-}
-$('up-brand').addEventListener('change', () => populateModelDatalist($('up-brand').value));
-
-$('up-cycle-file').addEventListener('change', async () => {
-  _parsedUpload = null;
-  const prev = $('upload-preview');
-  const file = $('up-cycle-file').files[0];
-  if (!file) { prev.setAttribute('hidden', ''); return; }
-  try {
-    const points = parseCycle(await file.text());
-    const stats = cycleStats(points);
-    _parsedUpload = { points, stats };
-    prev.innerHTML = `${sparklineSVG({ trace: { points } }, 240, 60)}
-      <div class="text-muted" style="font-size:.8125rem">${points.length} points &middot; ${formatDuration(stats.duration)} &middot; ${(stats.energy_wh / 1000).toFixed(2)} kWh &middot; peak ${stats.peak_w} W</div>`;
-    prev.removeAttribute('hidden');
-  } catch (e) { prev.innerHTML = `<span class="text-danger">Cycle file error: ${esc(e.message)}</span>`; prev.removeAttribute('hidden'); }
-});
-
-$('upload-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  if (!_user) { toast('Please sign in first', 'error'); return; }
-  const btn = $('upload-submit');
-  const resultEl = $('upload-result');
-  btn.disabled = true; btn.textContent = 'Uploading...'; resultEl.setAttribute('hidden', '');
-  try {
-    if (!_parsedUpload) throw new Error('Attach a valid reference cycle file first');
-    const interval = Number($('up-interval').value);
-    if (!interval || interval <= 0 || interval > 3600) throw new Error('Sample interval must be between 1 and 3600');
-    const meta = {
-      applianceType: $('up-type').value,
-      brand: $('up-brand').value.trim(),
-      model: $('up-model').value.trim(),
-      program: $('up-program').value.trim(),
-      sampleIntervalSec: interval,
-      description: $('up-desc').value.trim(),
-    };
-    // Website uploads are provenance code 3 (manually added). The integration sets the real code.
-    await uploadReferenceCycle(meta, _parsedUpload.points, _parsedUpload.stats, 3);
-    $('upload-form').reset();
-    $('upload-preview').setAttribute('hidden', '');
-    _parsedUpload = null;
-    resultEl.textContent = 'Submitted for review. It will appear publicly once approved.';
-    resultEl.className = 'text-success mt-1';
-    resultEl.removeAttribute('hidden');
-    toast('Upload submitted - pending review');
-  } catch (err) {
-    resultEl.textContent = err.message; resultEl.className = 'text-danger mt-1'; resultEl.removeAttribute('hidden');
-    toast(err.message, 'error');
-  } finally { btn.disabled = false; btn.textContent = 'Submit Upload'; }
-});
-
-// ============================================================ my uploads
-function updateMineAuth() {
-  $('mine-signin-notice').toggleAttribute('hidden', !!_user);
-  $('mine-content').toggleAttribute('hidden', !_user);
-  if (!_user) { _mineLoadedUid = null; $('mine-grid').innerHTML = ''; $('mine-load-more').setAttribute('hidden', ''); }
-}
-$('mine-signin-btn').addEventListener('click', doSignIn);
-
-function maybeLoadMine() {
-  updateMineAuth();
-  if (!_user) return;
-  if (_mineLoadedUid === _user.uid && $('mine-grid').hasChildNodes()) return;
-  _mineLoadedUid = _user.uid; _mineCursor = null; $('mine-grid').innerHTML = ''; $('mine-load-more').setAttribute('hidden', '');
-  fetchMine();
-}
-
-async function fetchMine() {
-  const spinner = loadingPlaceholder();
-  $('mine-grid').appendChild(spinner);
-  try {
-    const { items, cursor } = await myCycles({ pageSize: 24, cursor: _mineCursor });
-    spinner.remove();
-    if (items.length === 0 && !_mineCursor) { $('mine-grid').innerHTML = emptyHTML('&#128228;', 'No uploads yet', 'Share your first reference cycle with the community.'); }
-    else { items.forEach((c) => $('mine-grid').appendChild(buildMineCard(c))); }
-    _mineCursor = cursor;
-    $('mine-load-more').toggleAttribute('hidden', !cursor);
-  } catch (e) { spinner.remove(); toast(e.message, 'error'); }
-}
-
-function buildMineCard(c) {
-  const el = document.createElement('div');
-  el.className = 'card';
-  const parts = String(c.deviceId || '').split('__');
-  el.innerHTML = `
-    <div class="card-sparkline">${sparklineSVG(c, 160, 48)}</div>
-    <div class="card-body">
-      <div class="card-title">${esc(parts[1] || '')} ${esc(parts[2] || '')}</div>
-      <div class="card-subtitle">${esc(c.program_lc || '')}</div>
-      <div class="card-badges">
-        <span class="badge badge-type">${esc(typeLabel(c.applianceType))}</span>
-        <span class="badge badge-${esc(c.status)}">${esc(c.status)}</span>
-      </div>
-      ${c.rejectionReason ? `<div class="rejection-reason mt-1">${esc(c.rejectionReason)}</div>` : ''}
-      <div class="card-meta"><span>${formatDate(c.createdAt)}</span><span>&middot; ${c.downloads || 0} downloads</span></div>
-    </div>
-    <div class="card-actions">
-      <button class="btn btn-ghost btn-sm" data-details>Details</button>
-      <button class="btn btn-danger btn-sm" data-del>Delete</button>
-    </div>`;
-  el.querySelector('[data-details]').addEventListener('click', () => openDetails(c));
-  el.querySelector('[data-del]').addEventListener('click', async () => {
-    if (!confirm('Delete this reference cycle? This cannot be undone.')) return;
-    try {
-      await deleteCycle(c.id); el.remove(); toast('Deleted');
-      if (!$('mine-grid').hasChildNodes()) $('mine-grid').innerHTML = emptyHTML('&#128228;', 'No uploads yet', 'Share your first reference cycle.');
-    } catch (e) { toast(e.message, 'error'); }
-  });
-  return el;
-}
-$('mine-load-more').addEventListener('click', fetchMine);
-
 // ============================================================ details modal
 async function openDetails(c) {
   _openRecord = c; _replyToId = null;
   const parts = String(c.deviceId || '').split('__');
   $('modal-title').textContent = `${parts[1] || ''} ${parts[2] || ''}`.trim() || 'Reference cycle';
   $('modal-program').textContent = _profile ? _profile.program : (c.program_lc || '');
-  $('modal-badges').innerHTML = `<span class="badge badge-type">${esc(typeLabel(c.applianceType))}</span>
-    <span class="badge badge-${esc(c.status)}">${esc(c.status)}</span>`;
+  $('modal-badges').innerHTML = `<span class="badge badge-type">${esc(typeLabel(c.applianceType))}</span>`;
   $('modal-sparkline').innerHTML = sparklineSVG(c, 320, 80);
   $('modal-detail-content').innerHTML = buildDetailGrid(c);
   switchModalTab('detail');
@@ -534,14 +368,14 @@ function buildDetailGrid(c) {
     <div class="detail-item"><span class="detail-label">Model</span><span class="detail-value">${esc(parts[2] || '')}</span></div>
     <div class="detail-item"><span class="detail-label">Program</span><span class="detail-value">${esc(_profile ? _profile.program : c.program_lc)}</span></div>
     <div class="detail-item"><span class="detail-label">Type</span><span class="detail-value">${esc(typeLabel(c.applianceType))}</span></div>
-    <div class="detail-item"><span class="detail-label">Duration</span><span class="detail-value">${formatDuration(st.duration)}</span></div>
-    <div class="detail-item"><span class="detail-label">Energy</span><span class="detail-value">${st.energy_wh != null ? (st.energy_wh / 1000).toFixed(3) + ' kWh' : '-'}</span></div>
-    <div class="detail-item"><span class="detail-label">Peak</span><span class="detail-value">${st.peak_w != null ? st.peak_w + ' W' : '-'}</span></div>
-    <div class="detail-item"><span class="detail-label">Interval</span><span class="detail-value">${c.trace && c.trace.sampleIntervalSec != null ? c.trace.sampleIntervalSec + 's' : '-'}</span></div>
+    <div class="detail-item"><span class="detail-label">Duration</span><span class="detail-value mono-data">${formatDuration(st.duration)}</span></div>
+    <div class="detail-item"><span class="detail-label">Energy</span><span class="detail-value mono-data">${st.energy_wh != null ? (st.energy_wh / 1000).toFixed(3) + ' kWh' : '-'}</span></div>
+    <div class="detail-item"><span class="detail-label">Peak</span><span class="detail-value mono-data">${st.peak_w != null ? st.peak_w + ' W' : '-'}</span></div>
+    <div class="detail-item"><span class="detail-label">Interval</span><span class="detail-value mono-data">${c.trace && c.trace.sampleIntervalSec != null ? c.trace.sampleIntervalSec + 's' : '-'}</span></div>
     <div class="detail-item"><span class="detail-label">Uploader</span><span class="detail-value">${esc(c.uploaderName || 'Anonymous')}</span></div>
     <div class="detail-item"><span class="detail-label">Uploaded</span><span class="detail-value">${formatDate(c.createdAt)}</span></div>
-    <div class="detail-item"><span class="detail-label">Downloads</span><span class="detail-value">${c.downloads || 0}</span></div>
-    <div class="detail-item"><span class="detail-label">Schema v</span><span class="detail-value">${c.cycleSchemaVersion ?? '-'}</span></div>
+    <div class="detail-item"><span class="detail-label">Downloads</span><span class="detail-value mono-data">${c.downloads || 0}</span></div>
+    <div class="detail-item"><span class="detail-label">Schema v</span><span class="detail-value mono-data">${c.cycleSchemaVersion ?? '-'}</span></div>
   </div>`;
 }
 
@@ -635,7 +469,7 @@ function buildCommentEl(comment, isReply, id) {
     _replyToId = comment.id;
     $('reply-indicator-text').textContent = `Replying to ${comment.authorName || 'Anonymous'}`;
     $('reply-indicator').removeAttribute('hidden'); $('cancel-reply-btn').removeAttribute('hidden');
-    $('comment-input').focus(); switchModalTab('comments');
+    $('comment-input').focus();
   });
   const delBtn = el.querySelector('[data-del-id]');
   if (delBtn) delBtn.addEventListener('click', async () => {
@@ -671,4 +505,4 @@ $('submit-comment-btn').addEventListener('click', async () => {
 });
 
 // ============================================================ init
-switchTab('browse');
+if (browseVisible()) { _browseLoaded = true; loadBrands(true); }

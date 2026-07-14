@@ -3,43 +3,54 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="A free community store for sharing appliance power-cycle reference recordings for the ha_washdata Home Assistant integration.">
+  <meta name="description" content="A community library of appliance power-cycle reference recordings for the ha_washdata Home Assistant integration.">
   <title>WashData Store</title>
   <link rel="icon" type="image/png" href="img/icon.png">
   <link rel="apple-touch-icon" href="img/icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
-  <header class="topbar">
-    <a href="index.html" class="brand">
-      <svg width="36" height="22" viewBox="0 0 36 22" fill="none" aria-hidden="true">
-        <polyline points="0,18 2,18 2,10 5,10 7,14 9,8 11,14 13,10 15,10 15,4 17,4 19,10 21,4 23,4 25,10 27,18 36,18"
-          stroke="var(--accent)" stroke-width="1.5" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+  <!-- Maintenance screen (shown to non-admins while MAINTENANCE is on) -->
+  <div id="maintenance-screen" hidden>
+    <div class="maint-inner">
+      <svg width="120" height="54" viewBox="0 0 120 54" fill="none" aria-hidden="true" class="maint-wave">
+        <polyline points="0,40 8,40 8,22 16,22 22,32 28,10 34,32 40,22 46,22 46,8 52,8 60,22 68,8 74,8 82,22 90,40 120,40"
+          stroke="var(--accent)" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
       </svg>
-      WashData Store
-    </a>
-    <nav aria-label="Main navigation">
-      <button class="nav-link active" id="browse-nav">Browse</button>
-      <button class="nav-link" id="upload-nav">Upload</button>
-      <button class="nav-link" id="mine-nav">My Uploads</button>
-      <a class="nav-link" href="admin.html" id="admin-link" hidden>Admin</a>
-    </nav>
-    <div class="user-area" id="auth-status"></div>
-  </header>
-
-  <main>
-    <div class="tabs" role="tablist" aria-label="Store sections">
-      <button class="tab-btn active" id="browse-btn" role="tab" aria-selected="true">Browse</button>
-      <button class="tab-btn" id="upload-btn" role="tab" aria-selected="false">Upload</button>
-      <button class="tab-btn" id="mine-btn" role="tab" aria-selected="false">My Uploads</button>
+      <div class="maint-eyebrow">WashData Store</div>
+      <h1 class="maint-title">Warming up the instruments</h1>
+      <p class="maint-text">The community library is being wired up. Check back soon to browse and download appliance power-cycle recordings.</p>
     </div>
+  </div>
 
-    <!-- Browse tab: device grid -> device view -> profile view -->
-    <div class="tab-panel" id="browse-tab" role="tabpanel">
+  <div id="app-shell">
+    <div id="maint-banner" class="maint-banner" hidden>Maintenance mode - this site is hidden from the public. You are seeing it as an admin.</div>
+
+    <header class="topbar">
+      <a href="index.html" class="brand">
+        <svg width="34" height="20" viewBox="0 0 36 22" fill="none" aria-hidden="true">
+          <polyline points="0,18 2,18 2,10 5,10 7,14 9,8 11,14 13,10 15,10 15,4 17,4 19,10 21,4 23,4 25,10 27,18 36,18"
+            stroke="var(--accent)" stroke-width="1.5" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+        </svg>
+        WashData Store
+      </a>
+      <nav aria-label="Main navigation">
+        <a class="nav-link" href="admin.html" id="admin-link" hidden>Admin</a>
+      </nav>
+      <div class="user-area" id="auth-status"></div>
+    </header>
+
+    <main>
+      <div class="page-head">
+        <span class="eyebrow">Reference library</span>
+        <h1 class="page-title">Appliance power-cycle recordings</h1>
+        <p class="page-lede">Find your appliance, pick a program, and download a clean reference cycle for ha_washdata.</p>
+      </div>
+
       <nav class="breadcrumb" id="breadcrumb" aria-label="Breadcrumb" hidden></nav>
 
       <div class="filter-rail" id="filter-rail">
@@ -61,88 +72,16 @@
       <div class="load-more-area">
         <button class="btn btn-ghost" id="load-more-btn" hidden>Load more</button>
       </div>
-    </div>
+    </main>
 
-    <!-- Upload tab -->
-    <div class="tab-panel" id="upload-tab" role="tabpanel" hidden>
-      <div class="section-header"><h2 class="section-title">Upload a Reference Cycle</h2></div>
-
-      <div id="upload-auth-notice" class="empty-state" hidden>
-        <div class="empty-icon">&#128274;</div>
-        <div class="empty-title">Sign in to contribute</div>
-        <div class="empty-text">You need a GitHub account to upload reference cycles to the community store.</div>
-        <button class="btn btn-primary mt-1" id="upload-signin-btn">Sign in with GitHub</button>
-      </div>
-
-      <form class="upload-form" id="upload-form" hidden novalidate>
-        <div class="form-row">
-          <div class="form-group" style="flex:1">
-            <label for="up-type">Appliance type *</label>
-            <select id="up-type" required>
-              <option value="">Select type</option>
-              <option value="washer">Washer</option>
-              <option value="dryer">Dryer</option>
-              <option value="dishwasher">Dishwasher</option>
-              <option value="washer_dryer">Washer-Dryer</option>
-            </select>
-          </div>
-          <div class="form-group" style="flex:1">
-            <label for="up-brand">Brand *</label>
-            <input type="text" id="up-brand" placeholder="e.g. Bosch" maxlength="40" list="brand-list" autocomplete="off" required>
-            <datalist id="brand-list"></datalist>
-            <span class="form-hint">Start typing to pick an existing brand, or add a new one</span>
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group" style="flex:1">
-            <label for="up-model">Model *</label>
-            <input type="text" id="up-model" placeholder="e.g. Serie 6 WAT28660" maxlength="60" list="model-list" autocomplete="off" required>
-            <datalist id="model-list"></datalist>
-            <span class="form-hint">Existing models for the brand appear as suggestions</span>
-          </div>
-          <div class="form-group" style="flex:1">
-            <label for="up-program">Program *</label>
-            <input type="text" id="up-program" placeholder="e.g. Cotton 40" maxlength="60" required>
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group" style="flex:1">
-            <label for="up-interval">Sample interval (seconds) *</label>
-            <input type="number" id="up-interval" placeholder="5" min="1" max="3600" required>
-            <span class="form-hint">The interval between power readings in the recording</span>
-          </div>
-          <div class="form-group" style="flex:1">
-            <label for="up-desc">Description (optional)</label>
-            <input type="text" id="up-desc" placeholder="e.g. eco mode, full load" maxlength="200">
-          </div>
-        </div>
-        <div class="form-group">
-          <label for="up-cycle-file">Reference cycle file *</label>
-          <input type="file" id="up-cycle-file" accept=".json,.csv,.tsv,text/plain,application/json" required>
-          <span class="form-hint">Power trace: JSON array of [seconds, watts] pairs, or CSV with two columns</span>
-        </div>
-        <div id="upload-preview" class="upload-preview" hidden></div>
-        <div id="upload-result" hidden></div>
-        <div><button type="submit" class="btn btn-primary" id="upload-submit">Submit Upload</button></div>
-        <p class="form-hint">Uploads are reviewed before appearing publicly. Thank you for contributing!</p>
-      </form>
-    </div>
-
-    <!-- My Uploads tab -->
-    <div class="tab-panel" id="mine-tab" role="tabpanel" hidden>
-      <div class="section-header"><h2 class="section-title">My Uploads</h2></div>
-      <div id="mine-signin-notice" class="empty-state" hidden>
-        <div class="empty-icon">&#128274;</div>
-        <div class="empty-title">Sign in to view your uploads</div>
-        <div class="empty-text">Sign in with GitHub to manage the reference cycles you have contributed.</div>
-        <button class="btn btn-primary mt-1" id="mine-signin-btn">Sign in with GitHub</button>
-      </div>
-      <div id="mine-content" hidden>
-        <div class="card-grid" id="mine-grid"></div>
-        <div class="load-more-area"><button class="btn btn-ghost" id="mine-load-more" hidden>Load more</button></div>
-      </div>
-    </div>
-  </main>
+    <footer class="site-footer">
+      <span>Idea by <a href="https://github.com/oli-z" target="_blank" rel="noopener">oli-z</a></span>
+      <span class="foot-sep">&middot;</span>
+      <span>Developed by <a href="https://github.com/3dg1luk43" target="_blank" rel="noopener">3dg1luk43</a></span>
+      <span class="foot-sep">&middot;</span>
+      <span>Copyright &copy; 2026</span>
+    </footer>
+  </div>
 
   <!-- Cycle details modal -->
   <div class="modal-overlay" id="details-modal" hidden aria-modal="true" role="dialog" aria-labelledby="modal-title">
@@ -191,14 +130,6 @@
       </div>
     </div>
   </div>
-
-  <footer class="site-footer">
-    <span>Idea by <a href="https://github.com/oli-z" target="_blank" rel="noopener">oli-z</a></span>
-    <span class="foot-sep">&middot;</span>
-    <span>Developed by <a href="https://github.com/3dg1luk43" target="_blank" rel="noopener">3dg1luk43</a></span>
-    <span class="foot-sep">&middot;</span>
-    <span>Copyright &copy; 2026</span>
-  </footer>
 
   <div class="toast-container" id="toasts" aria-live="assertive" aria-atomic="true"></div>
   <script type="module" src="app.js"></script>
