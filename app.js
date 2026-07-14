@@ -74,6 +74,13 @@ function esc(str) {
   if (str == null) return '';
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
+// Defense-in-depth for hrefs: only allow absolute http(s) URLs. The write rules
+// already enforce this on manualUrl, but the render layer must never trust stored
+// data (a `javascript:`/`data:` href would execute despite esc()). Returns '' otherwise.
+function safeUrl(u) {
+  const s = String(u == null ? '' : u).trim();
+  return /^https?:\/\//i.test(s) ? s : '';
+}
 function formatDate(ts) {
   if (!ts) return '-';
   const d = ts.toDate ? ts.toDate() : new Date(typeof ts === 'number' ? ts * 1000 : ts);
@@ -334,8 +341,9 @@ function buildDeviceCard(d) {
   const el = document.createElement('div');
   el.className = 'card device-card';
   const starred = _favorites.has(d.id);
-  const manual = d.manualUrl
-    ? `<span><a class="card-manual" href="${esc(d.manualUrl)}" target="_blank" rel="noopener noreferrer nofollow">Manual &#8599;</a></span>`
+  const manualHref = safeUrl(d.manualUrl);
+  const manual = manualHref
+    ? `<span><a class="card-manual" href="${esc(manualHref)}" target="_blank" rel="noopener noreferrer nofollow">Manual &#8599;</a></span>`
     : '';
   el.innerHTML = `
     <div class="card-body">
