@@ -42,7 +42,9 @@
         <button class="tab-btn active" id="overview-btn" role="tab">Overview</button>
         <button class="tab-btn" id="review-btn" role="tab">Review Queue</button>
         <button class="tab-btn" id="cycles-btn" role="tab">Cycles</button>
+        <button class="tab-btn" id="brands-btn" role="tab">Brands</button>
         <button class="tab-btn" id="devices-btn" role="tab">Devices</button>
+        <button class="tab-btn" id="profiles-btn" role="tab">Profiles</button>
         <button class="tab-btn" id="users-btn" role="tab">Users</button>
       </div>
 
@@ -112,10 +114,20 @@
         </div>
         <div class="admin-table-wrap">
           <table class="admin-table"><thead><tr>
-            <th>ID</th><th>Device</th><th>Program</th><th>Type</th><th>Status</th><th>Src</th><th>Uploader</th><th>Date</th><th>DL</th><th>Actions</th>
+            <th>ID</th><th>Device</th><th>Profile</th><th>Type</th><th>Status</th><th>Src</th><th>Uploader</th><th>Date</th><th>DL</th><th>Actions</th>
           </tr></thead><tbody id="cycles-tbody"></tbody></table>
         </div>
         <div class="load-more-area"><button class="btn btn-ghost" id="cycles-load-more" hidden>Load more</button></div>
+      </div>
+
+      <!-- Brands table -->
+      <div class="tab-panel" id="brands-tab" role="tabpanel" hidden>
+        <div class="section-header"><h2 class="section-title">Brands</h2></div>
+        <div class="admin-table-wrap">
+          <table class="admin-table"><thead><tr>
+            <th>Brand</th><th>ID</th><th>Status</th><th>Contributor</th><th>Actions</th>
+          </tr></thead><tbody id="brands-tbody"></tbody></table>
+        </div>
       </div>
 
       <!-- Devices table -->
@@ -136,6 +148,16 @@
           </tr></thead><tbody id="devices-tbody"></tbody></table>
         </div>
         <div class="load-more-area"><button class="btn btn-ghost" id="devices-load-more" hidden>Load more</button></div>
+      </div>
+
+      <!-- Profiles table -->
+      <div class="tab-panel" id="profiles-tab" role="tabpanel" hidden>
+        <div class="section-header"><h2 class="section-title">Profiles</h2></div>
+        <div class="admin-table-wrap">
+          <table class="admin-table"><thead><tr>
+            <th>Profile</th><th>Device</th><th>Status</th><th>Contributor</th><th>Actions</th>
+          </tr></thead><tbody id="profiles-tbody"></tbody></table>
+        </div>
       </div>
 
       <!-- Users -->

@@ -389,15 +389,34 @@ export async function searchDevices({ applianceType = null, brand = null, favori
   return { items: await q('approved'), cursor: null };
 }
 
-export async function getProfiles(deviceId) {
-  return restQuery('profiles', {
+// Profiles for a device. includePending merges approved + pending (shown with a tag),
+// mirroring the brand/device catalog visibility.
+export async function getProfiles(deviceId, { includePending = false } = {}) {
+  const q = (status) => restQuery('profiles', {
     filters: [
       { field: 'deviceId', op: 'EQUAL', value: deviceId },
-      { field: 'status', op: 'EQUAL', value: 'approved' },
+      { field: 'status', op: 'EQUAL', value: status },
     ],
     orderBy: [{ field: 'createdAt', dir: 'DESCENDING' }],
     limit: 100,
   });
+  if (!includePending) return q('approved');
+  const [a, p] = await Promise.all([q('approved'), q('pending')]);
+  const byId = new Map();
+  for (const x of [...a, ...p]) if (!byId.has(x.id)) byId.set(x.id, x);
+  return [...byId.values()];
+}
+
+// Create a pending profile (program) under a device. Rules force status:pending.
+export async function createProfile({ deviceId, program, description = '' }) {
+  const user = _auth.currentUser;
+  if (!user) throw new Error('Not signed in');
+  if (!deviceId) throw new Error('Missing device');
+  if (typeof program !== 'string' || program.trim().length < 1 || program.length > 60) {
+    throw new Error('Profile name must be 1-60 characters');
+  }
+  _rateGuard();
+  return ensureProfile({ deviceId, program: program.trim(), description });
 }
 
 export async function favoriteDevice(id, on) {
@@ -669,6 +688,26 @@ export async function adminListDevices({ status = null, pageSize = 50 } = {}) {
 
 export async function adminSetDeviceStatus(id, status) {
   await updateDoc(doc(_db, 'devices', id), { status });
+}
+
+// Admin brand/profile listings for the review tabs. No server-side status filter
+// (keeps the query on a single-field index); the admin UI filters client-side.
+export async function adminListBrands({ pageSize = 200 } = {}) {
+  const items = await restQuery('brands', {
+    orderBy: [{ field: 'brand_lc', dir: 'ASCENDING' }],
+    limit: pageSize,
+    auth: true,
+  });
+  return { items, cursor: null };
+}
+
+export async function adminListProfiles({ pageSize = 200 } = {}) {
+  const items = await restQuery('profiles', {
+    orderBy: [{ field: 'createdAt', dir: 'DESCENDING' }],
+    limit: pageSize,
+    auth: true,
+  });
+  return { items, cursor: null };
 }
 
 export async function adminSetProfileStatus(id, status) {

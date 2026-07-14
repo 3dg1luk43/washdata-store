@@ -2,7 +2,7 @@ import firebaseConfig from './config.js';
 import { MAINTENANCE } from './site-config.js';
 import {
   init, onAuth, signIn, signOutUser, isAdmin, ensureUserProfile,
-  listBrands, searchDevices, getDevicesByBrand, getProfiles, getReferenceCycles,
+  listBrands, searchDevices, getDevicesByBrand, getProfiles, createProfile, getReferenceCycles,
   bumpDownload, favoriteDevice, getFavorites,
   addComment, listComments, deleteComment,
   submitRating, getUserRating, getRatingSummary,
@@ -233,8 +233,12 @@ function buildBrandCard(b) {
 }
 
 // ============================================================ browse: brand -> devices
+let _brandDevices = [];
+let _brandTypeFilter = '';
+
 async function openBrand(b) {
   _brand = b; _device = null; _profile = null; _view = 'brand';
+  _brandDevices = []; _brandTypeFilter = '';
   $('filter-rail').setAttribute('hidden', '');
   $('load-more-btn').setAttribute('hidden', '');
   renderBreadcrumb();
@@ -242,16 +246,38 @@ async function openBrand(b) {
   body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
   try {
     const { items } = await getDevicesByBrand(b.brand_lc, { pageSize: 60, includePending: !_browseFilters.approvedOnly });
-    if (items.length === 0) { body.innerHTML = emptyHTML('&#128203;', 'No models yet', 'No models for this brand yet.') + addApplianceCTA(b.brand); return; }
-    const grid = document.createElement('div');
-    grid.className = 'card-grid';
-    items.forEach((d) => grid.appendChild(buildDeviceCard(d)));
-    body.innerHTML = '';
-    body.appendChild(grid);
-    const cta = document.createElement('div');
-    cta.innerHTML = addApplianceCTA(b.brand);
-    body.appendChild(cta);
+    _brandDevices = items;
+    renderBrandDevices();
   } catch (e) { body.innerHTML = emptyHTML('&#9888;', 'Failed to load', esc(e.message)); }
+}
+
+// Render the brand's appliances with a device-type filter (client-side over the
+// already-fetched list, so switching type is instant).
+function renderBrandDevices() {
+  const body = $('browse-body');
+  if (_brandDevices.length === 0) {
+    body.innerHTML = emptyHTML('&#128203;', 'No models yet', 'No models for this brand yet.') + addApplianceCTA(_brand.brand);
+    return;
+  }
+  const types = [...new Set(_brandDevices.map((d) => d.applianceType).filter(Boolean))].sort();
+  const typeOpts = [`<option value="">${esc('All types')}</option>`]
+    .concat(types.map((t) => `<option value="${esc(t)}" ${_brandTypeFilter === t ? 'selected' : ''}>${esc(typeLabel(t))}</option>`))
+    .join('');
+  const filtered = _brandTypeFilter ? _brandDevices.filter((d) => d.applianceType === _brandTypeFilter) : _brandDevices;
+  body.innerHTML = '';
+  const bar = document.createElement('div');
+  bar.className = 'filter-rail';
+  bar.innerHTML = `<div class="form-group"><label for="brand-type-filter">Appliance type</label>
+    <select id="brand-type-filter">${typeOpts}</select></div>`;
+  body.appendChild(bar);
+  bar.querySelector('#brand-type-filter').addEventListener('change', (e) => { _brandTypeFilter = e.target.value; renderBrandDevices(); });
+  const grid = document.createElement('div');
+  grid.className = 'card-grid';
+  filtered.forEach((d) => grid.appendChild(buildDeviceCard(d)));
+  body.appendChild(grid);
+  const cta = document.createElement('div');
+  cta.innerHTML = addApplianceCTA(_brand.brand);
+  body.appendChild(cta);
 }
 
 function buildDeviceCard(d) {
@@ -267,7 +293,7 @@ function buildDeviceCard(d) {
       <div class="card-title">${esc(d.brand)} ${esc(modelOf(d))}</div>
       <div class="card-badges">
         ${statusBadge(d)}
-        ${d.profileCount ? `<span class="badge">${d.profileCount} program${d.profileCount > 1 ? 's' : ''}</span>` : ''}
+        ${d.profileCount ? `<span class="badge">${d.profileCount} profile${d.profileCount > 1 ? 's' : ''}</span>` : ''}
       </div>
       <div class="card-meta"><span>&#11088; ${d.favoriteCount || 0}</span><span>by ${esc(d.createdByName || 'Anonymous')}</span>${manual}</div>
       <div class="card-community" data-community></div>
@@ -367,23 +393,55 @@ async function openDevice(d) {
   const body = $('browse-body');
   body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
   try {
-    const profiles = await getProfiles(d.id);
-    if (profiles.length === 0) { body.innerHTML = emptyHTML('&#128203;', 'No programs yet', 'No approved programs for this device yet.'); return; }
-    const list = document.createElement('div');
-    list.className = 'profile-list';
-    profiles.forEach((p) => list.appendChild(buildProfileRow(p)));
+    const profiles = await getProfiles(d.id, { includePending: !_browseFilters.approvedOnly });
     body.innerHTML = '';
-    body.appendChild(list);
+    if (profiles.length === 0) {
+      body.innerHTML = emptyHTML('&#128203;', 'No profiles yet', 'No profiles for this appliance yet.');
+    } else {
+      const list = document.createElement('div');
+      list.className = 'profile-list';
+      profiles.forEach((p) => list.appendChild(buildProfileRow(p)));
+      body.appendChild(list);
+    }
+    body.appendChild(buildAddProfile(d));
   } catch (e) { body.innerHTML = emptyHTML('&#9888;', 'Failed to load', esc(e.message)); }
 }
 
 function buildProfileRow(p) {
   const el = document.createElement('button');
   el.className = 'profile-row';
-  el.innerHTML = `<span class="profile-name">${esc(p.program)}</span>
+  el.innerHTML = `<span class="profile-name">${esc(p.program)}${statusBadge(p)}</span>
     <span class="profile-meta">${p.cycleCount || 0} cycle${p.cycleCount === 1 ? '' : 's'} &rsaquo;</span>`;
   el.addEventListener('click', () => openProfile(p));
   return el;
+}
+
+// "Can't see your profile? Add it" inline creator, shown under a device's profiles.
+function buildAddProfile(d) {
+  const wrap = document.createElement('div');
+  wrap.className = 'add-cta add-profile';
+  if (!_user) {
+    wrap.innerHTML = `<span class="text-muted">Can't see your profile?</span> <span class="text-muted" style="font-size:.8125rem">Sign in to add one.</span>`;
+    return wrap;
+  }
+  wrap.innerHTML = `<span class="text-muted">Can't see your profile?</span>
+    <input type="text" id="add-profile-name" maxlength="60" placeholder="e.g. Cotton 40" autocomplete="off" style="max-width:220px">
+    <button class="btn btn-primary btn-sm" id="add-profile-btn">Add profile</button>`;
+  const input = wrap.querySelector('#add-profile-name');
+  const btn = wrap.querySelector('#add-profile-btn');
+  const submit = async () => {
+    const program = input.value.trim();
+    if (!program) { input.focus(); return; }
+    btn.disabled = true;
+    try {
+      await createProfile({ deviceId: d.id, program });
+      toast('Profile added - awaiting approval');
+      openDevice(d);   // refresh so the new pending profile shows with its tag
+    } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+  };
+  btn.addEventListener('click', submit);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+  return wrap;
 }
 
 // ============================================================ browse: profile -> reference cycles
@@ -394,7 +452,7 @@ async function openProfile(p) {
   body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
   try {
     const { items } = await getReferenceCycles(p.id);
-    if (items.length === 0) { body.innerHTML = emptyHTML('&#128200;', 'No reference cycles', 'No approved reference cycles for this program yet.'); return; }
+    if (items.length === 0) { body.innerHTML = emptyHTML('&#128200;', 'No reference cycles', 'No approved reference cycles for this profile yet.'); return; }
     const grid = document.createElement('div');
     grid.className = 'card-grid';
     items.forEach((c) => grid.appendChild(buildCycleCard(c)));
@@ -471,7 +529,7 @@ function buildDetailGrid(c) {
   return `<div class="detail-grid">
     <div class="detail-item"><span class="detail-label">Brand</span><span class="detail-value">${esc(prettyBrand(c))}</span></div>
     <div class="detail-item"><span class="detail-label">Model</span><span class="detail-value">${esc(prettyModel(c))}</span></div>
-    <div class="detail-item"><span class="detail-label">Program</span><span class="detail-value">${esc(_profile ? _profile.program : c.program_lc)}</span></div>
+    <div class="detail-item"><span class="detail-label">Profile</span><span class="detail-value">${esc(_profile ? _profile.program : c.program_lc)}</span></div>
     <div class="detail-item"><span class="detail-label">Type</span><span class="detail-value">${esc(typeLabel(c.applianceType))}</span></div>
     <div class="detail-item"><span class="detail-label">Duration</span><span class="detail-value mono-data">${formatDuration(st.duration)}</span></div>
     <div class="detail-item"><span class="detail-label">Energy</span><span class="detail-value mono-data">${st.energy_wh != null ? (st.energy_wh / 1000).toFixed(3) + ' kWh' : '-'}</span></div>

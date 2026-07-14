@@ -14,6 +14,7 @@ init(firebaseConfig);
 
 const params = new URLSearchParams(location.search);
 const PREFILL = {
+  mode: params.get('mode') || 'device',   // 'device' (appliance) | 'brand'
   type: params.get('type') || '',
   brand: params.get('brand') || '',
   model: params.get('model') || '',
@@ -112,6 +113,9 @@ function switchTab(name) {
   document.querySelectorAll('[data-cpanel]').forEach((p) => p.toggleAttribute('hidden', p.dataset.cpanel !== name));
 }
 document.querySelectorAll('[data-ctab]').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.ctab)));
+
+// Preselect the tab from ?mode= so entry points can deep-link straight to brand.
+if (PREFILL.mode === 'brand') switchTab('brand');
 
 if (['washer', 'dryer', 'dishwasher', 'washer_dryer'].includes(PREFILL.type)) $('dev-type').value = PREFILL.type;
 if (PREFILL.brand) $('dev-brand').value = PREFILL.brand;

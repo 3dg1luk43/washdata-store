@@ -137,6 +137,23 @@ test('auto-promotion: only status flip, only at/above threshold', async () => {
   await assertFails(updateDoc(doc(db, 'devices/d_hi2'), { status: 'approved', favoriteCount: 9 }));
 });
 
+const validProfile = (uid, over = {}) => ({
+  deviceId: 'washer__bosch__wat', applianceType: 'washer',
+  program: 'Cotton 40', program_lc: 'cotton 40', status: 'pending',
+  createdByUid: uid, createdAt: new Date(), cycleCount: 0, ...over,
+});
+
+test('profile create by github user; pending is publicly readable, removed is not', async () => {
+  await assertSucceeds(setDoc(doc(gh('u1').firestore(), 'profiles/washer__bosch__wat__cotton-40'), validProfile('u1')));
+  await assertFails(setDoc(doc(anon().firestore(), 'profiles/x'), validProfile('anon')));
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'profiles/p_pending'), validProfile('u9', { status: 'pending' }));
+    await setDoc(doc(ctx.firestore(), 'profiles/p_removed'), validProfile('u9', { status: 'removed' }));
+  });
+  await assertSucceeds(getDoc(doc(anon().firestore(), 'profiles/p_pending')));
+  await assertFails(getDoc(doc(anon().firestore(), 'profiles/p_removed')));
+});
+
 test('device quality rating: own uid, 1-5 only', async () => {
   await env.withSecurityRulesDisabled(async (ctx) => {
     await setDoc(doc(ctx.firestore(), 'devices/d_rate'), validDevice('o'));
