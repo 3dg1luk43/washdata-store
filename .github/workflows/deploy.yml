@@ -1,0 +1,56 @@
+name: Deploy store to GitHub Pages
+
+# Stamps every local asset with the deploy timestamp (cache-bust) and publishes the
+# static store to GitHub Pages on every push to main.
+#
+# ONE-TIME SETUP: in the repo, Settings -> Pages -> Build and deployment -> Source,
+# choose "GitHub Actions" (instead of "Deploy from a branch"). Otherwise this workflow
+# runs but Pages keeps serving the branch directly.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Stamp assets with the deploy timestamp
+        run: ASSET_VERSION="$(date -u +%Y%m%d%H%M%S)" node scripts/stamp_assets.mjs
+
+      - name: Assemble the static site into dist/
+        run: |
+          mkdir -p dist/lib dist/img
+          cp index.html admin.html connect.html \
+             app.js admin.js connect.js washstore.js firestore-rest.js site-config.js config.js \
+             styles.css dist/
+          cp lib/ids.js lib/trace.js dist/lib/
+          cp img/icon.png dist/img/ 2>/dev/null || true
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
