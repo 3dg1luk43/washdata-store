@@ -6,6 +6,22 @@ import firebaseConfig from './config.js';
 const PID = firebaseConfig.projectId;
 const BASE = `https://firestore.googleapis.com/v1/projects/${PID}/databases/(default)/documents`;
 
+// Optional auth-token provider (set by washstore init). Public reads pass no token;
+// admin/owner reads pass { auth: true } to attach the signed-in user's ID token so the
+// rules grant access to non-public (pending/rejected/all) documents.
+let _getToken = null;
+export function setTokenProvider(fn) { _getToken = fn; }
+
+async function authHeaders(auth) {
+  if (!auth || !_getToken) return {};
+  try {
+    const t = await _getToken();
+    return t ? { Authorization: `Bearer ${t}` } : {};
+  } catch (_) {
+    return {};
+  }
+}
+
 // --- typed value encode/decode ---
 function encodeValue(v) {
   if (v == null) return { nullValue: null };
@@ -60,7 +76,7 @@ export async function restQuery(collectionId, opts = {}) {
   const url = parent ? `${BASE}/${parent}:runQuery` : `${BASE}:runQuery`;
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders(opts.auth)) },
     body: JSON.stringify({ structuredQuery: sq }),
   });
   if (!res.ok) throw new Error(await restError(res));
@@ -68,11 +84,29 @@ export async function restQuery(collectionId, opts = {}) {
   return rows.filter((r) => r.document).map((r) => decodeDoc(r.document));
 }
 
-export async function restGet(path) {
-  const res = await fetch(`${BASE}/${path}`);
+export async function restGet(path, opts = {}) {
+  const res = await fetch(`${BASE}/${path}`, { headers: await authHeaders(opts.auth) });
   if (res.status === 404 || res.status === 403) return null;
   if (!res.ok) throw new Error(await restError(res));
   return decodeDoc(await res.json());
+}
+
+// count() aggregation over a collection with optional equality filters.
+export async function restCount(collectionId, filters = [], opts = {}) {
+  const sq = { from: [{ collectionId }] };
+  const ff = filters.map((f) => ({ fieldFilter: { field: { fieldPath: f.field }, op: f.op, value: encodeValue(f.value) } }));
+  if (ff.length === 1) sq.where = ff[0];
+  else if (ff.length > 1) sq.where = { compositeFilter: { op: 'AND', filters: ff } };
+  const body = { structuredAggregationQuery: { structuredQuery: sq, aggregations: [{ alias: 'cnt', count: {} }] } };
+  const res = await fetch(`${BASE}:runAggregationQuery`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders(opts.auth)) },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) return 0;
+  const rows = await res.json();
+  const r = rows.find((x) => x.result);
+  return r && r.result.aggregateFields.cnt ? decodeValue(r.result.aggregateFields.cnt) : 0;
 }
 
 // avg + count over a cycle's ratings subcollection (one request)

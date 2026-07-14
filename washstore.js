@@ -23,12 +23,11 @@ import {
   startAfter,
   serverTimestamp,
   increment,
-  getCountFromServer,
   writeBatch,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
 import { deviceId as mkDeviceId, profileId as mkProfileId } from './lib/ids.js';
 import { downsampleCycle, parseCycle, cycleStats } from './lib/trace.js';
-import { restQuery, restGet, restRatingSummary } from './firestore-rest.js';
+import { restQuery, restGet, restRatingSummary, restCount, setTokenProvider } from './firestore-rest.js';
 
 export { downsampleCycle, parseCycle, cycleStats };
 
@@ -66,6 +65,8 @@ export function init(config) {
   _app = initializeApp(config);
   _auth = getAuth(_app);
   _db = getFirestore(_app);
+  // Let the REST layer attach the signed-in user's ID token on authed (admin/owner) reads.
+  setTokenProvider(() => (_auth && _auth.currentUser ? _auth.currentUser.getIdToken() : null));
 }
 
 export function onAuth(callback) {
@@ -497,14 +498,18 @@ const _QC_LABEL = { 1: 'Recording', 2: 'Edited', 3: 'Manual' };
 export function qcLabel(qc) { return _QC_LABEL[qc] || 'Unknown'; }
 
 export async function adminListCycles({ status = null, applianceType = null, pageSize = 24, cursor = null } = {}) {
-  const cons = [];
-  if (status) cons.push(where('status', '==', status));
-  if (applianceType) cons.push(where('applianceType', '==', applianceType));
-  cons.push(orderBy('createdAt', 'desc'), limit(pageSize));
-  if (cursor) cons.push(startAfter(cursor));
-  const snap = await getDocs(query(collection(_db, 'cycles'), ...cons));
-  const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  return { items, cursor: snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null };
+  const filters = [];
+  if (status) filters.push({ field: 'status', op: 'EQUAL', value: status });
+  if (applianceType) filters.push({ field: 'applianceType', op: 'EQUAL', value: applianceType });
+  const items = await restQuery('cycles', {
+    filters,
+    orderBy: [{ field: 'createdAt', dir: 'DESCENDING' }],
+    limit: pageSize,
+    startAfter: cursor ? [cursor] : null,
+    auth: true,
+  });
+  const next = items.length === pageSize ? items[items.length - 1].createdAt : null;
+  return { items, cursor: next };
 }
 
 export async function adminSetCycleStatus(id, status, reason = null) {
@@ -513,14 +518,16 @@ export async function adminSetCycleStatus(id, status, reason = null) {
   await updateDoc(doc(_db, 'cycles', id), update);
 }
 
-export async function adminListDevices({ status = null, pageSize = 50, cursor = null } = {}) {
-  const cons = [];
-  if (status) cons.push(where('status', '==', status));
-  cons.push(orderBy('favoriteCount', 'desc'), limit(pageSize));
-  if (cursor) cons.push(startAfter(cursor));
-  const snap = await getDocs(query(collection(_db, 'devices'), ...cons));
-  const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  return { items, cursor: snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null };
+export async function adminListDevices({ status = null, pageSize = 50 } = {}) {
+  const filters = [];
+  if (status) filters.push({ field: 'status', op: 'EQUAL', value: status });
+  const items = await restQuery('devices', {
+    filters,
+    orderBy: [{ field: 'favoriteCount', dir: 'DESCENDING' }],
+    limit: pageSize,
+    auth: true,
+  });
+  return { items, cursor: null };
 }
 
 export async function adminSetDeviceStatus(id, status) {
@@ -563,11 +570,14 @@ export async function adminMergeDevices(fromId, toId) {
 }
 
 export async function adminListUsers({ pageSize = 50, cursor = null } = {}) {
-  const cons = [orderBy('createdAt', 'desc'), limit(pageSize)];
-  if (cursor) cons.push(startAfter(cursor));
-  const snap = await getDocs(query(collection(_db, 'users'), ...cons));
-  const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  return { items, cursor: snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null };
+  const items = await restQuery('users', {
+    orderBy: [{ field: 'createdAt', dir: 'DESCENDING' }],
+    limit: pageSize,
+    startAfter: cursor ? [cursor] : null,
+    auth: true,
+  });
+  const next = items.length === pageSize ? items[items.length - 1].createdAt : null;
+  return { items, cursor: next };
 }
 
 export async function adminBanUser(uid, reason = '') {
@@ -595,20 +605,10 @@ export async function adminDeleteComment(cycleId, commentId) {
 }
 
 export async function adminGetStats() {
-  const cyclesCol = collection(_db, 'cycles');
-  const usersCol = collection(_db, 'users');
+  const st = (s) => restCount('cycles', [{ field: 'status', op: 'EQUAL', value: s }], { auth: true });
   const [pending, approved, rejected, removed, bannedUsers] = await Promise.all([
-    getCountFromServer(query(cyclesCol, where('status', '==', 'pending'))),
-    getCountFromServer(query(cyclesCol, where('status', '==', 'approved'))),
-    getCountFromServer(query(cyclesCol, where('status', '==', 'rejected'))),
-    getCountFromServer(query(cyclesCol, where('status', '==', 'removed'))),
-    getCountFromServer(query(usersCol, where('banned', '==', true))),
+    st('pending'), st('approved'), st('rejected'), st('removed'),
+    restCount('users', [{ field: 'banned', op: 'EQUAL', value: true }], { auth: true }),
   ]);
-  return {
-    pending: pending.data().count,
-    approved: approved.data().count,
-    rejected: rejected.data().count,
-    removed: removed.data().count,
-    bannedUsers: bannedUsers.data().count,
-  };
+  return { pending, approved, rejected, removed, bannedUsers };
 }
