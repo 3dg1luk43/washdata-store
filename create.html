@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Add an appliance or brand to the WashData community catalog.">
+  <title>Add to WashData Store</title>
+  <link rel="icon" type="image/png" href="img/icon.png">
+  <link rel="apple-touch-icon" href="img/icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <div id="boot"><div class="loading-spinner"></div></div>
+
+  <div id="maintenance-screen" hidden>
+    <div class="maint-inner">
+      <svg width="120" height="54" viewBox="0 0 120 54" fill="none" aria-hidden="true" class="maint-wave">
+        <polyline points="0,40 8,40 8,22 16,22 22,32 28,10 34,32 40,22 46,22 46,8 52,8 60,22 68,8 74,8 82,22 90,40 120,40"
+          stroke="var(--accent)" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+      </svg>
+      <div class="maint-eyebrow">WashData Store</div>
+      <h1 class="maint-title">Warming up the instruments</h1>
+      <p class="maint-text">The community library is being wired up. Check back soon to browse and contribute.</p>
+    </div>
+  </div>
+
+  <div id="app-shell" hidden>
+    <div id="maint-banner" class="maint-banner" hidden>Maintenance mode - this site is hidden from the public. You are seeing it as an admin.</div>
+
+    <header class="topbar">
+      <a href="index.html" class="brand">
+        <svg width="34" height="20" viewBox="0 0 36 22" fill="none" aria-hidden="true">
+          <polyline points="0,18 2,18 2,10 5,10 7,14 9,8 11,14 13,10 15,10 15,4 17,4 19,10 21,4 23,4 25,10 27,18 36,18"
+            stroke="var(--accent)" stroke-width="1.5" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+        </svg>
+        WashData Store
+      </a>
+      <nav aria-label="Main navigation">
+        <a class="nav-link" href="index.html">Back to browse</a>
+      </nav>
+      <div class="user-area" id="auth-status"></div>
+    </header>
+
+    <main>
+      <div class="page-head">
+        <span class="eyebrow">Contribute</span>
+        <h1 class="page-title">Add to the catalog</h1>
+        <p class="page-lede">Add your appliance or brand so it appears in Home Assistant. New entries are marked "awaiting approval" and become approved once enough people confirm them.</p>
+      </div>
+
+      <div id="signin-gate" class="empty-state" hidden>
+        <div class="empty-icon">&#128273;</div>
+        <div class="empty-title">Sign in to contribute</div>
+        <div class="empty-text">Contributions are open to signed-in GitHub users. Sign in to add an appliance or brand.</div>
+        <button class="btn btn-primary mt-1" id="gate-signin-btn">Sign in with GitHub</button>
+      </div>
+
+      <div id="contribute-body" hidden>
+        <div class="tabs" role="tablist">
+          <button class="tab-btn active" id="tab-device-btn" role="tab" data-ctab="device">Add appliance</button>
+          <button class="tab-btn" id="tab-brand-btn" role="tab" data-ctab="brand">Add brand</button>
+        </div>
+
+        <!-- Add appliance -->
+        <form class="contribute-card" id="device-form" data-cpanel="device">
+          <div class="form-group">
+            <label for="dev-type">Appliance type</label>
+            <select id="dev-type" required>
+              <option value="washer">Washer</option>
+              <option value="dryer">Dryer</option>
+              <option value="dishwasher">Dishwasher</option>
+              <option value="washer_dryer">Washer dryer</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="dev-brand">Brand</label>
+            <input type="text" id="dev-brand" list="brand-list" maxlength="40" placeholder="e.g. Bosch" autocomplete="off" required>
+            <datalist id="brand-list"></datalist>
+            <div class="form-hint">Pick an existing brand or type a new one (it will be created too).</div>
+          </div>
+          <div class="form-group">
+            <label for="dev-model">Model</label>
+            <input type="text" id="dev-model" maxlength="60" placeholder="e.g. Serie 6 WAT28660" autocomplete="off" required>
+            <div class="form-hint">The exact model name, as printed on the appliance, so others recognize it.</div>
+          </div>
+          <div class="form-group">
+            <label for="dev-manual">Manual or product page URL <span class="text-muted">(optional)</span></label>
+            <input type="url" id="dev-manual" maxlength="500" placeholder="https://..." autocomplete="off">
+          </div>
+          <label class="consent-row"><input type="checkbox" id="dev-consent"> Show my GitHub name as the contributor of this entry</label>
+          <div class="btn-row">
+            <button type="submit" class="btn btn-primary" id="dev-submit">Add appliance</button>
+          </div>
+        </form>
+
+        <!-- Add brand -->
+        <form class="contribute-card" id="brand-form" data-cpanel="brand" hidden>
+          <div class="form-group">
+            <label for="brand-name">Brand name</label>
+            <input type="text" id="brand-name" maxlength="40" placeholder="e.g. Bosch" autocomplete="off" required>
+          </div>
+          <label class="consent-row"><input type="checkbox" id="brand-consent"> Show my GitHub name as the contributor of this brand</label>
+          <div class="btn-row">
+            <button type="submit" class="btn btn-primary" id="brand-submit">Add brand</button>
+          </div>
+        </form>
+
+        <div id="create-result" class="contribute-result" hidden></div>
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <span>Idea by <a href="https://github.com/oli-z" target="_blank" rel="noopener">oli-z</a></span>
+      <span class="foot-sep">&middot;</span>
+      <span>Developed by <a href="https://github.com/3dg1luk43" target="_blank" rel="noopener">3dg1luk43</a></span>
+      <span class="foot-sep">&middot;</span>
+      <span>Copyright &copy; 2026</span>
+    </footer>
+  </div>
+
+  <div class="toast-container" id="toasts" aria-live="assertive" aria-atomic="true"></div>
+  <script type="module" src="create.js"></script>
+</body>
+</html>

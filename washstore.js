@@ -27,7 +27,7 @@ import {
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
 import { deviceId as mkDeviceId, profileId as mkProfileId } from './lib/ids.js';
 import { downsampleCycle, parseCycle, cycleStats } from './lib/trace.js';
-import { restQuery, restGet, restRatingSummary, restCount, setTokenProvider } from './firestore-rest.js';
+import { restQuery, restGet, restRatingSummary, restDeviceRating, restCount, setTokenProvider } from './firestore-rest.js';
 
 export { downsampleCycle, parseCycle, cycleStats };
 
@@ -148,7 +148,7 @@ function _estimateDocSize(data) {
 // Devices / profiles
 // ------------------------------------------------------------------
 
-export async function ensureBrand({ brand }) {
+export async function ensureBrand({ brand, createdByName = null }) {
   const id = brand.toLowerCase();
   const ref = doc(_db, 'brands', id);
   const snap = await getDoc(ref);
@@ -160,13 +160,14 @@ export async function ensureBrand({ brand }) {
       brand_lc: id,
       status: 'pending',
       createdByUid: user.uid,
+      createdByName: createdByName || null,
       createdAt: serverTimestamp(),
     });
   }
   return id;
 }
 
-export async function ensureDevice({ applianceType, brand, model }) {
+export async function ensureDevice({ applianceType, brand, model, manualUrl = null, createdByName = null }) {
   const id = mkDeviceId(applianceType, brand, model);
   const ref = doc(_db, 'devices', id);
   const snap = await getDoc(ref);
@@ -181,12 +182,113 @@ export async function ensureDevice({ applianceType, brand, model }) {
       model_lc: model.toLowerCase(),
       status: 'pending',
       createdByUid: user.uid,
+      createdByName: createdByName || null,
+      manualUrl: manualUrl || null,
       createdAt: serverTimestamp(),
       profileCount: 0,
       favoriteCount: 0,
+      confirmCount: 0,
     });
   }
   return id;
+}
+
+// ------------------------------------------------------------------
+// Community catalog: contribute / confirm / rate (device-level)
+// ------------------------------------------------------------------
+
+const APPLIANCE_LABELS = { washer: 'Washer', dryer: 'Dryer', dishwasher: 'Dishwasher', washer_dryer: 'Washer dryer' };
+export function applianceLabel(t) { return APPLIANCE_LABELS[t] || t; }
+
+let _confirmThresholdCache = null;
+export async function confirmThresholdValue() {
+  if (_confirmThresholdCache != null) return _confirmThresholdCache;
+  const cfg = await getSiteConfig();
+  const v = Number(cfg.confirmThreshold);
+  _confirmThresholdCache = Number.isFinite(v) && v > 0 ? v : 5;
+  return _confirmThresholdCache;
+}
+
+// Create a pending brand entry with optional public attribution.
+export async function createBrand({ brand, showName = false }) {
+  const user = _auth.currentUser;
+  if (!user) throw new Error('Not signed in');
+  if (typeof brand !== 'string' || brand.length < 1 || brand.length > 40) throw new Error('Brand must be 1-40 characters');
+  _rateGuard();
+  return ensureBrand({ brand: brand.trim(), createdByName: showName ? (user.displayName || null) : null });
+}
+
+// Create a pending device (appliance) entry. Lazily ensures the brand exists.
+export async function createDevice({ applianceType, brand, model, manualUrl = null, showName = false }) {
+  const user = _auth.currentUser;
+  if (!user) throw new Error('Not signed in');
+  if (!APPLIANCE_TYPES.includes(applianceType)) throw new Error('Invalid appliance type');
+  if (typeof brand !== 'string' || brand.length < 1 || brand.length > 40) throw new Error('Brand must be 1-40 characters');
+  if (typeof model !== 'string' || model.length < 1 || model.length > 60) throw new Error('Model must be 1-60 characters');
+  const url = (manualUrl || '').trim();
+  if (url && (url.length > 500 || !/^https?:\/\//i.test(url))) throw new Error('Manual URL must start with http(s):// and be under 500 characters');
+  _rateGuard();
+  const name = showName ? (user.displayName || null) : null;
+  await ensureBrand({ brand: brand.trim(), createdByName: name });
+  const devId = await ensureDevice({
+    applianceType, brand: brand.trim(), model: model.trim(), manualUrl: url || null, createdByName: name,
+  });
+  return devId;
+}
+
+export async function hasConfirmedDevice(deviceId) {
+  const user = _auth.currentUser;
+  if (!user) return false;
+  const rec = await restGet(`devices/${deviceId}/confirmations/${user.uid}`);
+  return !!rec;
+}
+
+// Confirm a device is a real/correct entry. One confirmation per user (uid-keyed doc);
+// crossing the admin-tunable threshold auto-promotes the device to approved.
+export async function confirmDevice(deviceId) {
+  const user = _auth.currentUser;
+  if (!user) throw new Error('Not signed in');
+  _rateGuard();
+  const confRef = doc(_db, 'devices', deviceId, 'confirmations', user.uid);
+  const dev0 = await restGet(`devices/${deviceId}`);
+  if (!(await getDoc(confRef)).exists()) {
+    const batch = writeBatch(_db);
+    batch.set(confRef, { uid: user.uid, createdAt: serverTimestamp() });
+    batch.update(doc(_db, 'devices', deviceId), { confirmCount: increment(1) });
+    await batch.commit();
+  }
+  // Re-read the honest count and best-effort promote (the rule is the real guard).
+  const dev = await restGet(`devices/${deviceId}`);
+  const count = (dev && dev.confirmCount) || 0;
+  let status = dev ? dev.status : (dev0 && dev0.status);
+  const threshold = await confirmThresholdValue();
+  if (status === 'pending' && count >= threshold) {
+    try { await updateDoc(doc(_db, 'devices', deviceId), { status: 'approved' }); status = 'approved'; }
+    catch (_) { /* race or rule mismatch: leave pending, ignore */ }
+  }
+  return { confirmed: true, confirmCount: count, status };
+}
+
+// Optional 5-star quality score (info only). One per user, editable.
+export async function rateDevice(deviceId, rating) {
+  const user = _auth.currentUser;
+  if (!user) throw new Error('Not signed in');
+  if (![1, 2, 3, 4, 5].includes(rating)) throw new Error('Rating must be 1-5');
+  _rateGuard();
+  await setDoc(doc(_db, 'devices', deviceId, 'ratings', user.uid), {
+    uid: user.uid, rating, updatedAt: serverTimestamp(),
+  }, { merge: true });
+}
+
+export async function getUserDeviceRating(deviceId) {
+  const user = _auth.currentUser;
+  if (!user) return null;
+  const rec = await restGet(`devices/${deviceId}/ratings/${user.uid}`);
+  return rec ? rec.rating : null;
+}
+
+export async function getDeviceQuality(deviceId) {
+  return restDeviceRating(deviceId);
 }
 
 export async function ensureProfile({ deviceId, program, description = '' }) {
@@ -217,16 +319,31 @@ export async function getDevice(id) {
   return rec;
 }
 
-// List approved brands, optional case-insensitive prefix search on brand_lc. REST read.
-export async function listBrands({ search = null, pageSize = 60, cursor = null } = {}) {
-  const filters = [{ field: 'status', op: 'EQUAL', value: 'approved' }];
+function _brandFilters(status, search) {
+  const filters = [{ field: 'status', op: 'EQUAL', value: status }];
   if (search) {
     const p = search.toLowerCase();
     filters.push({ field: 'brand_lc', op: 'GREATER_THAN_OR_EQUAL', value: p });
     filters.push({ field: 'brand_lc', op: 'LESS_THAN_OR_EQUAL', value: p + '\uf8ff' });
   }
+  return filters;
+}
+
+// List brands, optional case-insensitive prefix search on brand_lc. REST read.
+// includePending merges approved + pending (the catalog is community-visible-with-a-tag).
+export async function listBrands({ search = null, pageSize = 60, cursor = null, includePending = false } = {}) {
+  if (includePending) {
+    const [a, p] = await Promise.all([
+      restQuery('brands', { filters: _brandFilters('approved', search), orderBy: [{ field: 'brand_lc', dir: 'ASCENDING' }], limit: pageSize }),
+      restQuery('brands', { filters: _brandFilters('pending', search), orderBy: [{ field: 'brand_lc', dir: 'ASCENDING' }], limit: pageSize }),
+    ]);
+    const byId = new Map();
+    for (const b of [...a, ...p]) byId.set(b.id, b);
+    const items = [...byId.values()].sort((x, y) => (x.brand_lc || '').localeCompare(y.brand_lc || '')).slice(0, pageSize);
+    return { items, cursor: null };
+  }
   const items = await restQuery('brands', {
-    filters,
+    filters: _brandFilters('approved', search),
     orderBy: [{ field: 'brand_lc', dir: 'ASCENDING' }],
     limit: pageSize,
     startAfter: cursor ? [cursor] : null,
@@ -235,12 +352,19 @@ export async function listBrands({ search = null, pageSize = 60, cursor = null }
   return { items, cursor: next };
 }
 
-// Approved devices for a brand (used by brand -> devices browse and by upload autocomplete).
-export async function getDevicesByBrand(brandLc, { applianceType = null, pageSize = 60, cursor = null } = {}) {
-  return searchDevices({ brand: brandLc, applianceType, pageSize, cursor });
+// Devices for a brand (used by brand -> devices browse and by upload autocomplete).
+export async function getDevicesByBrand(brandLc, { applianceType = null, pageSize = 60, includePending = false } = {}) {
+  return searchDevices({ brand: brandLc, applianceType, pageSize, includePending });
 }
 
-export async function searchDevices({ applianceType = null, brand = null, favoritesOnly = false, pageSize = 60 } = {}) {
+function _deviceFilters(status, applianceType, brand) {
+  const filters = [{ field: 'status', op: 'EQUAL', value: status }];
+  if (applianceType) filters.push({ field: 'applianceType', op: 'EQUAL', value: applianceType });
+  if (brand) filters.push({ field: 'brand_lc', op: 'EQUAL', value: brand.toLowerCase() });
+  return filters;
+}
+
+export async function searchDevices({ applianceType = null, brand = null, favoritesOnly = false, pageSize = 60, includePending = false } = {}) {
   if (favoritesOnly) {
     const favs = await getFavorites();
     const items = [];
@@ -250,15 +374,19 @@ export async function searchDevices({ applianceType = null, brand = null, favori
     }
     return { items, cursor: null };
   }
-  const filters = [{ field: 'status', op: 'EQUAL', value: 'approved' }];
-  if (applianceType) filters.push({ field: 'applianceType', op: 'EQUAL', value: applianceType });
-  if (brand) filters.push({ field: 'brand_lc', op: 'EQUAL', value: brand.toLowerCase() });
-  const items = await restQuery('devices', {
-    filters,
+  const q = (status) => restQuery('devices', {
+    filters: _deviceFilters(status, applianceType, brand),
     orderBy: [{ field: 'favoriteCount', dir: 'DESCENDING' }],
     limit: pageSize,
   });
-  return { items, cursor: null };
+  if (includePending) {
+    const [a, p] = await Promise.all([q('approved'), q('pending')]);
+    const byId = new Map();
+    // Approved first, then pending, so approved wins on id collisions.
+    for (const d of [...a, ...p]) if (!byId.has(d.id)) byId.set(d.id, d);
+    return { items: [...byId.values()].slice(0, pageSize), cursor: null };
+  }
+  return { items: await q('approved'), cursor: null };
 }
 
 export async function getProfiles(deviceId) {
@@ -312,6 +440,14 @@ export async function getSiteConfig() {
 // Admin-only write (enforced by rules).
 export async function setMaintenance(on) {
   await setDoc(doc(_db, 'config', 'site'), { maintenance: !!on, updatedAt: serverTimestamp() }, { merge: true });
+}
+
+// Admin-only: set the community auto-approve threshold (confirmations needed).
+export async function setConfirmThreshold(n) {
+  const v = Math.max(1, Math.round(Number(n) || 5));
+  await setDoc(doc(_db, 'config', 'site'), { confirmThreshold: v, updatedAt: serverTimestamp() }, { merge: true });
+  _confirmThresholdCache = v;
+  return v;
 }
 
 // ------------------------------------------------------------------

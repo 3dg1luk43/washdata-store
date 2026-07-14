@@ -1363,3 +1363,75 @@ main {
 .site-footer a { color: var(--accent); text-decoration: none; }
 .site-footer a:hover { text-decoration: underline; }
 .site-footer .foot-sep { opacity: .5; }
+
+/* ---- Contribute page (create.html) ---- */
+input[type="url"] {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  width: 100%;
+  outline: none;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+input[type="url"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.contribute-card {
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  margin-top: 1rem;
+}
+.consent-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.consent-row input[type="checkbox"] { width: auto; }
+.contribute-result {
+  max-width: 560px;
+  margin-top: 1.25rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--success);
+  border-radius: var(--radius);
+  padding: 1.1rem 1.25rem;
+}
+.result-title { font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 1.05rem; margin-bottom: 0.25rem; }
+
+/* ---- Community catalog (browse cards) ---- */
+.add-cta {
+  margin-top: 1.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8125rem;
+}
+.card-community {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.6rem;
+  margin-top: 0.6rem;
+}
+.card-manual { color: var(--accent); text-decoration: none; }
+.card-manual:hover { text-decoration: underline; }
+.community-msg { font-size: 0.75rem; }
+.device-stars {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-basis: 100%;
+  margin-top: 0.35rem;
+}

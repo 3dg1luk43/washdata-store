@@ -13,16 +13,28 @@ service cloud.firestore {
     }
     function canContribute() { return isGithubUser() && !isBanned(); }
     function strLen(v, max) { return v is string && v.size() >= 1 && v.size() <= max; }
+    // Optional public attribution / manual URL validators (both may be null).
+    function optName(v) { return v == null || (v is string && v.size() <= 100); }
+    function optUrl(v) { return v == null || (v is string && v.size() <= 500 && v.matches('https?://.*')); }
+    // Admin-tunable auto-approve threshold (config/site.confirmThreshold), default 5.
+    // config/site is always seeded; fall back to 5 if the doc is ever missing.
+    function confirmThreshold() {
+      return exists(/databases/$(database)/documents/config/site)
+        ? get(/databases/$(database)/documents/config/site).data.get('confirmThreshold', 5)
+        : 5;
+    }
 
     // brands
     match /brands/{brandId} {
-      allow read: if resource.data.status == 'approved' || isAdmin()
+      // Pending is public (searchable with an "awaiting approval" tag); removed stays hidden.
+      allow read: if resource.data.status in ['approved', 'pending'] || isAdmin()
         || (isSignedIn() && resource.data.createdByUid == request.auth.uid);
       allow create: if canContribute()
         && request.resource.data.createdByUid == request.auth.uid
         && request.resource.data.status == 'pending'
         && strLen(request.resource.data.brand, 40)
         && request.resource.data.brand_lc == request.resource.data.brand.lower()
+        && optName(request.resource.data.get('createdByName', null))
         && request.resource.data.createdAt == request.time;
       allow update: if isAdmin();
       allow delete: if isAdmin();
@@ -30,7 +42,8 @@ service cloud.firestore {
 
     // devices
     match /devices/{deviceId} {
-      allow read: if resource.data.status == 'approved' || isAdmin()
+      // Pending is public (searchable with an "awaiting approval" tag); removed stays hidden.
+      allow read: if resource.data.status in ['approved', 'pending'] || isAdmin()
         || (isSignedIn() && resource.data.createdByUid == request.auth.uid);
       allow create: if canContribute()
         && request.resource.data.createdByUid == request.auth.uid
@@ -41,14 +54,48 @@ service cloud.firestore {
         && request.resource.data.model_lc == request.resource.data.model.lower()
         && request.resource.data.favoriteCount == 0
         && request.resource.data.profileCount == 0
+        && request.resource.data.confirmCount == 0
+        && optUrl(request.resource.data.get('manualUrl', null))
+        && optName(request.resource.data.get('createdByName', null))
         && request.resource.data.createdAt == request.time;
       // favoriteCount is a vanity counter: any GitHub user may nudge it by exactly +/-1.
       allow update: if isGithubUser()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['favoriteCount'])
         && (request.resource.data.favoriteCount == resource.data.favoriteCount + 1
             || request.resource.data.favoriteCount == resource.data.favoriteCount - 1);
+      // Honest confirm-count bump: +1 on confirmCount ONLY when the same batch creates
+      // this user's confirmation doc that did not already exist. One per uid, un-gameable.
+      allow update: if isGithubUser()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['confirmCount'])
+        && request.resource.data.confirmCount == resource.data.confirmCount + 1
+        && !exists(/databases/$(database)/documents/devices/$(deviceId)/confirmations/$(request.auth.uid))
+        && existsAfter(/databases/$(database)/documents/devices/$(deviceId)/confirmations/$(request.auth.uid));
+      // Community auto-promotion: any github user may flip pending -> approved once the
+      // honest confirmCount has reached the admin-tunable threshold. status-only change.
+      allow update: if isGithubUser()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+        && resource.data.status == 'pending'
+        && request.resource.data.status == 'approved'
+        && resource.data.confirmCount >= confirmThreshold();
       allow update: if isAdmin();
       allow delete: if isAdmin();
+
+      // One-way confirmation doc (create-only, own uid); the un-gameable source of truth.
+      match /confirmations/{uid} {
+        allow read: if true;
+        allow create: if canContribute() && request.auth.uid == uid
+          && request.resource.data.uid == uid
+          && request.resource.data.createdAt == request.time;
+        allow update: if false;
+        allow delete: if isAdmin();
+      }
+
+      // Optional 5-star quality score (information only; never affects approval).
+      match /ratings/{uid} {
+        allow read: if true;
+        allow write: if canContribute() && request.auth.uid == uid
+          && request.resource.data.rating in [1, 2, 3, 4, 5];
+      }
     }
 
     // profiles

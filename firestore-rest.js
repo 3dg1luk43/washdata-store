@@ -112,8 +112,8 @@ export async function restCount(collectionId, filters = [], opts = {}) {
   return r && r.result.aggregateFields.cnt ? decodeValue(r.result.aggregateFields.cnt) : 0;
 }
 
-// avg + count over a cycle's ratings subcollection (one request)
-export async function restRatingSummary(cycleId) {
+// avg + count over a `ratings` subcollection under `parentPath` (one request).
+async function _ratingAgg(parentPath) {
   const body = {
     structuredAggregationQuery: {
       structuredQuery: { from: [{ collectionId: 'ratings' }] },
@@ -123,7 +123,7 @@ export async function restRatingSummary(cycleId) {
       ],
     },
   };
-  const res = await fetch(`${BASE}/cycles/${cycleId}:runAggregationQuery`, {
+  const res = await fetch(`${BASE}/${parentPath}:runAggregationQuery`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -136,6 +136,12 @@ export async function restRatingSummary(cycleId) {
   const avg = agg.avg && !('nullValue' in agg.avg) ? decodeValue(agg.avg) : null;
   return { avg: cnt > 0 && avg != null ? avg : null, count: cnt || 0 };
 }
+
+// avg + count over a cycle's ratings subcollection.
+export async function restRatingSummary(cycleId) { return _ratingAgg(`cycles/${cycleId}`); }
+
+// avg + count over a device's quality-ratings subcollection.
+export async function restDeviceRating(deviceId) { return _ratingAgg(`devices/${deviceId}`); }
 
 async function restError(res) {
   try {
