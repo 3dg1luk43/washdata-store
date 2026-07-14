@@ -14,6 +14,10 @@
 </head>
 <body>
 
+  <!-- Boot splash: shown until we know maintenance state + admin status, so neither the
+       homepage nor the maintenance screen flashes before the decision is made. -->
+  <div id="boot"><div class="loading-spinner"></div></div>
+
   <!-- Maintenance screen (shown to non-admins while MAINTENANCE is on) -->
   <div id="maintenance-screen" hidden>
     <div class="maint-inner">
@@ -27,7 +31,7 @@
     </div>
   </div>
 
-  <div id="app-shell">
+  <div id="app-shell" hidden>
     <div id="maint-banner" class="maint-banner" hidden>Maintenance mode - this site is hidden from the public. You are seeing it as an admin.</div>
 
     <header class="topbar">

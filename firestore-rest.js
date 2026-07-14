@@ -85,7 +85,10 @@ export async function restQuery(collectionId, opts = {}) {
 }
 
 export async function restGet(path, opts = {}) {
-  const res = await fetch(`${BASE}/${path}`, { headers: await authHeaders(opts.auth) });
+  const res = await fetch(`${BASE}/${path}`, {
+    headers: await authHeaders(opts.auth),
+    cache: opts.noStore ? 'no-store' : 'default',
+  });
   if (res.status === 404 || res.status === 403) return null;
   if (!res.ok) throw new Error(await restError(res));
   return decodeDoc(await res.json());

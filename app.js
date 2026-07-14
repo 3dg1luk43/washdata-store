@@ -38,28 +38,31 @@ function toast(msg, type = 'success') {
 }
 
 // ============================================================ maintenance gate
-// site-config.js MAINTENANCE is the fallback; the live value comes from the
-// admin-toggleable Firestore config/site doc (fetched below).
+// site-config.js MAINTENANCE is only the fallback; the live value comes from the
+// admin-toggleable Firestore config/site doc (fetched fresh, never cached).
+// A boot splash is shown until the state is resolved so nothing flashes.
 let _maintenance = MAINTENANCE;
+let _maintenanceKnown = false;
+let _authKnown = false;
 
-function applyMaintenance() {
-  if (!_maintenance) {
-    $('maintenance-screen').hidden = true;
-    $('app-shell').hidden = false;
-    $('maint-banner').hidden = true;
-    return;
-  }
-  if (_adminFlag) {
-    $('maintenance-screen').hidden = true;
-    $('app-shell').hidden = false;
-    $('maint-banner').hidden = false;
-  } else {
-    $('maintenance-screen').hidden = false;
-    $('app-shell').hidden = true;
-  }
+// Show exactly one of: boot | maint | shell.
+function showOnly(which) {
+  $('boot').hidden = which !== 'boot';
+  $('maintenance-screen').hidden = which !== 'maint';
+  $('app-shell').hidden = which !== 'shell';
+  $('maint-banner').hidden = !(which === 'shell' && _maintenance);
 }
 
-function browseVisible() { return !_maintenance || _adminFlag; }
+function reconcile() {
+  if (!_maintenanceKnown) { showOnly('boot'); return; }
+  if (!_maintenance) { showOnly('shell'); maybeLoadBrowse(); return; }
+  // Maintenance is on: we must know whether the viewer is an admin before revealing.
+  if (!_authKnown) { showOnly('boot'); return; }
+  if (_adminFlag) { showOnly('shell'); maybeLoadBrowse(); }
+  else { showOnly('maint'); }
+}
+
+function browseVisible() { return _maintenanceKnown && (!_maintenance || _adminFlag); }
 function maybeLoadBrowse() { if (browseVisible() && !_browseLoaded) { _browseLoaded = true; loadBrands(true); } }
 
 // ============================================================ helpers
@@ -140,8 +143,8 @@ onAuth(async (user) => {
     try { _favorites = new Set(await getFavorites()); } catch (_) {}
   }
   $('admin-link').toggleAttribute('hidden', !_adminFlag);
-  applyMaintenance();
-  maybeLoadBrowse();
+  _authKnown = true;
+  reconcile();
   updateCommentFormAuth();
 });
 
@@ -511,11 +514,12 @@ $('submit-comment-btn').addEventListener('click', async () => {
 });
 
 // ============================================================ init
-// Paint from the fallback immediately, then reconcile with the live maintenance flag.
-applyMaintenance();
-maybeLoadBrowse();
+// Show the boot splash until the live maintenance flag is known (and, if on, whether
+// the viewer is an admin). Never paints the homepage or maintenance screen prematurely.
+reconcile();
 getSiteConfig().then((cfg) => {
-  if (typeof cfg.maintenance === 'boolean') _maintenance = cfg.maintenance;
-  applyMaintenance();
-  maybeLoadBrowse();
-}).catch(() => {});
+  _maintenance = ('maintenance' in cfg) ? !!cfg.maintenance : MAINTENANCE;
+}).catch(() => {}).finally(() => {
+  _maintenanceKnown = true;
+  reconcile();
+});

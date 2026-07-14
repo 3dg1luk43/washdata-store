@@ -299,10 +299,11 @@ export async function getFavorites() {
 // Site config (maintenance flag)
 // ------------------------------------------------------------------
 
-// Public read via REST. Returns {} when unset/unavailable.
+// Public read via REST. Returns {} when unset/unavailable. Never cached, so the
+// maintenance flag is always current (a stale cache must not keep the site hidden/open).
 export async function getSiteConfig() {
   try {
-    return (await restGet('config/site')) || {};
+    return (await restGet('config/site', { noStore: true })) || {};
   } catch (_) {
     return {};
   }

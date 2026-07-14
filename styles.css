@@ -1286,6 +1286,14 @@ input[type="file"]:hover {
   border-radius: var(--radius-lg) var(--radius-lg) 0 0;
 }
 
+/* Boot splash - shown until the maintenance/admin state is resolved */
+#boot:not([hidden]) {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+}
+
 /* Maintenance */
 #maintenance-screen:not([hidden]) {
   display: flex;
