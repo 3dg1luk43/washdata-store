@@ -465,7 +465,7 @@ input[type="file"]:hover {
   background: rgba(0, 0, 0, 0.72);
   z-index: 200;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
   padding: 1.5rem 0.75rem 2rem;
   overflow-y: auto;
@@ -1157,10 +1157,22 @@ input[type="file"]:hover {
 .filter-fav label {
   display: flex;
   align-items: center;
-  gap: .4rem;
+  gap: .45rem;
   font-size: .8125rem;
   color: var(--text-muted);
   cursor: pointer;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 600;
+}
+/* Theme all checkboxes to the accent instead of the raw browser default. */
+input[type="checkbox"], input[type="radio"] {
+  accent-color: var(--accent);
+  width: 1.05rem;
+  height: 1.05rem;
+  cursor: pointer;
+  flex-shrink: 0;
+  margin: 0;
 }
 
 .profile-list {

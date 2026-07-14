@@ -62,6 +62,46 @@ function sparklineSVG(record, w = 100, h = 60) {
   const d = pts.map((p, i) => `${i ? 'L' : 'M'}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(' ');
   return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg"><path d="${d}" stroke="var(--accent)" stroke-width="1.5" fill="none" stroke-linejoin="round"/></svg>`;
 }
+
+// Interactive power graph for the cycle preview modal (hover/drag -> time/watts readout).
+function interactiveGraph(container, cycle) {
+  const raw = cycle && cycle.trace && cycle.trace.points;
+  if (!Array.isArray(raw) || raw.length < 2) { container.innerHTML = '<div class="text-muted" style="padding:1rem">No trace data.</div>'; return; }
+  let pts = raw;
+  if (pts.length > 600) { const step = Math.ceil(pts.length / 600); pts = pts.filter((_, i) => i % step === 0); }
+  const W = 640, H = 170, pad = 8;
+  const xs = pts.map((p) => p[0]); const ys = pts.map((p) => p[1]);
+  const x0 = xs[0]; const xN = xs[xs.length - 1] || 1; const yMax = Math.max(...ys, 1);
+  const sx = (x) => pad + ((x - x0) / ((xN - x0) || 1)) * (W - 2 * pad);
+  const sy = (y) => H - pad - (y / yMax) * (H - 2 * pad);
+  const d = pts.map((p, i) => `${i ? 'L' : 'M'}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(' ');
+  const area = `M${sx(x0).toFixed(1)},${(H - pad).toFixed(1)} ` + pts.map((p) => `L${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(' ') + ` L${sx(xN).toFixed(1)},${(H - pad).toFixed(1)} Z`;
+  container.innerHTML = `<div class="cycle-graph">
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="cycle-graph-svg">
+      <path d="${area}" class="cg-area"/><path d="${d}" class="cg-line"/>
+      <line class="cg-cross" x1="0" x2="0" y1="${pad}" y2="${H - pad}" hidden/>
+      <circle class="cg-dot" r="3.5" hidden/>
+    </svg>
+    <div class="cycle-graph-readout text-muted" data-readout>&#128072; Hover the graph to read power at any point</div>
+  </div>`;
+  const svg = container.querySelector('svg');
+  const cross = svg.querySelector('.cg-cross'); const dot = svg.querySelector('.cg-dot');
+  const readout = container.querySelector('[data-readout]');
+  const at = (clientX) => {
+    const rect = svg.getBoundingClientRect();
+    const vx = ((clientX - rect.left) / (rect.width || 1)) * W;
+    const tx = x0 + ((vx - pad) / ((W - 2 * pad) || 1)) * (xN - x0);
+    let best = 0; let bd = Infinity;
+    for (let i = 0; i < pts.length; i++) { const dd = Math.abs(pts[i][0] - tx); if (dd < bd) { bd = dd; best = i; } }
+    const p = pts[best]; const X = sx(p[0]); const Y = sy(p[1]);
+    cross.setAttribute('x1', X); cross.setAttribute('x2', X); cross.hidden = false;
+    dot.setAttribute('cx', X); dot.setAttribute('cy', Y); dot.hidden = false;
+    readout.textContent = `${formatDuration(p[0])} into the cycle - ${Math.round(p[1])} W`;
+  };
+  svg.addEventListener('mousemove', (e) => at(e.clientX));
+  svg.addEventListener('mouseleave', () => { cross.hidden = true; dot.hidden = true; readout.innerHTML = '&#128072; Hover the graph to read power at any point'; });
+  svg.addEventListener('touchmove', (e) => { if (e.touches[0]) { e.preventDefault(); at(e.touches[0].clientX); } }, { passive: false });
+}
 function deviceLabel(c) {
   const p = String(c.deviceId || '').split('__');
   return `${p[1] || ''} ${p[2] || ''}`.trim() || c.deviceId || '?';
@@ -329,6 +369,41 @@ async function loadBrands() {
   }
 }
 
+// Optimistically adjust the Overview "Pending Review" count so the UI matches what a
+// refresh would show, without re-querying.
+function bumpPending(delta) {
+  if (!delta) return;
+  const el = document.querySelector('#stats-grid .c-pending');
+  if (!el) return;
+  const n = parseInt(el.textContent, 10);
+  if (!isNaN(n)) el.textContent = String(Math.max(0, n + delta));
+}
+
+// Shared Approve/Remove action cell for brands & profiles: rebuilds itself after a
+// status change (so Approve disappears once approved), updates the row badge, and
+// adjusts the pending count. `extra` appends type-specific buttons (e.g. Merge target).
+function buildStatusActions(tr, rec, setter, label, extra) {
+  const cell = tr.querySelector('.action-cell');
+  cell.innerHTML = '';
+  const mk = (text, status) => {
+    const btn = document.createElement('button'); btn.className = 'btn btn-ghost btn-sm'; btn.textContent = text;
+    btn.addEventListener('click', async () => {
+      const wasPending = rec.status === 'pending';
+      try {
+        await setter(rec.id, status); rec.status = status;
+        const badge = tr.querySelector('.badge'); if (badge) { badge.className = `badge badge-${status}`; badge.textContent = status; }
+        bumpPending((wasPending ? -1 : 0) + (status === 'pending' ? 1 : 0));
+        buildStatusActions(tr, rec, setter, label, extra);
+        toast(`${label} ${status}`);
+      } catch (e) { toast(e.message, 'error'); }
+    });
+    cell.appendChild(btn);
+  };
+  if (rec.status !== 'approved') mk('Approve', 'approved');
+  if (rec.status !== 'removed') mk('Remove', 'removed');
+  if (extra) extra(cell);
+}
+
 function buildBrandRow(b) {
   const tr = document.createElement('tr');
   tr.innerHTML = `
@@ -337,20 +412,7 @@ function buildBrandRow(b) {
     <td><span class="badge badge-${esc(b.status)}">${esc(b.status)}</span></td>
     <td class="text-muted" style="font-size:.75rem">${esc(b.createdByName || '-')}</td>
     <td><div class="action-cell"></div></td>`;
-  const cell = tr.querySelector('.action-cell');
-  const mk = (label, status) => {
-    const btn = document.createElement('button'); btn.className = 'btn btn-ghost btn-sm'; btn.textContent = label;
-    btn.addEventListener('click', async () => {
-      try {
-        await adminSetBrandStatus(b.id, status); b.status = status;
-        const badge = tr.children[2].querySelector('.badge'); badge.className = `badge badge-${status}`; badge.textContent = status;
-        toast(`Brand ${status}`);
-      } catch (e) { toast(e.message, 'error'); }
-    });
-    cell.appendChild(btn);
-  };
-  if (b.status !== 'approved') mk('Approve', 'approved');
-  if (b.status !== 'removed') mk('Remove', 'removed');
+  buildStatusActions(tr, b, adminSetBrandStatus, 'Brand');
   return tr;
 }
 
@@ -379,24 +441,12 @@ function buildProfileRow(p) {
     <td><span class="badge badge-${esc(p.status)}">${esc(p.status)}</span></td>
     <td class="text-muted" style="font-size:.75rem">${esc(p.createdByName || '-')}</td>
     <td><div class="action-cell"></div></td>`;
-  const cell = tr.querySelector('.action-cell');
-  const mk = (label, status) => {
-    const btn = document.createElement('button'); btn.className = 'btn btn-ghost btn-sm'; btn.textContent = label;
-    btn.addEventListener('click', async () => {
-      try {
-        await adminSetProfileStatus(p.id, status); p.status = status;
-        const badge = tr.children[3].querySelector('.badge'); badge.className = `badge badge-${status}`; badge.textContent = status;
-        toast(`Profile ${status}`);
-      } catch (e) { toast(e.message, 'error'); }
-    });
-    cell.appendChild(btn);
-  };
-  if (p.status !== 'approved') mk('Approve', 'approved');
-  if (p.status !== 'removed') mk('Remove', 'removed');
-  const target = document.createElement('button');
-  target.className = 'btn btn-ghost btn-sm'; target.textContent = 'Merge target';
-  target.addEventListener('click', () => { $('pmerge-to').value = p.id; });
-  cell.appendChild(target);
+  buildStatusActions(tr, p, adminSetProfileStatus, 'Profile', (cell) => {
+    const target = document.createElement('button');
+    target.className = 'btn btn-ghost btn-sm'; target.textContent = 'Merge target';
+    target.addEventListener('click', () => { $('pmerge-to').value = p.id; });
+    cell.appendChild(target);
+  });
   return tr;
 }
 
@@ -472,7 +522,7 @@ function openReviewModal(c) {
   _reviewRecord = c;
   $('review-modal-title').textContent = deviceLabel(c);
   $('review-modal-subtitle').textContent = c.program_lc || '';
-  $('review-modal-sparkline').innerHTML = sparklineSVG(c, 320, 80);
+  interactiveGraph($('review-modal-sparkline'), c);
   const st = c.stats || {};
   $('review-modal-body').innerHTML = `
     <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:.75rem">
