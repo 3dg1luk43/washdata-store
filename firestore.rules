@@ -14,6 +14,20 @@ service cloud.firestore {
     function canContribute() { return isGithubUser() && !isBanned(); }
     function strLen(v, max) { return v is string && v.size() >= 1 && v.size() <= max; }
 
+    // brands
+    match /brands/{brandId} {
+      allow read: if resource.data.status == 'approved' || isAdmin()
+        || (isSignedIn() && resource.data.createdByUid == request.auth.uid);
+      allow create: if canContribute()
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && strLen(request.resource.data.brand, 40)
+        && request.resource.data.brand_lc == request.resource.data.brand.lower()
+        && request.resource.data.createdAt == request.time;
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
     // devices
     match /devices/{deviceId} {
       allow read: if resource.data.status == 'approved' || isAdmin()

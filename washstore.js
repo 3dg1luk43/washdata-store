@@ -141,6 +141,24 @@ function _estimateDocSize(data) {
 // Devices / profiles
 // ------------------------------------------------------------------
 
+export async function ensureBrand({ brand }) {
+  const id = brand.toLowerCase();
+  const ref = doc(_db, 'brands', id);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) {
+    const user = _auth.currentUser;
+    if (!user) throw new Error('Not signed in');
+    await setDoc(ref, {
+      brand,
+      brand_lc: id,
+      status: 'pending',
+      createdByUid: user.uid,
+      createdAt: serverTimestamp(),
+    });
+  }
+  return id;
+}
+
 export async function ensureDevice({ applianceType, brand, model }) {
   const id = mkDeviceId(applianceType, brand, model);
   const ref = doc(_db, 'devices', id);
@@ -190,6 +208,25 @@ export async function getDevice(id) {
   const snap = await getDoc(doc(_db, 'devices', id));
   if (!snap.exists()) throw new Error('Device not found');
   return { id: snap.id, ...snap.data() };
+}
+
+// List approved brands, optional case-insensitive prefix search on brand_lc.
+export async function listBrands({ search = null, pageSize = 60, cursor = null } = {}) {
+  const cons = [where('status', '==', 'approved')];
+  if (search) {
+    const p = search.toLowerCase();
+    cons.push(where('brand_lc', '>=', p), where('brand_lc', '<=', p + '\uf8ff'));
+  }
+  cons.push(orderBy('brand_lc', 'asc'), limit(pageSize));
+  if (cursor) cons.push(startAfter(cursor));
+  const snap = await getDocs(query(collection(_db, 'brands'), ...cons));
+  const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  return { items, cursor: snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null };
+}
+
+// Approved devices for a brand (used by brand -> devices browse and by upload autocomplete).
+export async function getDevicesByBrand(brandLc, { applianceType = null, pageSize = 60, cursor = null } = {}) {
+  return searchDevices({ brand: brandLc, applianceType, pageSize, cursor });
 }
 
 export async function searchDevices({ applianceType = null, brand = null, favoritesOnly = false, pageSize = 24, cursor = null } = {}) {
@@ -264,6 +301,7 @@ export async function uploadReferenceCycle(meta, tracePoints, stats, qc = 3) {
   }
   if (!Array.isArray(tracePoints) || tracePoints.length < 2) throw new Error('Trace must have at least 2 points');
 
+  await ensureBrand({ brand });
   const devId = await ensureDevice({ applianceType, brand, model });
   const profId = await ensureProfile({ deviceId: devId, program, description });
   const points = downsampleCycle(tracePoints, 3000);
@@ -458,6 +496,14 @@ export async function adminListDevices({ status = null, pageSize = 50, cursor = 
 
 export async function adminSetDeviceStatus(id, status) {
   await updateDoc(doc(_db, 'devices', id), { status });
+}
+
+export async function adminSetProfileStatus(id, status) {
+  await updateDoc(doc(_db, 'profiles', id), { status });
+}
+
+export async function adminSetBrandStatus(brandLc, status) {
+  await updateDoc(doc(_db, 'brands', brandLc), { status });
 }
 
 // Reassign fromId's profiles + cycles to toId, then delete the empty source device.

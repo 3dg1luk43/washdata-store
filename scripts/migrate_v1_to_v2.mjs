@@ -75,9 +75,18 @@ async function run() {
 
     const devId = mkDeviceId(applianceType, brand, model);
     const profId = mkProfileId(devId, program);
+    const brandLc = brand.toLowerCase();
     const cycleId = `mig_${d.id}`;
     const cycleRef = db.collection('cycles').doc(cycleId);
     if ((await cycleRef.get()).exists) { skipped++; continue; }
+
+    const approved = env.status === 'approved';
+
+    await db.collection('brands').doc(brandLc).set({
+      brand, brand_lc: brandLc,
+      status: approved ? 'approved' : 'pending',
+      createdByUid: env.uploaderUid || 'migration', createdAt: now,
+    }, { merge: true });
 
     await db.collection('devices').doc(devId).set({
       applianceType, brand, brand_lc: brand.toLowerCase(), model, model_lc: model.toLowerCase(),

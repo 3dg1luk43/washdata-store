@@ -3,7 +3,7 @@ import {
   init, onAuth, signIn, signOutUser, isAdmin, ensureUserProfile,
   deleteCycle, qcLabel,
   adminListCycles, adminSetCycleStatus,
-  adminListDevices, adminSetDeviceStatus, adminMergeDevices,
+  adminListDevices, adminSetDeviceStatus, adminSetProfileStatus, adminSetBrandStatus, adminMergeDevices,
   adminListUsers, adminBanUser, adminUnbanUser, adminGetStats,
 } from './washstore.js';
 
@@ -185,12 +185,19 @@ function buildReviewCard(c) {
   return el;
 }
 
+// Approving a cycle must also approve its parent brand + device + profile, or the
+// approved cycle would be unreachable via browse (which filters status==approved).
+async function cascadeApprove(c) {
+  try { if (c.brand_lc) await adminSetBrandStatus(c.brand_lc, 'approved'); } catch (_) {}
+  try { if (c.deviceId) await adminSetDeviceStatus(c.deviceId, 'approved'); } catch (_) {}
+  try { if (c.profileId) await adminSetProfileStatus(c.profileId, 'approved'); } catch (_) {}
+}
+
 async function approveCycle(c, btn, card) {
   if (btn) btn.disabled = true;
   try {
     await adminSetCycleStatus(c.id, 'approved');
-    // Cascade: make the parent device + profile visible too.
-    try { await adminSetDeviceStatus(c.deviceId, 'approved'); } catch (_) {}
+    await cascadeApprove(c);
     toast(`Approved: ${deviceLabel(c)}`);
     if (card) { card.remove(); if (!$('review-list').hasChildNodes()) $('review-list').innerHTML = reviewEmpty(); }
   } catch (e) { if (btn) btn.disabled = false; toast(e.message, 'error'); }
@@ -246,7 +253,7 @@ function buildCycleActions(container, c, tr) {
     if (needReason) { reason = prompt('Reason:'); if (reason === null) return; }
     try {
       await adminSetCycleStatus(c.id, status, reason);
-      if (status === 'approved') { try { await adminSetDeviceStatus(c.deviceId, 'approved'); } catch (_) {} }
+      if (status === 'approved') await cascadeApprove(c);
       c.status = status;
       const badge = tr.children[4].querySelector('.badge');
       badge.className = `badge badge-${status}`; badge.textContent = status;

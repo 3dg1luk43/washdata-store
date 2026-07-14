@@ -1,7 +1,7 @@
 import firebaseConfig from './config.js';
 import {
   init, onAuth, signIn, signOutUser, isAdmin, ensureUserProfile,
-  searchDevices, getDevice, getProfiles, getReferenceCycles, getCycle,
+  listBrands, searchDevices, getDevicesByBrand, getDevice, getProfiles, getReferenceCycles, getCycle,
   uploadReferenceCycle, deleteCycle, bumpDownload, favoriteDevice, getFavorites, myCycles,
   addComment, listComments, deleteComment,
   submitRating, getUserRating, getRatingSummary,
@@ -13,11 +13,12 @@ init(firebaseConfig);
 // ============================================================ state
 let _user = null;
 let _adminFlag = false;
-let _view = 'devices';            // devices | device | profile
+let _view = 'brands';             // brands | brand | device | profile
+let _brand = null;                // { id, brand, brand_lc, ... }
 let _device = null;               // { id, brand, model, applianceType, ... }
 let _profile = null;              // { id, program, ... }
 let _browseCursor = null;
-let _browseFilters = { applianceType: '', brand: '', favoritesOnly: false };
+let _browseFilters = { search: '', favoritesOnly: false };
 let _favorites = new Set();
 let _mineLoadedUid = null;
 let _mineCursor = null;
@@ -160,7 +161,8 @@ function switchTab(name) {
     $(`${t}-btn`).setAttribute('aria-selected', t === name ? 'true' : 'false');
     $(`${t}-nav`).classList.toggle('active', t === name);
   });
-  if (name === 'browse' && !$('browse-body').hasChildNodes()) loadDevices(true);
+  if (name === 'browse' && !$('browse-body').hasChildNodes()) loadBrands(true);
+  if (name === 'upload') populateBrandDatalist();
   if (name === 'mine') maybeLoadMine();
 }
 
@@ -172,38 +174,82 @@ function switchTab(name) {
 // ============================================================ breadcrumb
 function renderBreadcrumb() {
   const bc = $('breadcrumb');
-  if (_view === 'devices') { bc.setAttribute('hidden', ''); return; }
+  if (_view === 'brands') { bc.setAttribute('hidden', ''); return; }
   bc.removeAttribute('hidden');
-  const parts = [`<button class="crumb" data-to="devices">Devices</button>`];
-  if (_device) parts.push(`<span class="crumb-sep">/</span><button class="crumb" data-to="device">${esc(_device.brand)} ${esc(modelOf(_device))}</button>`);
+  const parts = [`<button class="crumb" data-to="brands">Brands</button>`];
+  if (_brand) parts.push(`<span class="crumb-sep">/</span><button class="crumb" data-to="brand">${esc(_brand.brand)}</button>`);
+  if (_device && (_view === 'device' || _view === 'profile')) parts.push(`<span class="crumb-sep">/</span><button class="crumb" data-to="device">${esc(_device.brand)} ${esc(modelOf(_device))}</button>`);
   if (_view === 'profile' && _profile) parts.push(`<span class="crumb-sep">/</span><span class="crumb current">${esc(_profile.program)}</span>`);
   bc.innerHTML = parts.join('');
   bc.querySelectorAll('.crumb[data-to]').forEach((b) => b.addEventListener('click', () => {
-    if (b.dataset.to === 'devices') { _view = 'devices'; loadDevices(true); }
+    if (b.dataset.to === 'brands') loadBrands(true);
+    else if (b.dataset.to === 'brand') openBrand(_brand);
     else if (b.dataset.to === 'device') openDevice(_device);
   }));
 }
 
-// ============================================================ browse: devices
-async function loadDevices(reset = false) {
-  _view = 'devices';
+// ============================================================ browse: brands (top level)
+async function loadBrands(reset = false) {
+  _view = 'brands'; _brand = null; _device = null; _profile = null;
   $('filter-rail').removeAttribute('hidden');
   renderBreadcrumb();
   const body = $('browse-body');
-  if (reset) { _browseCursor = null; body.innerHTML = '<div class="card-grid" id="device-grid"></div>'; $('load-more-btn').setAttribute('hidden', ''); }
-  const grid = $('device-grid') || body.querySelector('.card-grid');
+  const favoritesOnly = _browseFilters.favoritesOnly;
+  if (reset) { _browseCursor = null; body.innerHTML = '<div class="card-grid" id="brand-grid"></div>'; $('load-more-btn').setAttribute('hidden', ''); }
+  const grid = body.querySelector('.card-grid');
   const spinner = loadingPlaceholder();
   grid.appendChild(spinner);
   try {
-    const { applianceType, brand, favoritesOnly } = _browseFilters;
-    if (favoritesOnly && !_user) { spinner.remove(); grid.innerHTML = emptyHTML('&#11088;', 'Sign in for favorites', 'Sign in to save and browse favorite devices.'); return; }
-    const { items, cursor } = await searchDevices({ applianceType: applianceType || null, brand: brand || null, favoritesOnly, pageSize: 24, cursor: _browseCursor });
+    // Favorites shortcut: jump straight to favorite devices, skipping the brand level.
+    if (favoritesOnly) {
+      if (!_user) { spinner.remove(); grid.innerHTML = emptyHTML('&#11088;', 'Sign in for favorites', 'Sign in to save and browse favorite devices.'); return; }
+      const { items } = await searchDevices({ favoritesOnly: true, pageSize: 60 });
+      spinner.remove();
+      grid.innerHTML = '';
+      if (items.length === 0) { grid.innerHTML = emptyHTML('&#11088;', 'No favorites yet', 'Star a device to find it here quickly.'); }
+      else { items.forEach((d) => grid.appendChild(buildDeviceCard(d))); }
+      $('load-more-btn').setAttribute('hidden', '');
+      return;
+    }
+    const { items, cursor } = await listBrands({ search: _browseFilters.search || null, pageSize: 60, cursor: _browseCursor });
     spinner.remove();
-    if (items.length === 0 && !_browseCursor) { grid.innerHTML = emptyHTML('&#128269;', 'No devices found', 'Try a different filter, or upload the first cycle for your appliance.'); }
-    else { items.forEach((d) => grid.appendChild(buildDeviceCard(d))); }
+    if (items.length === 0 && !_browseCursor) { grid.innerHTML = emptyHTML('&#128269;', 'No brands found', 'Try a different search, or upload the first cycle for your appliance.'); }
+    else { items.forEach((b) => grid.appendChild(buildBrandCard(b))); }
     _browseCursor = cursor;
     $('load-more-btn').toggleAttribute('hidden', !cursor);
   } catch (e) { spinner.remove(); toast(e.message, 'error'); }
+}
+
+function buildBrandCard(b) {
+  const el = document.createElement('div');
+  el.className = 'card device-card';
+  el.innerHTML = `
+    <div class="card-body">
+      <div class="card-title">${esc(b.brand)}</div>
+      <div class="card-subtitle">Browse models &rsaquo;</div>
+    </div>
+    <div class="card-actions"><button class="btn btn-primary btn-sm" data-open>Open</button></div>`;
+  el.querySelector('[data-open]').addEventListener('click', () => openBrand(b));
+  return el;
+}
+
+// ============================================================ browse: brand -> devices
+async function openBrand(b) {
+  _brand = b; _device = null; _profile = null; _view = 'brand';
+  $('filter-rail').setAttribute('hidden', '');
+  $('load-more-btn').setAttribute('hidden', '');
+  renderBreadcrumb();
+  const body = $('browse-body');
+  body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
+  try {
+    const { items } = await getDevicesByBrand(b.brand_lc, { pageSize: 60 });
+    if (items.length === 0) { body.innerHTML = emptyHTML('&#128203;', 'No models yet', 'No approved models for this brand yet.'); return; }
+    const grid = document.createElement('div');
+    grid.className = 'card-grid';
+    items.forEach((d) => grid.appendChild(buildDeviceCard(d)));
+    body.innerHTML = '';
+    body.appendChild(grid);
+  } catch (e) { body.innerHTML = emptyHTML('&#9888;', 'Failed to load', esc(e.message)); }
 }
 
 function buildDeviceCard(d) {
@@ -311,15 +357,16 @@ async function doDownload(c) {
 }
 
 $('filter-apply').addEventListener('click', () => {
-  _browseFilters = { applianceType: $('filter-type').value, brand: $('filter-brand').value.trim(), favoritesOnly: $('filter-favorites').checked };
-  loadDevices(true);
+  _browseFilters = { search: $('filter-brand').value.trim(), favoritesOnly: $('filter-favorites').checked };
+  loadBrands(true);
 });
 $('filter-clear').addEventListener('click', () => {
-  $('filter-type').value = ''; $('filter-brand').value = ''; $('filter-favorites').checked = false;
-  _browseFilters = { applianceType: '', brand: '', favoritesOnly: false };
-  loadDevices(true);
+  $('filter-brand').value = ''; $('filter-favorites').checked = false;
+  _browseFilters = { search: '', favoritesOnly: false };
+  loadBrands(true);
 });
-$('load-more-btn').addEventListener('click', () => { if (_view === 'devices') loadDevices(false); });
+$('filter-brand').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('filter-apply').click(); });
+$('load-more-btn').addEventListener('click', () => { if (_view === 'brands') loadBrands(false); });
 
 // ============================================================ upload
 function updateUploadAuth() {
@@ -327,6 +374,29 @@ function updateUploadAuth() {
   $('upload-form').toggleAttribute('hidden', !_user);
 }
 $('upload-signin-btn').addEventListener('click', doSignIn);
+
+// Autocomplete existing brands/models so uploads converge onto existing devices
+// instead of creating near-duplicates.
+async function populateBrandDatalist() {
+  const dl = $('brand-list');
+  if (!dl) return;
+  try {
+    const { items } = await listBrands({ pageSize: 100 });
+    dl.innerHTML = items.map((b) => `<option value="${esc(b.brand)}"></option>`).join('');
+  } catch (_) {}
+}
+async function populateModelDatalist(brand) {
+  const dl = $('model-list');
+  if (!dl) return;
+  dl.innerHTML = '';
+  const b = (brand || '').trim();
+  if (!b) return;
+  try {
+    const { items } = await getDevicesByBrand(b.toLowerCase(), { pageSize: 100 });
+    dl.innerHTML = items.map((d) => `<option value="${esc(d.model || '')}"></option>`).join('');
+  } catch (_) {}
+}
+$('up-brand').addEventListener('change', () => populateModelDatalist($('up-brand').value));
 
 $('up-cycle-file').addEventListener('change', async () => {
   _parsedUpload = null;

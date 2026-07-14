@@ -43,25 +43,15 @@
       <nav class="breadcrumb" id="breadcrumb" aria-label="Breadcrumb" hidden></nav>
 
       <div class="filter-rail" id="filter-rail">
-        <div class="form-group">
-          <label for="filter-type">Appliance type</label>
-          <select id="filter-type">
-            <option value="">All types</option>
-            <option value="washer">Washer</option>
-            <option value="dryer">Dryer</option>
-            <option value="dishwasher">Dishwasher</option>
-            <option value="washer_dryer">Washer-Dryer</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label for="filter-brand">Brand</label>
+        <div class="form-group" style="flex:1">
+          <label for="filter-brand">Search brands</label>
           <input type="text" id="filter-brand" placeholder="e.g. Bosch" autocomplete="off">
         </div>
         <div class="form-group filter-fav">
           <label><input type="checkbox" id="filter-favorites"> Favorites only</label>
         </div>
         <div class="filter-actions">
-          <button class="btn btn-primary btn-sm" id="filter-apply">Apply</button>
+          <button class="btn btn-primary btn-sm" id="filter-apply">Search</button>
           <button class="btn btn-ghost btn-sm" id="filter-clear">Clear</button>
         </div>
       </div>
@@ -98,13 +88,17 @@
           </div>
           <div class="form-group" style="flex:1">
             <label for="up-brand">Brand *</label>
-            <input type="text" id="up-brand" placeholder="e.g. Bosch" maxlength="40" required>
+            <input type="text" id="up-brand" placeholder="e.g. Bosch" maxlength="40" list="brand-list" autocomplete="off" required>
+            <datalist id="brand-list"></datalist>
+            <span class="form-hint">Start typing to pick an existing brand, or add a new one</span>
           </div>
         </div>
         <div class="form-row">
           <div class="form-group" style="flex:1">
             <label for="up-model">Model *</label>
-            <input type="text" id="up-model" placeholder="e.g. Serie 6 WAT28660" maxlength="60" required>
+            <input type="text" id="up-model" placeholder="e.g. Serie 6 WAT28660" maxlength="60" list="model-list" autocomplete="off" required>
+            <datalist id="model-list"></datalist>
+            <span class="form-hint">Existing models for the brand appear as suggestions</span>
           </div>
           <div class="form-group" style="flex:1">
             <label for="up-program">Program *</label>
