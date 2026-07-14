@@ -94,23 +94,31 @@ export async function isAdmin() {
   return snap.exists();
 }
 
+const _LASTSEEN_THROTTLE_MS = 6 * 60 * 60 * 1000;
+
 export async function ensureUserProfile(user) {
   const ref = doc(_db, 'users', user.uid);
   const snap = await getDoc(ref);
-  const now = serverTimestamp();
   if (!snap.exists()) {
     await setDoc(ref, {
       uid: user.uid,
       displayName: user.displayName || null,
       photoURL: user.photoURL || null,
-      createdAt: now,
-      lastSeen: now,
+      createdAt: serverTimestamp(),
+      lastSeen: serverTimestamp(),
       banned: false,
       banReason: null,
       favorites: [],
     }, { merge: true });
-  } else {
-    await updateDoc(ref, { lastSeen: now });
+    return;
+  }
+  // Throttle lastSeen writes so ordinary browsing stays read-only. A write is what
+  // opens the persistent Firestore write-channel; skipping it on most page loads keeps
+  // a signed-in browser to one-shot read requests.
+  const data = snap.data();
+  const last = data.lastSeen && data.lastSeen.toMillis ? data.lastSeen.toMillis() : 0;
+  if (Date.now() - last > _LASTSEEN_THROTTLE_MS) {
+    await updateDoc(ref, { lastSeen: serverTimestamp() });
   }
 }
 

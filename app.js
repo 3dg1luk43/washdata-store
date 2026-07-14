@@ -88,19 +88,11 @@ function sparklineSVG(record, w = 160, h = 48) {
   return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg"><path d="${d}" stroke="var(--accent)" stroke-width="1.5" fill="none" stroke-linejoin="round"/></svg>`;
 }
 
+// Rating summaries are fetched lazily only when the details modal opens (not per card),
+// so a browse page is a single query instead of one aggregation query per cycle.
 function fetchRatingSummary(id) {
   if (!_ratingCache.has(id)) _ratingCache.set(id, getRatingSummary(id));
   return _ratingCache.get(id);
-}
-async function populateCardRating(el, id) {
-  try {
-    const { avg, count } = await fetchRatingSummary(id);
-    if (avg == null) return;
-    const badge = el.querySelector('[data-rating]');
-    if (badge) { badge.innerHTML = `&#9733; ${avg.toFixed(1)}`; badge.removeAttribute('hidden'); }
-    const meta = el.querySelector('[data-rating-meta]');
-    if (meta) meta.textContent = `· ${count} rating${count > 1 ? 's' : ''}`;
-  } catch (_) {}
 }
 
 function loadingPlaceholder() {
@@ -318,8 +310,7 @@ function buildCycleCard(c) {
     <div class="card-body">
       <div class="card-title">${esc(_profile ? _profile.program : c.program_lc)}</div>
       <div class="card-subtitle mono-data">${formatDuration(st.duration)} &middot; ${st.energy_wh != null ? (st.energy_wh / 1000).toFixed(2) + ' kWh' : '-'}</div>
-      <div class="card-badges"><span class="badge badge-rating" data-rating hidden></span></div>
-      <div class="card-meta"><span>by ${esc(c.uploaderName || 'Anonymous')}</span><span>&middot; ${c.downloads || 0} dl</span><span data-rating-meta></span></div>
+      <div class="card-meta"><span>by ${esc(c.uploaderName || 'Anonymous')}</span><span>&middot; ${c.downloads || 0} dl</span></div>
     </div>
     <div class="card-actions">
       <button class="btn btn-primary btn-sm" data-details>Details</button>
@@ -327,7 +318,6 @@ function buildCycleCard(c) {
     </div>`;
   el.querySelector('[data-details]').addEventListener('click', () => openDetails(c));
   el.querySelector('[data-dl]').addEventListener('click', () => doDownload(c));
-  populateCardRating(el, c.id);
   return el;
 }
 
