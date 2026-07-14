@@ -6,7 +6,7 @@ import {
   bumpDownload, favoriteDevice, getFavorites,
   addComment, listComments, deleteComment,
   submitRating, getUserRating, getRatingSummary,
-  saveAsFile,
+  saveAsFile, getSiteConfig,
 } from './washstore.js';
 
 init(firebaseConfig);
@@ -38,10 +38,17 @@ function toast(msg, type = 'success') {
 }
 
 // ============================================================ maintenance gate
-if (MAINTENANCE) { $('maintenance-screen').hidden = false; $('app-shell').hidden = true; }
+// site-config.js MAINTENANCE is the fallback; the live value comes from the
+// admin-toggleable Firestore config/site doc (fetched below).
+let _maintenance = MAINTENANCE;
 
 function applyMaintenance() {
-  if (!MAINTENANCE) return;
+  if (!_maintenance) {
+    $('maintenance-screen').hidden = true;
+    $('app-shell').hidden = false;
+    $('maint-banner').hidden = true;
+    return;
+  }
   if (_adminFlag) {
     $('maintenance-screen').hidden = true;
     $('app-shell').hidden = false;
@@ -52,7 +59,8 @@ function applyMaintenance() {
   }
 }
 
-function browseVisible() { return !MAINTENANCE || _adminFlag; }
+function browseVisible() { return !_maintenance || _adminFlag; }
+function maybeLoadBrowse() { if (browseVisible() && !_browseLoaded) { _browseLoaded = true; loadBrands(true); } }
 
 // ============================================================ helpers
 function esc(str) {
@@ -133,7 +141,7 @@ onAuth(async (user) => {
   }
   $('admin-link').toggleAttribute('hidden', !_adminFlag);
   applyMaintenance();
-  if (browseVisible() && !_browseLoaded) { _browseLoaded = true; loadBrands(true); }
+  maybeLoadBrowse();
   updateCommentFormAuth();
 });
 
@@ -338,10 +346,14 @@ $('filter-brand').addEventListener('keydown', (e) => { if (e.key === 'Enter') $(
 $('load-more-btn').addEventListener('click', () => { if (_view === 'brands') loadBrands(false); });
 
 // ============================================================ details modal
+// Prefer the pretty brand/model from the device we navigated through; the deviceId
+// only holds normalized tokens (lowercased, hyphenated), which read badly in the UI.
+function prettyBrand(c) { return _device ? _device.brand : (String(c.deviceId || '').split('__')[1] || ''); }
+function prettyModel(c) { return _device ? modelOf(_device) : (String(c.deviceId || '').split('__')[2] || ''); }
+
 async function openDetails(c) {
   _openRecord = c; _replyToId = null;
-  const parts = String(c.deviceId || '').split('__');
-  $('modal-title').textContent = `${parts[1] || ''} ${parts[2] || ''}`.trim() || 'Reference cycle';
+  $('modal-title').textContent = `${prettyBrand(c)} ${prettyModel(c)}`.trim() || 'Reference cycle';
   $('modal-program').textContent = _profile ? _profile.program : (c.program_lc || '');
   $('modal-badges').innerHTML = `<span class="badge badge-type">${esc(typeLabel(c.applianceType))}</span>`;
   $('modal-sparkline').innerHTML = sparklineSVG(c, 320, 80);
@@ -357,10 +369,9 @@ async function openDetails(c) {
 
 function buildDetailGrid(c) {
   const st = c.stats || {};
-  const parts = String(c.deviceId || '').split('__');
   return `<div class="detail-grid">
-    <div class="detail-item"><span class="detail-label">Brand</span><span class="detail-value">${esc(parts[1] || '')}</span></div>
-    <div class="detail-item"><span class="detail-label">Model</span><span class="detail-value">${esc(parts[2] || '')}</span></div>
+    <div class="detail-item"><span class="detail-label">Brand</span><span class="detail-value">${esc(prettyBrand(c))}</span></div>
+    <div class="detail-item"><span class="detail-label">Model</span><span class="detail-value">${esc(prettyModel(c))}</span></div>
     <div class="detail-item"><span class="detail-label">Program</span><span class="detail-value">${esc(_profile ? _profile.program : c.program_lc)}</span></div>
     <div class="detail-item"><span class="detail-label">Type</span><span class="detail-value">${esc(typeLabel(c.applianceType))}</span></div>
     <div class="detail-item"><span class="detail-label">Duration</span><span class="detail-value mono-data">${formatDuration(st.duration)}</span></div>
@@ -500,4 +511,11 @@ $('submit-comment-btn').addEventListener('click', async () => {
 });
 
 // ============================================================ init
-if (browseVisible()) { _browseLoaded = true; loadBrands(true); }
+// Paint from the fallback immediately, then reconcile with the live maintenance flag.
+applyMaintenance();
+maybeLoadBrowse();
+getSiteConfig().then((cfg) => {
+  if (typeof cfg.maintenance === 'boolean') _maintenance = cfg.maintenance;
+  applyMaintenance();
+  maybeLoadBrowse();
+}).catch(() => {});

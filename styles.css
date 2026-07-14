@@ -1220,6 +1220,18 @@ input[type="file"]:hover {
 }
 .tbl-msg { text-align: center; padding: 1.75rem; color: var(--text-muted); }
 .admin-table-wrap { overflow-x: auto; }
+.maint-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 1rem 1.25rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.maint-card-title { font-weight: 600; display: flex; align-items: center; gap: .5rem; }
 
 /* ============================================================
    v2 design pass: mono eyebrows, page head, energy accents, maintenance

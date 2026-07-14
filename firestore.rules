@@ -39,7 +39,14 @@ service cloud.firestore {
         && strLen(request.resource.data.brand, 40) && strLen(request.resource.data.model, 60)
         && request.resource.data.brand_lc == request.resource.data.brand.lower()
         && request.resource.data.model_lc == request.resource.data.model.lower()
+        && request.resource.data.favoriteCount == 0
+        && request.resource.data.profileCount == 0
         && request.resource.data.createdAt == request.time;
+      // favoriteCount is a vanity counter: any GitHub user may nudge it by exactly +/-1.
+      allow update: if isGithubUser()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['favoriteCount'])
+        && (request.resource.data.favoriteCount == resource.data.favoriteCount + 1
+            || request.resource.data.favoriteCount == resource.data.favoriteCount - 1);
       allow update: if isAdmin();
       allow delete: if isAdmin();
     }
@@ -54,6 +61,7 @@ service cloud.firestore {
         && request.resource.data.deviceId is string
         && strLen(request.resource.data.program, 60)
         && request.resource.data.program_lc == request.resource.data.program.lower()
+        && request.resource.data.cycleCount == 0
         && request.resource.data.createdAt == request.time;
       allow update: if isAdmin();
       allow delete: if isAdmin();
@@ -133,6 +141,12 @@ service cloud.firestore {
                  .hasOnly(['displayName', 'photoURL', 'lastSeen', 'favorites'])
             && request.resource.data.banned == resource.data.banned);
       allow delete: if isAdmin();
+    }
+
+    // site config (e.g. maintenance flag) - world-readable so clients can gate; admin-only writes
+    match /config/{doc} {
+      allow read: if true;
+      allow write: if isAdmin();
     }
 
     match /{document=**} { allow read, write: if false; }

@@ -5,6 +5,7 @@ import {
   adminListCycles, adminSetCycleStatus,
   adminListDevices, adminSetDeviceStatus, adminSetProfileStatus, adminSetBrandStatus, adminMergeDevices,
   adminListUsers, adminBanUser, adminUnbanUser, adminGetStats,
+  getSiteConfig, setMaintenance,
 } from './washstore.js';
 
 init(firebaseConfig);
@@ -107,6 +108,7 @@ onAuth(async (user) => {
   }
   $('admin-denied').setAttribute('hidden', ''); $('admin-panel').removeAttribute('hidden');
   loadOverview();
+  loadMaintenance();
 });
 
 // ============================================================ tabs
@@ -143,6 +145,38 @@ async function loadOverview() {
   }
 }
 $('stats-refresh-btn').addEventListener('click', loadOverview);
+
+// --- maintenance toggle ---
+let _maintOn = false;
+async function loadMaintenance() {
+  const btn = $('maint-toggle-btn');
+  btn.disabled = true;
+  try {
+    const cfg = await getSiteConfig();
+    _maintOn = !!cfg.maintenance;
+  } catch (_) { _maintOn = false; }
+  renderMaintenance();
+}
+function renderMaintenance() {
+  const state = $('maint-state');
+  const btn = $('maint-toggle-btn');
+  state.textContent = _maintOn ? 'On' : 'Off';
+  state.className = `badge badge-${_maintOn ? 'pending' : 'approved'}`;
+  btn.textContent = _maintOn ? 'Turn off (go public)' : 'Turn on';
+  btn.className = `btn btn-sm ${_maintOn ? 'btn-primary' : 'btn-danger'}`;
+  btn.disabled = false;
+}
+$('maint-toggle-btn').addEventListener('click', async () => {
+  const next = !_maintOn;
+  if (next && !confirm('Turn maintenance ON? The public site will show a coming-soon screen to non-admins.')) return;
+  $('maint-toggle-btn').disabled = true;
+  try {
+    await setMaintenance(next);
+    _maintOn = next;
+    renderMaintenance();
+    toast(next ? 'Maintenance on - site hidden from public' : 'Maintenance off - site is public');
+  } catch (e) { $('maint-toggle-btn').disabled = false; toast(e.message, 'error'); }
+});
 
 // ============================================================ review queue
 async function loadReview(reset = false) {

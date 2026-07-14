@@ -277,8 +277,14 @@ export async function favoriteDevice(id, on) {
   const ref = doc(_db, 'users', user.uid);
   const snap = await getDoc(ref);
   const favs = new Set((snap.exists() && snap.data().favorites) || []);
+  const already = favs.has(id);
+  // No-op if the requested state already holds, so the device counter is not double-moved.
+  if (on === already) return;
   if (on) favs.add(id); else favs.delete(id);
-  await updateDoc(ref, { favorites: [...favs] });
+  const batch = writeBatch(_db);
+  batch.update(ref, { favorites: [...favs] });
+  batch.update(doc(_db, 'devices', id), { favoriteCount: increment(on ? 1 : -1) });
+  await batch.commit();
 }
 
 export async function getFavorites() {
@@ -286,6 +292,24 @@ export async function getFavorites() {
   if (!user) return [];
   const s = await getDoc(doc(_db, 'users', user.uid));
   return (s.exists() && s.data().favorites) || [];
+}
+
+// ------------------------------------------------------------------
+// Site config (maintenance flag)
+// ------------------------------------------------------------------
+
+// Public read via REST. Returns {} when unset/unavailable.
+export async function getSiteConfig() {
+  try {
+    return (await restGet('config/site')) || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+// Admin-only write (enforced by rules).
+export async function setMaintenance(on) {
+  await setDoc(doc(_db, 'config', 'site'), { maintenance: !!on, updatedAt: serverTimestamp() }, { merge: true });
 }
 
 // ------------------------------------------------------------------
