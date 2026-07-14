@@ -26,10 +26,19 @@ import {
   writeBatch,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
 import { deviceId as mkDeviceId, profileId as mkProfileId } from './lib/ids.js';
-import { downsampleCycle, parseCycle, cycleStats } from './lib/trace.js';
+import { downsampleCycle, parseCycle, cycleStats, packPoints, unpackPoints } from './lib/trace.js';
 import { restQuery, restGet, restRatingSummary, restDeviceRating, restCount, setTokenProvider } from './firestore-rest.js';
 
 export { downsampleCycle, parseCycle, cycleStats };
+
+// Convert a stored cycle's trace (array of {o,w} maps) back to [[offset, watts], ...]
+// so all display/export code keeps working on pairs. Safe on already-paired data.
+function hydrateCycle(rec) {
+  if (rec && rec.trace && Array.isArray(rec.trace.points)) {
+    rec.trace = { ...rec.trace, points: unpackPoints(rec.trace.points) };
+  }
+  return rec;
+}
 
 export const STORE_SCHEMA_VERSION = 2;
 export const CYCLE_SCHEMA_VERSION = 1;
@@ -510,7 +519,7 @@ export async function uploadReferenceCycle(meta, tracePoints, stats, qc = 3) {
     uploaderName: user.displayName || null,
     status: 'pending',
     rejectionReason: null,
-    trace: { points, sampleIntervalSec },
+    trace: { points: packPoints(points), sampleIntervalSec },
     stats: stats && typeof stats === 'object' ? stats : cycleStats(points),
     cycleSchemaVersion: CYCLE_SCHEMA_VERSION,
     downloads: 0,
@@ -536,7 +545,7 @@ export async function getReferenceCycles(profileId, { pageSize = 24, cursor = nu
   ];
   if (cursor) cons.push(startAfter(cursor));
   const snap = await getDocs(query(collection(_db, 'cycles'), ...cons));
-  const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  const items = snap.docs.map((d) => hydrateCycle({ id: d.id, ...d.data() }));
   return { items, cursor: snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null };
 }
 
@@ -547,14 +556,14 @@ export async function myCycles({ pageSize = 24, cursor = null } = {}) {
   const cons = [where('uploaderUid', '==', user.uid), orderBy('createdAt', 'desc'), limit(pageSize)];
   if (cursor) cons.push(startAfter(cursor));
   const snap = await getDocs(query(collection(_db, 'cycles'), ...cons));
-  const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  const items = snap.docs.map((d) => hydrateCycle({ id: d.id, ...d.data() }));
   return { items, cursor: snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : null };
 }
 
 export async function getCycle(id) {
   const rec = await restGet(`cycles/${id}`);
   if (!rec) throw new Error('Cycle not found');
-  return rec;
+  return hydrateCycle(rec);
 }
 
 export async function deleteCycle(id) {
@@ -657,13 +666,13 @@ export async function adminListCycles({ status = null, applianceType = null, pag
   const filters = [];
   if (status) filters.push({ field: 'status', op: 'EQUAL', value: status });
   if (applianceType) filters.push({ field: 'applianceType', op: 'EQUAL', value: applianceType });
-  const items = await restQuery('cycles', {
+  const items = (await restQuery('cycles', {
     filters,
     orderBy: [{ field: 'createdAt', dir: 'DESCENDING' }],
     limit: pageSize,
     startAfter: cursor ? [cursor] : null,
     auth: true,
-  });
+  })).map(hydrateCycle);
   const next = items.length === pageSize ? items[items.length - 1].createdAt : null;
   return { items, cursor: next };
 }

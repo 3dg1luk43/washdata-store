@@ -19,6 +19,7 @@
 
 import admin from 'firebase-admin';
 import { deviceId as mkDeviceId, profileId as mkProfileId } from '../lib/ids.js';
+import { packPoints } from '../lib/trace.js';
 
 const projectId = process.argv[2];
 if (!projectId) {
@@ -105,7 +106,7 @@ async function run() {
       brand_lc: brand.toLowerCase(), program_lc: program.toLowerCase(), applianceType,
       uploaderUid: env.uploaderUid || 'migration', uploaderName: env.uploaderName || null,
       status: env.status || 'pending', rejectionReason: env.rejectionReason || null,
-      trace: { points, sampleIntervalSec: env.sampleIntervalSec || 5 },
+      trace: { points: packPoints(points), sampleIntervalSec: env.sampleIntervalSec || 5 },
       stats: statsFrom(env, points),
       cycleSchemaVersion: 1, downloads: env.downloads || 0, commentCount: 0,
       qc: 3, createdAt: now,

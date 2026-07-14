@@ -8,6 +8,7 @@
 
 import admin from 'firebase-admin';
 import { deviceId as mkDeviceId, profileId as mkProfileId } from '../lib/ids.js';
+import { packPoints } from '../lib/trace.js';
 
 const projectId = process.argv[2];
 if (!projectId) { console.error('Usage: node scripts/seed_sample.mjs <projectId>'); process.exit(1); }
@@ -79,7 +80,7 @@ async function run() {
     await db.collection('cycles').doc(cid).set({
       profileId: profId, deviceId: devId, brand_lc: brandLc, program_lc: s.program.toLowerCase(), applianceType: s.type,
       uploaderUid: 'seed', uploaderName: 'Sample data', status: 'approved', rejectionReason: null,
-      trace: { points, sampleIntervalSec: 30 }, stats, cycleSchemaVersion: 1,
+      trace: { points: packPoints(points), sampleIntervalSec: 30 }, stats, cycleSchemaVersion: 1,
       downloads: 0, commentCount: 0, qc: 1, createdAt: now,
     }, { merge: true });
     n++;

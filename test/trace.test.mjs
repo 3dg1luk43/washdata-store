@@ -1,6 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { downsampleCycle, parseCycle, cycleStats } from '../lib/trace.js';
+import { downsampleCycle, parseCycle, cycleStats, packPoints, unpackPoints } from '../lib/trace.js';
+
+test('packPoints -> {o,w} maps (Firestore-legal); unpackPoints round-trips to pairs', () => {
+  const pairs = [[0, 2000], [60, 100]];
+  const packed = packPoints(pairs);
+  assert.deepEqual(packed, [{ o: 0, w: 2000 }, { o: 60, w: 100 }]);
+  // No element is an array (Firestore forbids nested arrays).
+  assert.ok(packed.every((p) => !Array.isArray(p)));
+  assert.deepEqual(unpackPoints(packed), pairs);
+  // unpackPoints is defensive: already-paired data passes through.
+  assert.deepEqual(unpackPoints(pairs), pairs);
+});
 
 test('downsampleCycle caps to max points, keeps short traces intact', () => {
   const short = [[0, 1], [1, 2]];
