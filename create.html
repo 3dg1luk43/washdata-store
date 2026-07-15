@@ -91,6 +91,15 @@
             <label for="dev-manual">Manual or product page URL <span class="text-muted">(optional)</span></label>
             <input type="url" id="dev-manual" maxlength="500" placeholder="https://..." autocomplete="off">
           </div>
+          <details class="contribute-guide">
+            <summary>Naming standards</summary>
+            <ul>
+              <li><strong>Brand</strong> -- use the official manufacturer name exactly (e.g. "Bosch", "Samsung", not a distributor or series name). Check the brand list first.</li>
+              <li><strong>Model</strong> -- include the full model code as printed on the appliance label (e.g. "Serie 6 WAT28660", not just "Serie 6"). Include series/line if it affects cycle timing.</li>
+              <li><strong>Before submitting</strong> -- search the browse list to make sure this exact model isn't already in the catalog.</li>
+              <li>Your entry starts as <em>pending</em> and goes live once enough community members confirm it.</li>
+            </ul>
+          </details>
           <label class="consent-row"><input type="checkbox" id="dev-consent"> Show my GitHub name as the contributor of this entry</label>
           <div class="btn-row">
             <button type="submit" class="btn btn-primary" id="dev-submit">Add appliance</button>
@@ -124,6 +133,14 @@
             <label for="prof-desc">Description <span class="text-muted">(optional)</span></label>
             <textarea id="prof-desc" rows="2"></textarea>
           </div>
+          <details class="contribute-guide">
+            <summary>Profile naming standards</summary>
+            <ul>
+              <li>Use the name exactly as shown on the appliance display or control panel dial.</li>
+              <li>Include temperature and spin where the appliance labels them (e.g. "Cotton 60" not just "Cotton").</li>
+              <li>Avoid abbreviations or paraphrases -- other users need to match this to their own dial.</li>
+            </ul>
+          </details>
           <div class="btn-row">
             <button type="submit" class="btn btn-primary" id="prof-submit">Add profile</button>
           </div>
