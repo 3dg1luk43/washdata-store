@@ -480,8 +480,29 @@ async function openDevice(d) {
   try {
     const profiles = await getProfiles(d.id, { includePending: !_browseFilters.approvedOnly });
     body.innerHTML = '';
+    // Device header card
+    const header = document.createElement('div');
+    header.className = 'device-header-card';
+    const manualLink = d.manualUrl ? `<a class="device-header-link" href="${esc(d.manualUrl)}" target="_blank" rel="noopener noreferrer">Manual / product page &rarr;</a>` : '';
+    const ownerNote = d.ownerId ? `<span class="device-header-owner">&#128274; Community-curated</span>` : '';
+    header.innerHTML = `
+      <div class="device-header-meta">
+        <span class="badge badge-type">${esc(typeLabel(d.applianceType))}</span>
+        ${statusBadge(d)}
+        ${ownerNote}
+      </div>
+      <h2 class="device-header-title">${esc(d.brand)} <span class="device-header-model">${esc(modelOf(d))}</span></h2>
+      <div class="device-header-stats">
+        <span>&#11088; ${d.favoriteCount || 0} saves</span>
+        <span>&middot;</span>
+        <span>&#10003; ${d.confirmCount || 0} confirmations</span>
+        <span>&middot;</span>
+        <span>${profiles.length} profile${profiles.length === 1 ? '' : 's'}</span>
+      </div>
+      ${manualLink}`;
+    body.appendChild(header);
     if (profiles.length === 0) {
-      body.innerHTML = emptyHTML('&#128203;', 'No profiles yet', 'No profiles for this appliance yet.');
+      body.insertAdjacentHTML('beforeend', emptyHTML('&#128203;', 'No profiles yet', 'No profiles for this appliance yet.'));
     } else {
       const list = document.createElement('div');
       list.className = 'profile-list';

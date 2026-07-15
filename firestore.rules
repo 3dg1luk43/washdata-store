@@ -27,7 +27,9 @@ service cloud.firestore {
     // brands
     match /brands/{brandId} {
       // Pending is public (searchable with an "awaiting approval" tag); removed stays hidden.
-      allow read: if resource.data.status in ['approved', 'pending'] || isAdmin()
+      // resource == null when the document doesn't exist; allow those reads so ensureBrand()
+      // can check existence via getDoc() without a permission error.
+      allow read: if resource == null || resource.data.status in ['approved', 'pending'] || isAdmin()
         || (isSignedIn() && resource.data.createdByUid == request.auth.uid);
       allow create: if canContribute()
         && request.resource.data.createdByUid == request.auth.uid
@@ -43,7 +45,9 @@ service cloud.firestore {
     // devices
     match /devices/{deviceId} {
       // Pending is public (searchable with an "awaiting approval" tag); removed stays hidden.
-      allow read: if resource.data.status in ['approved', 'pending'] || isAdmin()
+      // resource == null when the document doesn't exist; allow those reads so ensureDevice()
+      // can check existence via getDoc() without a permission error.
+      allow read: if resource == null || resource.data.status in ['approved', 'pending'] || isAdmin()
         || (isSignedIn() && resource.data.createdByUid == request.auth.uid);
       allow create: if canContribute()
         && request.resource.data.createdByUid == request.auth.uid
@@ -107,7 +111,9 @@ service cloud.firestore {
     match /profiles/{profileId} {
       // Pending is public (browseable with an "awaiting approval" tag), like the
       // brand/device catalog; removed stays hidden. Cycles (the data) stay moderated.
-      allow read: if resource.data.status in ['approved', 'pending'] || isAdmin()
+      // resource == null when the document doesn't exist; allow those reads so ensureProfile()
+      // can check existence via getDoc() without a permission error.
+      allow read: if resource == null || resource.data.status in ['approved', 'pending'] || isAdmin()
         || (isSignedIn() && resource.data.createdByUid == request.auth.uid);
       allow create: if canContribute()
         && request.resource.data.createdByUid == request.auth.uid
@@ -129,10 +135,10 @@ service cloud.firestore {
 
     // cycles (reference golden cycles) - community-voted like devices (no admin review)
     match /cycles/{cycleId} {
-      function isOwner() { return isSignedIn() && resource.data.uploaderUid == request.auth.uid; }
+      function isOwner() { return isSignedIn() && resource != null && resource.data.uploaderUid == request.auth.uid; }
       // Pending is public (browseable with an "awaiting approval" tag) so the
       // community can confirm it; removed stays hidden.
-      allow read: if resource.data.status in ['approved', 'pending'] || isOwner() || isAdmin();
+      allow read: if resource == null || resource.data.status in ['approved', 'pending'] || isOwner() || isAdmin();
       allow create: if canContribute()
         && request.resource.data.uploaderUid == request.auth.uid
         && request.resource.data.status == 'pending'

@@ -876,6 +876,55 @@ export async function adminDeleteComment(cycleId, commentId) {
   await deleteComment(cycleId, commentId);
 }
 
+// Hard-delete a device and cascade: all its profiles and all their cycles.
+export async function adminDeleteDevice(deviceId) {
+  const [profSnap, cycSnap] = await Promise.all([
+    getDocs(query(collection(_db, 'profiles'), where('deviceId', '==', deviceId))),
+    getDocs(query(collection(_db, 'cycles'), where('deviceId', '==', deviceId))),
+  ]);
+  const batch = writeBatch(_db);
+  for (const p of profSnap.docs) batch.delete(doc(_db, 'profiles', p.id));
+  for (const c of cycSnap.docs) batch.delete(doc(_db, 'cycles', c.id));
+  batch.delete(doc(_db, 'devices', deviceId));
+  await batch.commit();
+}
+
+// Hard-delete a brand document.
+export async function adminDeleteBrand(brandId) {
+  await deleteDoc(doc(_db, 'brands', brandId));
+}
+
+// Hard-delete a profile and all its reference cycles.
+export async function adminDeleteProfile(profileId) {
+  const cycSnap = await getDocs(query(collection(_db, 'cycles'), where('profileId', '==', profileId)));
+  const batch = writeBatch(_db);
+  for (const c of cycSnap.docs) batch.delete(doc(_db, 'cycles', c.id));
+  batch.delete(doc(_db, 'profiles', profileId));
+  await batch.commit();
+}
+
+// Reassign a user's contributions to anonymous, then hard-delete their user doc.
+// Batched to stay under Firestore's 500-op limit.
+export async function adminDeleteUser(uid) {
+  const BATCH_SIZE = 400;
+  const [devSnap, profSnap, cycSnap] = await Promise.all([
+    getDocs(query(collection(_db, 'devices'), where('createdByUid', '==', uid))),
+    getDocs(query(collection(_db, 'profiles'), where('createdByUid', '==', uid))),
+    getDocs(query(collection(_db, 'cycles'), where('uploaderUid', '==', uid))),
+  ]);
+  const ops = [
+    ...devSnap.docs.map((d) => ({ ref: doc(_db, 'devices', d.id), data: { createdByUid: null, createdByName: 'Deleted User' } })),
+    ...profSnap.docs.map((p) => ({ ref: doc(_db, 'profiles', p.id), data: { createdByUid: null, createdByName: 'Deleted User' } })),
+    ...cycSnap.docs.map((c) => ({ ref: doc(_db, 'cycles', c.id), data: { uploaderUid: null, uploaderName: 'Deleted User' } })),
+  ];
+  for (let i = 0; i < ops.length; i += BATCH_SIZE) {
+    const batch = writeBatch(_db);
+    for (const { ref, data } of ops.slice(i, i + BATCH_SIZE)) batch.update(ref, data);
+    await batch.commit();
+  }
+  await deleteDoc(doc(_db, 'users', uid));
+}
+
 export async function adminGetStats() {
   const c = (coll, s) => restCount(coll, [{ field: 'status', op: 'EQUAL', value: s }], { auth: true });
   const [pb, pd, pp, pc, approved, rejected, removed, bannedUsers] = await Promise.all([

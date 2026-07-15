@@ -128,15 +128,15 @@
         <div class="merge-bar">
           <span class="text-muted" style="font-size:.8125rem">Merge reassigns all profiles/cycles from the source device into the target, then deletes the source.</span>
           <div class="merge-controls">
-            <input type="text" id="merge-from" placeholder="source deviceId" autocomplete="off">
+            <select id="merge-from"><option value="">-- select source device --</option></select>
             <span>&rarr;</span>
-            <input type="text" id="merge-to" placeholder="target deviceId" autocomplete="off">
+            <select id="merge-to"><option value="">-- select target device --</option></select>
             <button class="btn btn-danger btn-sm" id="merge-btn">Merge</button>
           </div>
         </div>
         <div class="admin-table-wrap">
           <table class="admin-table"><thead><tr>
-            <th>Device ID</th><th>Brand</th><th>Model</th><th>Type</th><th>Status</th><th>&#11088;</th><th>&#10003;</th><th>Actions</th>
+            <th>Device ID</th><th>Brand</th><th>Model</th><th>Type</th><th>Status</th><th>&#11088;</th><th>&#10003;</th><th>Owner</th><th>Actions</th>
           </tr></thead><tbody id="devices-tbody"></tbody></table>
         </div>
         <div class="load-more-area"><button class="btn btn-ghost" id="devices-load-more" hidden>Load more</button></div>
@@ -148,9 +148,9 @@
         <div class="merge-bar">
           <span class="text-muted" style="font-size:.8125rem">Merge reassigns all cycles from the source profile into the target, then deletes the source.</span>
           <div class="merge-controls">
-            <input type="text" id="pmerge-from" placeholder="source profileId" autocomplete="off">
+            <select id="pmerge-from"><option value="">-- select source profile --</option></select>
             <span>&rarr;</span>
-            <input type="text" id="pmerge-to" placeholder="target profileId" autocomplete="off">
+            <select id="pmerge-to"><option value="">-- select target profile --</option></select>
             <button class="btn btn-danger btn-sm" id="pmerge-btn">Merge</button>
           </div>
         </div>
@@ -199,6 +199,27 @@
     <span class="foot-sep">&middot;</span>
     <span>Copyright &copy; 2026</span>
   </footer>
+
+  <!-- Owner picker modal -->
+  <div class="modal-overlay" id="owner-picker-modal" hidden aria-modal="true" role="dialog">
+    <div class="modal" style="max-width:420px">
+      <div class="modal-header">
+        <div><h2 class="modal-title">Set Device Owner</h2></div>
+        <button class="modal-close" id="owner-picker-close" aria-label="Close">&#215;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="owner-picker-select">Owner (GitHub user)</label>
+          <select id="owner-picker-select"><option value="">-- None (remove owner) --</option></select>
+          <div class="form-hint">The selected user will be able to edit this device's settings and phase maps.</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost btn-sm" id="owner-picker-cancel">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="owner-picker-save">Set Owner</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Settings editor modal -->
   <div class="modal-overlay" id="settings-edit-modal" hidden aria-modal="true" role="dialog">

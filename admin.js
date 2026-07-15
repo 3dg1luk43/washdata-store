@@ -8,6 +8,7 @@ import {
   adminListUsers, adminBanUser, adminUnbanUser, adminGetStats,
   getSiteConfig, setMaintenance, setConfirmThreshold,
   adminSetDeviceOwner,
+  adminDeleteDevice, adminDeleteBrand, adminDeleteProfile, adminDeleteUser,
 } from './washstore.js';
 import { openSettingsEditor, openPhaseEditor, bindEditorCloseHandlers } from './editors.js';
 
@@ -20,6 +21,11 @@ let _devCursor = null;
 let _userCursor = null;
 let _cyFilters = { status: '', applianceType: '' };
 let _reviewRecord = null;
+let _deviceItems = [];
+let _profileItems = [];
+let _userItems = [];
+// State for the owner-picker modal
+let _ownerPickerDevice = null;
 
 // ============================================================ dom + toast
 function $(id) { return document.getElementById(id); }
@@ -289,23 +295,45 @@ $('cy-filter-clear').addEventListener('click', () => { $('cy-filter-status').val
 $('cycles-load-more').addEventListener('click', () => loadCycles(false));
 
 // ============================================================ devices table
+function populateDeviceMergeSelects() {
+  const opts = _deviceItems.map((d) => `<option value="${esc(d.id)}">${esc(d.brand)} ${esc(d.model)} (${esc(d.status)})</option>`).join('');
+  ['merge-from', 'merge-to'].forEach((id) => {
+    const sel = $(id);
+    if (!sel) return;
+    const current = sel.value;
+    sel.innerHTML = '<option value="">-- select device --</option>' + opts;
+    if (current) sel.value = current;
+  });
+}
+
+function populateOwnerPicker() {
+  const sel = $('owner-picker-select');
+  if (!sel) return;
+  const opts = _userItems.map((u) => `<option value="${esc(u.uid)}">${esc(u.displayName || '(no display name)')} &middot; ${esc(truncate(u.uid, 10))}</option>`).join('');
+  sel.innerHTML = '<option value="">-- None (remove owner) --</option>' + opts;
+  if (_ownerPickerDevice) sel.value = _ownerPickerDevice.ownerId || '';
+}
+
 async function loadDevices(reset = false) {
-  if (reset) { _devCursor = null; $('devices-tbody').innerHTML = `<tr><td colspan="8" class="tbl-msg">Loading...</td></tr>`; $('devices-load-more').setAttribute('hidden', ''); }
+  if (reset) { _devCursor = null; _deviceItems = []; $('devices-tbody').innerHTML = `<tr><td colspan="9" class="tbl-msg">Loading...</td></tr>`; $('devices-load-more').setAttribute('hidden', ''); }
   try {
     const { items, cursor } = await adminListDevices({ pageSize: 40, cursor: _devCursor });
     if (reset) $('devices-tbody').innerHTML = '';
     // Pending first so items needing review are easy to find.
     items.sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1));
-    if (items.length === 0 && !_devCursor) { $('devices-tbody').innerHTML = `<tr><td colspan="8" class="tbl-msg">No devices found.</td></tr>`; }
+    _deviceItems = [..._deviceItems, ...items];
+    populateDeviceMergeSelects();
+    if (_deviceItems.length === 0 && !_devCursor) { $('devices-tbody').innerHTML = `<tr><td colspan="9" class="tbl-msg">No devices found.</td></tr>`; }
     else { items.forEach((d) => $('devices-tbody').appendChild(buildDeviceRow(d))); }
     _devCursor = cursor; $('devices-load-more').toggleAttribute('hidden', !cursor);
   } catch (e) {
-    if (reset) $('devices-tbody').innerHTML = `<tr><td colspan="8" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
+    if (reset) $('devices-tbody').innerHTML = `<tr><td colspan="9" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
     toast(e.message, 'error');
   }
 }
 
 function buildDeviceRow(d) {
+  const ownerLabel = d.ownerId ? truncate(d.ownerId, 10) : '-';
   const tr = document.createElement('tr');
   tr.innerHTML = `
     <td><code class="mono" style="font-size:.7rem">${esc(truncate(d.id, 26))}</code></td>
@@ -315,24 +343,35 @@ function buildDeviceRow(d) {
     <td><span class="badge badge-${esc(d.status)}">${esc(d.status)}</span></td>
     <td class="text-muted">${d.favoriteCount || 0}</td>
     <td class="text-muted">${d.confirmCount || 0}</td>
+    <td class="text-muted" style="font-size:.72rem"><code class="mono">${esc(ownerLabel)}</code></td>
     <td><div class="action-cell"></div></td>`;
   const cell = tr.querySelector('.action-cell');
-  const mkBtn = (label, status) => {
-    const b = document.createElement('button'); b.className = 'btn btn-ghost btn-sm'; b.textContent = label;
+  const mkApprove = () => {
+    const b = document.createElement('button'); b.className = 'btn btn-ghost btn-sm'; b.textContent = 'Approve';
     b.addEventListener('click', async () => {
       try {
-        await adminSetDeviceStatus(d.id, status); d.status = status;
-        const badge = tr.children[4].querySelector('.badge'); badge.className = `badge badge-${status}`; badge.textContent = status;
-        toast(`Device ${status}`);
+        await adminSetDeviceStatus(d.id, 'approved'); d.status = 'approved';
+        const badge = tr.children[4].querySelector('.badge'); badge.className = 'badge badge-approved'; badge.textContent = 'approved';
+        b.remove();
+        toast('Device approved');
       } catch (e) { toast(e.message, 'error'); }
     });
     cell.appendChild(b);
   };
-  if (d.status !== 'approved') mkBtn('Approve', 'approved');
-  if (d.status !== 'removed') mkBtn('Remove', 'removed');
+  if (d.status !== 'approved') mkApprove();
+  // Hard delete instead of soft-disable
+  const delBtn = document.createElement('button');
+  delBtn.className = 'btn btn-danger btn-sm'; delBtn.textContent = 'Delete';
+  delBtn.addEventListener('click', async () => {
+    if (!confirm(`Permanently delete ${d.brand} ${d.model} and all its profiles and cycles? This cannot be undone.`)) return;
+    delBtn.disabled = true;
+    try { await adminDeleteDevice(d.id); tr.remove(); toast('Device deleted'); }
+    catch (e) { delBtn.disabled = false; toast(e.message, 'error'); }
+  });
+  cell.appendChild(delBtn);
   const useAsTarget = document.createElement('button');
   useAsTarget.className = 'btn btn-ghost btn-sm'; useAsTarget.textContent = 'Merge target';
-  useAsTarget.addEventListener('click', () => { $('merge-to').value = d.id; switchTab('devices'); });
+  useAsTarget.addEventListener('click', () => { const sel = $('merge-to'); if (sel) sel.value = d.id; });
   cell.appendChild(useAsTarget);
   const editSettings = document.createElement('button');
   editSettings.className = 'btn btn-ghost btn-sm'; editSettings.textContent = 'Edit settings';
@@ -340,24 +379,42 @@ function buildDeviceRow(d) {
   cell.appendChild(editSettings);
   const setOwner = document.createElement('button');
   setOwner.className = 'btn btn-ghost btn-sm'; setOwner.textContent = 'Set owner';
-  setOwner.addEventListener('click', async () => {
-    const uid = prompt(`Owner UID for ${d.id}\n(current: ${d.ownerId || 'none'})\nLeave blank to remove owner:`);
-    if (uid === null) return;
-    try {
-      await adminSetDeviceOwner(d.id, uid.trim() || null);
-      d.ownerId = uid.trim() || null;
-      toast(uid.trim() ? `Owner set to ${uid.trim()}` : 'Owner cleared');
-    } catch (e) { toast(e.message, 'error'); }
-  });
+  setOwner.addEventListener('click', () => openOwnerPicker(d, tr));
   cell.appendChild(setOwner);
   return tr;
 }
 
+function openOwnerPicker(d, tr) {
+  _ownerPickerDevice = d;
+  populateOwnerPicker();
+  $('owner-picker-modal').removeAttribute('hidden');
+  $('owner-picker-save').onclick = async () => {
+    const uid = $('owner-picker-select').value || null;
+    try {
+      await adminSetDeviceOwner(d.id, uid);
+      d.ownerId = uid;
+      // Update the owner cell in the row (8th column, 0-indexed)
+      const ownerCell = tr.children[7];
+      if (ownerCell) ownerCell.innerHTML = `<code class="mono">${esc(uid ? truncate(uid, 10) : '-')}</code>`;
+      $('owner-picker-modal').setAttribute('hidden', '');
+      toast(uid ? `Owner set` : 'Owner cleared');
+    } catch (e) { toast(e.message, 'error'); }
+  };
+}
+$('owner-picker-close').addEventListener('click', () => $('owner-picker-modal').setAttribute('hidden', ''));
+$('owner-picker-cancel').addEventListener('click', () => $('owner-picker-modal').setAttribute('hidden', ''));
+$('owner-picker-modal').addEventListener('click', (e) => { if (e.target === $('owner-picker-modal')) $('owner-picker-modal').setAttribute('hidden', ''); });
+
 $('merge-btn').addEventListener('click', async () => {
-  const from = $('merge-from').value.trim();
-  const to = $('merge-to').value.trim();
-  if (!from || !to) { toast('Enter both source and target deviceId', 'error'); return; }
-  if (!confirm(`Merge ${from} into ${to}? All its profiles/cycles are reassigned and the source device is deleted.`)) return;
+  const from = $('merge-from').value;
+  const to = $('merge-to').value;
+  if (!from || !to) { toast('Select both source and target device', 'error'); return; }
+  if (from === to) { toast('Source and target must be different', 'error'); return; }
+  const fromDev = _deviceItems.find((d) => d.id === from);
+  const toDev = _deviceItems.find((d) => d.id === to);
+  const fromLabel = fromDev ? `${fromDev.brand} ${fromDev.model}` : from;
+  const toLabel = toDev ? `${toDev.brand} ${toDev.model}` : to;
+  if (!confirm(`Merge "${fromLabel}" into "${toLabel}"? All its profiles/cycles are reassigned and the source device is deleted.`)) return;
   try { await adminMergeDevices(from, to); toast('Merged'); $('merge-from').value = ''; $('merge-to').value = ''; loadDevices(true); }
   catch (e) { toast(e.message, 'error'); }
 });
@@ -389,15 +446,13 @@ function bumpPending(delta) {
   if (!isNaN(n)) el.textContent = String(Math.max(0, n + delta));
 }
 
-// Shared Approve/Remove action cell for brands & profiles: rebuilds itself after a
+// Shared Approve/Delete action cell for brands & profiles: rebuilds itself after a
 // status change (so Approve disappears once approved), updates the row badge, and
 // adjusts the pending count. `extra` appends type-specific buttons (e.g. Merge target).
-function buildStatusActions(tr, rec, setter, label, extra) {
+// `deleter(id)` is called for hard delete; if omitted the Delete button is not shown.
+function buildStatusActions(tr, rec, setter, label, extra, deleter) {
   const cell = tr.querySelector('.action-cell');
   cell.innerHTML = '';
-  // Guard against a second click while a write is in flight: two rapid clicks
-  // (e.g. Approve then Remove) would both capture wasPending and decrement the
-  // pending counter twice with competing writes.
   let saving = false;
   const mk = (text, status) => {
     const btn = document.createElement('button'); btn.className = 'btn btn-ghost btn-sm'; btn.textContent = text;
@@ -410,7 +465,7 @@ function buildStatusActions(tr, rec, setter, label, extra) {
         await setter(rec.id, status); rec.status = status;
         const badge = tr.querySelector('.badge'); if (badge) { badge.className = `badge badge-${status}`; badge.textContent = status; }
         bumpPending((wasPending ? -1 : 0) + (status === 'pending' ? 1 : 0));
-        buildStatusActions(tr, rec, setter, label, extra);
+        buildStatusActions(tr, rec, setter, label, extra, deleter);
         toast(`${label} ${status}`);
       } catch (e) {
         saving = false;
@@ -421,7 +476,20 @@ function buildStatusActions(tr, rec, setter, label, extra) {
     cell.appendChild(btn);
   };
   if (rec.status !== 'approved') mk('Approve', 'approved');
-  if (rec.status !== 'removed') mk('Remove', 'removed');
+  if (deleter) {
+    const delBtn = document.createElement('button'); delBtn.className = 'btn btn-danger btn-sm'; delBtn.textContent = 'Delete';
+    delBtn.addEventListener('click', async () => {
+      if (!confirm(`Permanently delete this ${label.toLowerCase()} and all its data? This cannot be undone.`)) return;
+      delBtn.disabled = true;
+      try {
+        await deleter(rec.id);
+        bumpPending(rec.status === 'pending' ? -1 : 0);
+        tr.remove();
+        toast(`${label} deleted`);
+      } catch (e) { delBtn.disabled = false; toast(e.message, 'error'); }
+    });
+    cell.appendChild(delBtn);
+  }
   if (extra) extra(cell);
 }
 
@@ -433,21 +501,37 @@ function buildBrandRow(b) {
     <td><span class="badge badge-${esc(b.status)}">${esc(b.status)}</span></td>
     <td class="text-muted" style="font-size:.75rem">${esc(b.createdByName || '-')}</td>
     <td><div class="action-cell"></div></td>`;
-  buildStatusActions(tr, b, adminSetBrandStatus, 'Brand');
+  buildStatusActions(tr, b, adminSetBrandStatus, 'Brand', null, adminDeleteBrand);
   return tr;
 }
 
 // ============================================================ profiles review
+function populateProfileMergeSelects() {
+  const opts = _profileItems.map((p) => {
+    const dev = String(p.deviceId || '').split('__').slice(1).join(' ').trim() || p.deviceId || '';
+    return `<option value="${esc(p.id)}">${esc(p.program)}${dev ? ' (' + esc(dev) + ')' : ''}</option>`;
+  }).join('');
+  ['pmerge-from', 'pmerge-to'].forEach((id) => {
+    const sel = $(id);
+    if (!sel) return;
+    const current = sel.value;
+    sel.innerHTML = '<option value="">-- select profile --</option>' + opts;
+    if (current) sel.value = current;
+  });
+}
+
 async function loadProfiles() {
-  $('profiles-tbody').innerHTML = `<tr><td colspan="5" class="tbl-msg">Loading...</td></tr>`;
+  $('profiles-tbody').innerHTML = `<tr><td colspan="6" class="tbl-msg">Loading...</td></tr>`;
   try {
     const { items } = await adminListProfiles();
+    _profileItems = items;
+    populateProfileMergeSelects();
     $('profiles-tbody').innerHTML = '';
-    if (items.length === 0) { $('profiles-tbody').innerHTML = `<tr><td colspan="5" class="tbl-msg">No profiles found.</td></tr>`; return; }
+    if (items.length === 0) { $('profiles-tbody').innerHTML = `<tr><td colspan="6" class="tbl-msg">No profiles found.</td></tr>`; return; }
     items.sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1));
     items.forEach((p) => $('profiles-tbody').appendChild(buildProfileRow(p)));
   } catch (e) {
-    $('profiles-tbody').innerHTML = `<tr><td colspan="5" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
+    $('profiles-tbody').innerHTML = `<tr><td colspan="6" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
     toast(e.message, 'error');
   }
 }
@@ -465,31 +549,37 @@ function buildProfileRow(p) {
   buildStatusActions(tr, p, adminSetProfileStatus, 'Profile', (cell) => {
     const target = document.createElement('button');
     target.className = 'btn btn-ghost btn-sm'; target.textContent = 'Merge target';
-    target.addEventListener('click', () => { $('pmerge-to').value = p.id; });
+    target.addEventListener('click', () => { const sel = $('pmerge-to'); if (sel) sel.value = p.id; });
     cell.appendChild(target);
     const editPhases = document.createElement('button');
     editPhases.className = 'btn btn-ghost btn-sm'; editPhases.textContent = 'Edit phases';
     editPhases.addEventListener('click', () => openPhaseEditor(p));
     cell.appendChild(editPhases);
-  });
+  }, adminDeleteProfile);
   return tr;
 }
 
 $('pmerge-btn').addEventListener('click', async () => {
-  const from = $('pmerge-from').value.trim();
-  const to = $('pmerge-to').value.trim();
-  if (!from || !to) { toast('Enter both source and target profileId', 'error'); return; }
-  if (!confirm(`Merge ${from} into ${to}? All its cycles are reassigned and the source profile is deleted.`)) return;
+  const from = $('pmerge-from').value;
+  const to = $('pmerge-to').value;
+  if (!from || !to) { toast('Select both source and target profile', 'error'); return; }
+  if (from === to) { toast('Source and target must be different', 'error'); return; }
+  const fromP = _profileItems.find((p) => p.id === from);
+  const toP = _profileItems.find((p) => p.id === to);
+  const fromLabel = fromP ? fromP.program : from;
+  const toLabel = toP ? toP.program : to;
+  if (!confirm(`Merge "${fromLabel}" into "${toLabel}"? All its cycles are reassigned and the source profile is deleted.`)) return;
   try { await adminMergeProfiles(from, to); toast('Merged'); $('pmerge-from').value = ''; $('pmerge-to').value = ''; loadProfiles(); }
   catch (e) { toast(e.message, 'error'); }
 });
 
 // ============================================================ users table
 async function loadUsers(reset = false) {
-  if (reset) { _userCursor = null; $('users-tbody').innerHTML = `<tr><td colspan="6" class="tbl-msg">Loading...</td></tr>`; $('users-load-more').setAttribute('hidden', ''); }
+  if (reset) { _userCursor = null; _userItems = []; $('users-tbody').innerHTML = `<tr><td colspan="6" class="tbl-msg">Loading...</td></tr>`; $('users-load-more').setAttribute('hidden', ''); }
   try {
     const { items, cursor } = await adminListUsers({ pageSize: 40, cursor: _userCursor });
     if (reset) $('users-tbody').innerHTML = '';
+    _userItems = [..._userItems, ...items];
     if (items.length === 0 && !_userCursor) { $('users-tbody').innerHTML = `<tr><td colspan="6" class="tbl-msg">No users found.</td></tr>`; }
     else { items.forEach((u) => $('users-tbody').appendChild(buildUserRow(u))); }
     _userCursor = cursor; $('users-load-more').toggleAttribute('hidden', !cursor);
@@ -501,10 +591,11 @@ async function loadUsers(reset = false) {
 
 function buildUserRow(u) {
   const tr = document.createElement('tr');
-  const initial = (u.displayName || 'U').charAt(0).toUpperCase();
+  const name = u.displayName || '(no display name)';
+  const initial = name.charAt(0).toUpperCase();
   const avatar = u.photoURL ? `<img src="${esc(u.photoURL)}" alt="">` : initial;
   tr.innerHTML = `
-    <td><div class="user-cell"><div class="user-cell-avatar">${avatar}</div><span style="font-size:.8125rem;font-weight:500">${esc(u.displayName || 'Unknown')}</span></div></td>
+    <td><div class="user-cell"><div class="user-cell-avatar">${avatar}</div><span style="font-size:.8125rem;font-weight:500">${esc(name)}</span></div></td>
     <td><code class="mono" style="font-size:.7rem">${esc(truncate(u.uid, 12))}</code></td>
     <td>${statusBadge(u)}</td>
     <td class="text-muted" style="font-size:.75rem;max-width:160px;overflow:hidden;text-overflow:ellipsis">${esc(u.banReason || '-')}</td>
@@ -518,21 +609,36 @@ function statusBadge(u) {
 }
 function buildUserActions(cell, u, tr) {
   cell.innerHTML = '';
+  const name = u.displayName || u.uid;
   const b = document.createElement('button');
   if (u.banned) {
     b.className = 'btn btn-ghost btn-sm'; b.textContent = 'Unban';
     b.addEventListener('click', async () => {
-      if (!confirm(`Unban ${u.displayName || u.uid}?`)) return;
+      if (!confirm(`Unban ${name}?`)) return;
       try { await adminUnbanUser(u.uid); u.banned = false; u.banReason = null; refreshUserRow(tr, u); toast('User unbanned'); } catch (e) { toast(e.message, 'error'); }
     });
   } else {
     b.className = 'btn btn-danger btn-sm'; b.textContent = 'Ban';
     b.addEventListener('click', async () => {
-      const reason = prompt(`Ban reason for ${u.displayName || u.uid}:`); if (reason === null) return;
+      const reason = prompt(`Ban reason for ${name}:`); if (reason === null) return;
       try { await adminBanUser(u.uid, reason || ''); u.banned = true; u.banReason = reason || ''; refreshUserRow(tr, u); toast('User banned'); } catch (e) { toast(e.message, 'error'); }
     });
   }
   cell.appendChild(b);
+  // Remove user: reassign their contributions to anonymous, then delete their account.
+  const delBtn = document.createElement('button');
+  delBtn.className = 'btn btn-danger btn-sm'; delBtn.textContent = 'Remove user';
+  delBtn.addEventListener('click', async () => {
+    if (!confirm(`Remove ${name}?\n\nThis will:\n- Reassign all their devices, profiles, and cycles to "Deleted User"\n- Delete their account\n\nThis cannot be undone.`)) return;
+    delBtn.disabled = true;
+    try {
+      await adminDeleteUser(u.uid);
+      tr.remove();
+      _userItems = _userItems.filter((x) => x.uid !== u.uid);
+      toast('User removed');
+    } catch (e) { delBtn.disabled = false; toast(e.message, 'error'); }
+  });
+  cell.appendChild(delBtn);
 }
 function refreshUserRow(tr, u) {
   const cells = tr.querySelectorAll('td');

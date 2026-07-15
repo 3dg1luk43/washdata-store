@@ -527,6 +527,7 @@ input[type="file"]:hover {
   flex: 1;
   display: flex;
   flex-direction: column;
+  padding: 1rem 1.25rem;
 }
 
 .modal-footer {
@@ -1487,9 +1488,27 @@ input[type="url"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
 
 /* ---- Settings editor ---- */
 .modal-wide { max-width: 780px; }
-.se-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem .75rem; }
-.se-input { font-size: .8125rem; padding: .35rem .5rem; }
+.se-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem 1rem; }
+.se-input { font-size: .8125rem; padding: .4rem .6rem; width: 100%; box-sizing: border-box; }
+.se-grid .form-group { margin: 0; }
+.se-grid label { font-size: .75rem; margin-bottom: .2rem; }
 @media (max-width: 600px) { .se-grid { grid-template-columns: 1fr; } }
+
+/* ---- Device header card (store browse) ---- */
+.device-header-card {
+  background: var(--surface2, var(--bg-card));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+.device-header-meta { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; margin-bottom: .4rem; }
+.device-header-title { font-size: 1.125rem; font-weight: 600; margin: 0 0 .3rem; }
+.device-header-model { font-weight: 400; color: var(--text-muted, #888); }
+.device-header-stats { font-size: .8125rem; color: var(--text-muted, #888); display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: .4rem; }
+.device-header-link { font-size: .8125rem; color: var(--accent); text-decoration: none; }
+.device-header-link:hover { text-decoration: underline; }
+.device-header-owner { font-size: .75rem; color: var(--text-muted, #888); }
 
 /* ---- Phase editor ---- */
 .pe-pending-row { display: flex; align-items: center; gap: .5rem; padding: .5rem 0; border-top: 1px solid var(--border-subtle); flex-wrap: wrap; }
