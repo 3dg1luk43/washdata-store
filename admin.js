@@ -51,18 +51,6 @@ function typeLabel(t) {
 }
 function truncate(str, max = 8) { if (!str) return ''; return str.length > max ? str.slice(0, max) + '...' : str; }
 
-function sparklineSVG(record, w = 100, h = 60) {
-  let pts = record?.trace?.points;
-  if (!Array.isArray(pts) || pts.length < 2) return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"></svg>`;
-  if (pts.length > 200) { const step = Math.ceil(pts.length / 200); pts = pts.filter((_, i) => i % step === 0); }
-  const xs = pts.map((p) => p[0]); const ys = pts.map((p) => p[1]);
-  const x0 = xs[0], xN = xs[xs.length - 1], yMax = Math.max(...ys) || 1; const pad = 2;
-  const sx = (x) => pad + ((x - x0) / (xN - x0 || 1)) * (w - 2 * pad);
-  const sy = (y) => h - pad - (y / yMax) * (h - 2 * pad);
-  const d = pts.map((p, i) => `${i ? 'L' : 'M'}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(' ');
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg"><path d="${d}" stroke="var(--accent)" stroke-width="1.5" fill="none" stroke-linejoin="round"/></svg>`;
-}
-
 // Interactive power graph for the cycle preview modal (hover/drag -> time/watts readout).
 function interactiveGraph(container, cycle) {
   const raw = cycle && cycle.trace && cycle.trace.points;
