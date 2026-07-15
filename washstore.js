@@ -632,6 +632,16 @@ export async function deleteCycle(id) {
   await deleteDoc(doc(_db, 'cycles', id));
 }
 
+export async function updateProfilePhases(profileId, phases) {
+  _rateGuard();
+  await updateDoc(doc(_db, 'profiles', profileId), { phases });
+}
+
+export async function updateDeviceSettings(deviceId, settings) {
+  _rateGuard();
+  await updateDoc(doc(_db, 'devices', deviceId), { settings });
+}
+
 export async function bumpDownload(id) {
   // Count each cycle at most once per browser session to curb accidental inflation.
   if (_bumpedThisSession.has(id)) return;
