@@ -10,6 +10,7 @@ import {
   confirmCycle, hasConfirmedCycle, countVisibleCycles, countVisibleProfiles,
   applianceLabel, confirmThresholdValue,
   saveAsFile, getSiteConfig,
+  getUserDoc, subscribeUserStatus,
 } from './washstore.js';
 import { openSettingsEditor, openPhaseEditor, bindEditorCloseHandlers } from './editors.js';
 
@@ -30,6 +31,7 @@ let _confirmThreshold = 5;
 let _openRecord = null;
 let _replyToId = null;
 let _browseLoaded = false;
+let _userStatusUnsub = null;
 
 const _ratingCache = new Map();
 
@@ -188,13 +190,38 @@ function renderAuthArea(user) {
 }
 async function doSignIn() { try { await signIn(); } catch (e) { toast(e.message, 'error'); } }
 
+function showBannedMessage(reason) {
+  const area = $('auth-status');
+  if (area) area.innerHTML = `<span class="user-name" style="color:var(--error,#f44336)">Account suspended${reason ? ': ' + esc(reason) : ''}</span>`;
+}
+
 onAuth(async (user) => {
   _user = user;
   _adminFlag = false;
   _favorites = new Set();
+  // Clean up any previous status listener
+  if (_userStatusUnsub) { _userStatusUnsub(); _userStatusUnsub = null; }
   renderAuthArea(user);
   if (user) {
     try { await ensureUserProfile(user); } catch (_) {}
+    // Check ban status on login
+    try {
+      const snap = await getUserDoc(user.uid);
+      if (snap && snap.status === 'banned') {
+        await signOutUser();
+        showBannedMessage(snap.banReason);
+        return;
+      }
+    } catch (_) {}
+    // Real-time listener: sign out immediately if banned by admin
+    try {
+      _userStatusUnsub = subscribeUserStatus(user.uid, (status, reason) => {
+        if (status === 'banned') {
+          signOutUser().catch(() => {});
+          showBannedMessage(reason);
+        }
+      });
+    } catch (_) {}
     try { _adminFlag = await isAdmin(); } catch (_) {}
     try { _favorites = new Set(await getFavorites()); } catch (_) {}
   }
@@ -498,9 +525,25 @@ async function openDevice(d) {
         <span>&#10003; ${d.confirmCount || 0} confirmations</span>
         <span>&middot;</span>
         <span>${profiles.length} profile${profiles.length === 1 ? '' : 's'}</span>
+        <span>&middot;</span>
+        <span data-totalcycles>&hellip;</span>
       </div>
       ${manualLink}`;
     body.appendChild(header);
+    // Cycle count is calculated per-profile; fill in asynchronously.
+    if (profiles.length > 0) {
+      Promise.all(profiles.map((p) => countVisibleCycles(p.id))).then((counts) => {
+        const total = counts.reduce((a, b) => a + b, 0);
+        const el = header.querySelector('[data-totalcycles]');
+        if (el) el.textContent = `${total} reference cycle${total === 1 ? '' : 's'}`;
+      }).catch(() => {
+        const el = header.querySelector('[data-totalcycles]');
+        if (el) el.textContent = '';
+      });
+    } else {
+      const el = header.querySelector('[data-totalcycles]');
+      if (el) el.textContent = '0 reference cycles';
+    }
     if (profiles.length === 0) {
       body.insertAdjacentHTML('beforeend', emptyHTML('&#128203;', 'No profiles yet', 'No profiles for this appliance yet.'));
     } else {

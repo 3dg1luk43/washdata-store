@@ -309,7 +309,7 @@ function populateDeviceMergeSelects() {
 function populateOwnerPicker() {
   const sel = $('owner-picker-select');
   if (!sel) return;
-  const opts = _userItems.map((u) => `<option value="${esc(u.uid)}">${esc(u.displayName || '(no display name)')} &middot; ${esc(truncate(u.uid, 10))}</option>`).join('');
+  const opts = _userItems.map((u) => `<option value="${esc(u.uid)}">${esc(u.displayName || u.uid.slice(0, 12))} (${esc(u.uid.slice(0, 8))})</option>`).join('');
   sel.innerHTML = '<option value="">-- None (remove owner) --</option>' + opts;
   if (_ownerPickerDevice) sel.value = _ownerPickerDevice.ownerId || '';
 }
@@ -591,7 +591,7 @@ async function loadUsers(reset = false) {
 
 function buildUserRow(u) {
   const tr = document.createElement('tr');
-  const name = u.displayName || '(no display name)';
+  const name = u.displayName || u.email || u.uid.slice(0, 12);
   const initial = name.charAt(0).toUpperCase();
   const avatar = u.photoURL ? `<img src="${esc(u.photoURL)}" alt="">` : initial;
   tr.innerHTML = `
@@ -605,23 +605,23 @@ function buildUserRow(u) {
   return tr;
 }
 function statusBadge(u) {
-  return u.banned ? `<span class="badge badge-rejected">Banned</span>` : `<span class="badge badge-approved">Active</span>`;
+  return u.status === 'banned' ? `<span class="badge badge-rejected">Banned</span>` : `<span class="badge badge-approved">Active</span>`;
 }
 function buildUserActions(cell, u, tr) {
   cell.innerHTML = '';
-  const name = u.displayName || u.uid;
+  const name = u.displayName || u.email || u.uid.slice(0, 12);
   const b = document.createElement('button');
-  if (u.banned) {
+  if (u.status === 'banned') {
     b.className = 'btn btn-ghost btn-sm'; b.textContent = 'Unban';
     b.addEventListener('click', async () => {
       if (!confirm(`Unban ${name}?`)) return;
-      try { await adminUnbanUser(u.uid); u.banned = false; u.banReason = null; refreshUserRow(tr, u); toast('User unbanned'); } catch (e) { toast(e.message, 'error'); }
+      try { await adminUnbanUser(u.uid); u.status = 'active'; u.banReason = null; refreshUserRow(tr, u); toast('User unbanned'); } catch (e) { toast(e.message, 'error'); }
     });
   } else {
     b.className = 'btn btn-danger btn-sm'; b.textContent = 'Ban';
     b.addEventListener('click', async () => {
       const reason = prompt(`Ban reason for ${name}:`); if (reason === null) return;
-      try { await adminBanUser(u.uid, reason || ''); u.banned = true; u.banReason = reason || ''; refreshUserRow(tr, u); toast('User banned'); } catch (e) { toast(e.message, 'error'); }
+      try { await adminBanUser(u.uid, reason || ''); u.status = 'banned'; u.banReason = reason || ''; refreshUserRow(tr, u); toast('User banned'); } catch (e) { toast(e.message, 'error'); }
     });
   }
   cell.appendChild(b);

@@ -24,6 +24,7 @@ import {
   serverTimestamp,
   increment,
   writeBatch,
+  onSnapshot,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
 import { deviceId as mkDeviceId, profileId as mkProfileId } from './lib/ids.js';
 import { downsampleCycle, parseCycle, cycleStats, packPoints, unpackPoints } from './lib/trace.js';
@@ -114,20 +115,34 @@ export async function ensureUserProfile(user) {
       photoURL: user.photoURL || null,
       createdAt: serverTimestamp(),
       lastSeen: serverTimestamp(),
-      banned: false,
-      banReason: null,
+      status: 'active',
       favorites: [],
     }, { merge: true });
     return;
   }
+  const data = snap.data();
+  const updates = {};
+  // One-time migration: add status field to pre-existing docs
+  if (!data.status) updates.status = 'active';
+  // Sync displayName if GitHub profile changed
+  if (user.displayName && user.displayName !== data.displayName) updates.displayName = user.displayName;
   // Throttle lastSeen writes so ordinary browsing stays read-only. A write is what
   // opens the persistent Firestore write-channel; skipping it on most page loads keeps
   // a signed-in browser to one-shot read requests.
-  const data = snap.data();
   const last = data.lastSeen && data.lastSeen.toMillis ? data.lastSeen.toMillis() : 0;
-  if (Date.now() - last > _LASTSEEN_THROTTLE_MS) {
-    await updateDoc(ref, { lastSeen: serverTimestamp() });
-  }
+  if (Date.now() - last > _LASTSEEN_THROTTLE_MS) updates.lastSeen = serverTimestamp();
+  if (Object.keys(updates).length) await updateDoc(ref, updates);
+}
+
+export async function getUserDoc(uid) {
+  const snap = await getDoc(doc(_db, 'users', uid));
+  return snap.exists() ? snap.data() : null;
+}
+
+export function subscribeUserStatus(uid, callback) {
+  return onSnapshot(doc(_db, 'users', uid), (snap) => {
+    if (snap.exists()) callback(snap.data().status, snap.data().banReason);
+  });
 }
 
 // ------------------------------------------------------------------
@@ -856,7 +871,7 @@ export async function adminBanUser(uid, reason = '') {
   const user = _auth.currentUser;
   if (!user) throw new Error('Not signed in');
   await updateDoc(doc(_db, 'users', uid), {
-    banned: true,
+    status: 'banned',
     banReason: reason,
     bannedAt: serverTimestamp(),
     bannedBy: user.uid,
@@ -865,7 +880,7 @@ export async function adminBanUser(uid, reason = '') {
 
 export async function adminUnbanUser(uid) {
   await updateDoc(doc(_db, 'users', uid), {
-    banned: false,
+    status: 'active',
     banReason: null,
     bannedAt: null,
     bannedBy: null,
@@ -931,7 +946,7 @@ export async function adminGetStats() {
     // "Pending review" spans the whole catalog, not just cycles.
     c('brands', 'pending'), c('devices', 'pending'), c('profiles', 'pending'), c('cycles', 'pending'),
     c('cycles', 'approved'), c('cycles', 'rejected'), c('cycles', 'removed'),
-    restCount('users', [{ field: 'banned', op: 'EQUAL', value: true }], { auth: true }),
+    restCount('users', [{ field: 'status', op: 'EQUAL', value: 'banned' }], { auth: true }),
   ]);
   return { pending: pb + pd + pp + pc, approved, rejected, removed, bannedUsers };
 }
