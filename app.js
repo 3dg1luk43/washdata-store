@@ -11,8 +11,10 @@ import {
   applianceLabel, confirmThresholdValue,
   saveAsFile, getSiteConfig,
 } from './washstore.js';
+import { openSettingsEditor, openPhaseEditor, bindEditorCloseHandlers } from './editors.js';
 
 init(firebaseConfig);
+bindEditorCloseHandlers();
 
 // ============================================================ state
 let _user = null;
@@ -202,6 +204,21 @@ onAuth(async (user) => {
   updateCommentFormAuth();
 });
 
+function renderOwnerActions(actions) {
+  const bar = $('owner-actions');
+  if (!bar) return;
+  if (!actions || actions.length === 0) { bar.setAttribute('hidden', ''); bar.innerHTML = ''; return; }
+  bar.innerHTML = '';
+  actions.forEach(({ label, handler }) => {
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-ghost btn-sm';
+    btn.textContent = label;
+    btn.addEventListener('click', handler);
+    bar.appendChild(btn);
+  });
+  bar.removeAttribute('hidden');
+}
+
 // ============================================================ breadcrumb
 function renderBreadcrumb() {
   const bc = $('breadcrumb');
@@ -224,6 +241,7 @@ async function loadBrands(reset = false) {
   _view = 'brands'; _brand = null; _device = null; _profile = null;
   $('filter-rail').removeAttribute('hidden');
   renderBreadcrumb();
+  renderOwnerActions(null);
   const body = $('browse-body');
   const favoritesOnly = _browseFilters.favoritesOnly;
   if (reset) { _browseCursor = null; body.innerHTML = '<div class="card-grid" id="brand-grid"></div>'; $('load-more-btn').setAttribute('hidden', ''); }
@@ -299,6 +317,7 @@ async function openBrand(b) {
   $('filter-rail').setAttribute('hidden', '');
   $('load-more-btn').setAttribute('hidden', '');
   renderBreadcrumb();
+  renderOwnerActions(null);
   const body = $('browse-body');
   body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
   try {
@@ -453,6 +472,9 @@ async function openDevice(d) {
   $('filter-rail').setAttribute('hidden', '');
   $('load-more-btn').setAttribute('hidden', '');
   renderBreadcrumb();
+  renderOwnerActions(_user && d.ownerId && d.ownerId === _user.uid
+    ? [{ label: 'Edit settings', handler: () => openSettingsEditor(d) }]
+    : null);
   const body = $('browse-body');
   body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
   try {
@@ -519,6 +541,9 @@ function buildAddProfile(d) {
 async function openProfile(p) {
   _profile = p; _view = 'profile';
   renderBreadcrumb();
+  renderOwnerActions(_user && _device && _device.ownerId && _device.ownerId === _user.uid
+    ? [{ label: 'Edit phases', handler: () => openPhaseEditor(p) }]
+    : null);
   const body = $('browse-body');
   body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
   try {

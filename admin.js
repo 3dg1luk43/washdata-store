@@ -7,9 +7,9 @@ import {
   adminListBrands, adminListProfiles,
   adminListUsers, adminBanUser, adminUnbanUser, adminGetStats,
   getSiteConfig, setMaintenance, setConfirmThreshold,
-  updateDeviceSettings, updateProfilePhases,
-  getReferenceCycles,
+  adminSetDeviceOwner,
 } from './washstore.js';
+import { openSettingsEditor, openPhaseEditor, bindEditorCloseHandlers } from './editors.js';
 
 init(firebaseConfig);
 
@@ -100,71 +100,6 @@ function deviceLabel(c) {
   const p = String(c.deviceId || '').split('__');
   return `${p[1] || ''} ${p[2] || ''}`.trim() || c.deviceId || '?';
 }
-
-// ============================================================ settings editor
-const SETTINGS_FIELDS = [
-  { key: 'min_power', label: 'Min power (W)' },
-  { key: 'off_delay', label: 'Off delay (s)' },
-  { key: 'start_threshold_w', label: 'Start threshold (W)' },
-  { key: 'stop_threshold_w', label: 'End threshold (W)' },
-  { key: 'start_duration_threshold', label: 'Start duration (s)' },
-  { key: 'start_energy_threshold', label: 'Start energy (Wh)' },
-  { key: 'completion_min_seconds', label: 'Min cycle duration (s)' },
-  { key: 'running_dead_zone', label: 'Running dead zone (s)' },
-  { key: 'min_off_gap', label: 'Min off gap (s)' },
-  { key: 'end_energy_threshold', label: 'End energy threshold (Wh)' },
-  { key: 'power_off_threshold_w', label: 'Power off threshold (W)' },
-  { key: 'power_off_delay', label: 'Power off delay (s)' },
-  { key: 'profile_match_threshold', label: 'Match threshold (0-1)' },
-  { key: 'profile_unmatch_threshold', label: 'Unmatch threshold (0-1)' },
-  { key: 'profile_match_interval', label: 'Match interval (min)' },
-  { key: 'profile_match_min_duration_ratio', label: 'Min duration ratio' },
-  { key: 'profile_match_max_duration_ratio', label: 'Max duration ratio' },
-  { key: 'profile_duration_tolerance', label: 'Profile duration tolerance' },
-  { key: 'duration_tolerance', label: 'Estimate tolerance' },
-  { key: 'auto_label_confidence', label: 'Auto-label confidence (0-1)' },
-  { key: 'learning_confidence', label: 'Learning confidence (0-1)' },
-];
-
-function openSettingsEditor(d) {
-  const modal = $('settings-edit-modal');
-  $('se-modal-title').textContent = `${d.brand || ''} ${d.model || ''}`.trim() || d.id;
-  $('se-modal-subtitle').textContent = 'Detection & matching settings (21 shared thresholds)';
-  const current = d.settings || {};
-  $('se-modal-body').innerHTML = `<p class="text-muted" style="font-size:.8125rem;margin-bottom:.875rem">
-    Model-intrinsic thresholds. Leave a field empty to keep it unset.
-    Save writes the complete map; empty fields are omitted.</p>
-    <div class="se-grid">
-      ${SETTINGS_FIELDS.map((f) => `
-        <div class="form-group" style="margin:0">
-          <label for="se-${esc(f.key)}" style="font-size:.75rem">${esc(f.label)}</label>
-          <input type="number" id="se-${esc(f.key)}" step="any"
-                 value="${current[f.key] != null ? current[f.key] : ''}"
-                 placeholder="not set" class="se-input">
-        </div>`).join('')}
-    </div>`;
-  modal.removeAttribute('hidden');
-  $('se-save-btn').onclick = async () => {
-    const settings = {};
-    for (const f of SETTINGS_FIELDS) {
-      const v = document.getElementById(`se-${f.key}`).value.trim();
-      if (v !== '') settings[f.key] = parseFloat(v);
-    }
-    $('se-save-btn').disabled = true;
-    try {
-      await updateDeviceSettings(d.id, settings);
-      d.settings = settings;
-      toast(`Settings saved (${Object.keys(settings).length} fields)`);
-      modal.setAttribute('hidden', '');
-    } catch (e) { toast(e.message, 'error'); }
-    finally { $('se-save-btn').disabled = false; }
-  };
-}
-function closeSettingsEditor() { $('settings-edit-modal').setAttribute('hidden', ''); }
-$('se-modal-close').addEventListener('click', closeSettingsEditor);
-$('se-modal-close-footer').addEventListener('click', closeSettingsEditor);
-$('settings-edit-modal').addEventListener('click', (e) => { if (e.target === $('settings-edit-modal')) closeSettingsEditor(); });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('settings-edit-modal').hasAttribute('hidden')) closeSettingsEditor(); });
 
 // ============================================================ auth gate
 function renderAuthArea(user) {
@@ -403,6 +338,18 @@ function buildDeviceRow(d) {
   editSettings.className = 'btn btn-ghost btn-sm'; editSettings.textContent = 'Edit settings';
   editSettings.addEventListener('click', () => openSettingsEditor(d));
   cell.appendChild(editSettings);
+  const setOwner = document.createElement('button');
+  setOwner.className = 'btn btn-ghost btn-sm'; setOwner.textContent = 'Set owner';
+  setOwner.addEventListener('click', async () => {
+    const uid = prompt(`Owner UID for ${d.id}\n(current: ${d.ownerId || 'none'})\nLeave blank to remove owner:`);
+    if (uid === null) return;
+    try {
+      await adminSetDeviceOwner(d.id, uid.trim() || null);
+      d.ownerId = uid.trim() || null;
+      toast(uid.trim() ? `Owner set to ${uid.trim()}` : 'Owner cleared');
+    } catch (e) { toast(e.message, 'error'); }
+  });
+  cell.appendChild(setOwner);
   return tr;
 }
 
@@ -623,203 +570,4 @@ $('review-modal-close-footer').addEventListener('click', closeReviewModal);
 $('review-modal').addEventListener('click', (e) => { if (e.target === $('review-modal')) closeReviewModal(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('review-modal').hasAttribute('hidden')) closeReviewModal(); });
 
-// ============================================================ phase editor
-const PHASE_COLORS = [
-  'rgba(124,156,255,0.30)', 'rgba(70,201,139,0.30)', 'rgba(255,180,90,0.30)',
-  'rgba(255,107,107,0.30)', 'rgba(168,100,255,0.30)',
-];
-const PHASE_SOLID = ['#7c9cff', '#46c98b', '#ffb45a', '#ff6b6b', '#a864ff'];
-
-let _pePhases = [];   // working copy during edit
-let _pePending = null; // {start, end} not yet named
-
-function buildPhaseGraph(container, cycle, getPhasesRef) {
-  const raw = cycle && cycle.trace && cycle.trace.points;
-  if (!Array.isArray(raw) || raw.length < 2) {
-    container.innerHTML = '<div class="text-muted" style="padding:1rem">No trace data.</div>';
-    return;
-  }
-  let pts = raw;
-  if (pts.length > 600) {
-    const step = Math.ceil(pts.length / 600);
-    pts = pts.filter((_, i) => i % step === 0 || i === pts.length - 1);
-  }
-  const W = 640, H = 170, pad = 8;
-  const xs = pts.map((p) => p[0]); const ys = pts.map((p) => p[1]);
-  const x0 = xs[0]; const xN = xs[xs.length - 1] || 1; const yMax = Math.max(...ys, 1);
-  const sx = (t) => pad + ((t - x0) / ((xN - x0) || 1)) * (W - 2 * pad);
-  const toSecs = (svgX) => x0 + ((svgX - pad) / ((W - 2 * pad) || 1)) * (xN - x0);
-  const svgFromClient = (clientX) => {
-    const rect = svg.getBoundingClientRect();
-    return ((clientX - rect.left) / (rect.width || 1)) * W;
-  };
-  const tracePath = pts.map((p, i) => `${i ? 'L' : 'M'}${sx(p[0]).toFixed(1)},${(H - pad - (p[1] / yMax) * (H - 2 * pad)).toFixed(1)}`).join(' ');
-
-  function rebuildSVG() {
-    const phases = getPhasesRef();
-    const bands = phases.map((ph, i) => {
-      const x1 = Math.max(sx(ph.start), pad).toFixed(1);
-      const x2 = Math.min(sx(ph.end), W - pad).toFixed(1);
-      const w = Math.max(0, x2 - x1).toFixed(1);
-      return `<rect class="cg-phase-band" x="${x1}" y="${pad}" width="${w}" height="${H - 2 * pad}" fill="${PHASE_COLORS[i % PHASE_COLORS.length]}"/>`;
-    }).join('');
-    const previewFill = 'rgba(255,255,255,0.12)';
-    svgEl.innerHTML = `
-      ${bands}
-      <rect class="cg-drag-preview" id="pe-drag-preview" x="0" y="${pad}" width="0" height="${H - 2 * pad}" fill="${previewFill}" hidden/>
-      <path d="${tracePath}" class="cg-line"/>
-      <line class="cg-cross" id="pe-cross" x1="0" x2="0" y1="${pad}" y2="${H - pad}" hidden/>`;
-  }
-
-  container.innerHTML = `<div class="cycle-graph">
-    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="cycle-graph-svg" id="pe-svg" style="touch-action:none;cursor:crosshair">
-    </svg>
-    <div class="cycle-graph-readout text-muted" id="pe-readout">Click and drag to define a phase region</div>
-  </div>`;
-  const svgEl = document.getElementById('pe-svg');
-  const svg = svgEl; // alias
-  rebuildSVG();
-  container._rebuildSVG = rebuildSVG;
-
-  let dragStartSecs = null;
-
-  svg.addEventListener('pointerdown', (e) => {
-    svg.setPointerCapture(e.pointerId);
-    dragStartSecs = toSecs(svgFromClient(e.clientX));
-    e.preventDefault();
-  });
-
-  svg.addEventListener('pointermove', (e) => {
-    const cx = svgFromClient(e.clientX);
-    const cross = document.getElementById('pe-cross');
-    if (cross) { cross.setAttribute('x1', cx.toFixed(1)); cross.setAttribute('x2', cx.toFixed(1)); cross.hidden = false; }
-    if (dragStartSecs !== null) {
-      const cur = toSecs(cx);
-      const s = Math.min(dragStartSecs, cur); const en = Math.max(dragStartSecs, cur);
-      const preview = document.getElementById('pe-drag-preview');
-      if (preview) {
-        const px1 = Math.max(sx(s), pad); const px2 = Math.min(sx(en), W - pad);
-        preview.setAttribute('x', px1.toFixed(1));
-        preview.setAttribute('width', Math.max(0, px2 - px1).toFixed(1));
-        preview.removeAttribute('hidden');
-      }
-      const readout = document.getElementById('pe-readout');
-      if (readout) readout.textContent = `${formatDuration(s)} -- ${formatDuration(en)} (${formatDuration(en - s)})`;
-    }
-  });
-
-  svg.addEventListener('pointerup', (e) => {
-    svg.releasePointerCapture(e.pointerId);
-    if (dragStartSecs === null) return;
-    const endSecs = toSecs(svgFromClient(e.clientX));
-    const startFinal = Math.min(dragStartSecs, endSecs);
-    const endFinal = Math.max(dragStartSecs, endSecs);
-    dragStartSecs = null;
-    const preview = document.getElementById('pe-drag-preview');
-    if (preview) preview.setAttribute('hidden', '');
-    if (endFinal - startFinal < (xN - x0) * 0.005) {
-      const readout = document.getElementById('pe-readout');
-      if (readout) readout.textContent = 'Drag too short -- try again.';
-      return;
-    }
-    _pePending = { start: Math.round(startFinal), end: Math.round(endFinal) };
-    $('pe-pending-row').removeAttribute('hidden');
-    $('pe-pending-name').value = '';
-    $('pe-pending-name').focus();
-    const readout = document.getElementById('pe-readout');
-    if (readout) readout.textContent = `New phase: ${formatDuration(startFinal)} -- ${formatDuration(endFinal)}. Name it below.`;
-  });
-
-  svg.addEventListener('mouseleave', () => {
-    const cross = document.getElementById('pe-cross');
-    if (cross && dragStartSecs === null) cross.hidden = true;
-  });
-}
-
-function renderPhaseList(phases) {
-  const list = $('pe-phase-list');
-  if (!list) return;
-  if (phases.length === 0) {
-    list.innerHTML = '<div class="text-muted" style="font-size:.8125rem;padding:.25rem 0">No phases defined yet. Drag on the graph to add one.</div>';
-    return;
-  }
-  list.innerHTML = phases.map((ph, i) => `
-    <div class="pe-phase-row">
-      <span class="pe-phase-swatch" style="background:${PHASE_SOLID[i % PHASE_SOLID.length]}"></span>
-      <span class="pe-phase-name">${esc(ph.name)}</span>
-      <span class="pe-phase-range">${formatDuration(ph.start)} -- ${formatDuration(ph.end)}</span>
-      <button class="pe-phase-del" data-pi="${i}" aria-label="Delete phase ${esc(ph.name)}">&#215;</button>
-    </div>`).join('');
-  list.querySelectorAll('[data-pi]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      _pePhases.splice(parseInt(btn.dataset.pi, 10), 1);
-      renderPhaseList(_pePhases);
-      const graph = $('pe-modal-graph');
-      if (graph && graph._rebuildSVG) graph._rebuildSVG();
-    });
-  });
-}
-
-async function openPhaseEditor(profile) {
-  const modal = $('phase-edit-modal');
-  $('pe-modal-title').textContent = profile.program || profile.id;
-  const dev = String(profile.deviceId || '').split('__').slice(1).join(' ').trim() || '';
-  $('pe-modal-subtitle').textContent = dev;
-  $('pe-phase-list').innerHTML = '';
-  $('pe-pending-row').setAttribute('hidden', '');
-  $('pe-no-cycle').setAttribute('hidden', '');
-  $('pe-modal-graph').innerHTML = '<div class="loading-center" style="min-height:60px"><div class="loading-spinner"></div></div>';
-  modal.removeAttribute('hidden');
-
-  _pePending = null;
-  _pePhases = Array.isArray(profile.phases) ? profile.phases.map((ph) => ({ ...ph })) : [];
-
-  try {
-    const { items } = await getReferenceCycles(profile.id, { includePending: true });
-    if (items.length === 0) {
-      $('pe-modal-graph').innerHTML = '';
-      $('pe-no-cycle').removeAttribute('hidden');
-    } else {
-      buildPhaseGraph($('pe-modal-graph'), items[0], () => _pePhases);
-    }
-  } catch (e) {
-    $('pe-modal-graph').innerHTML = `<div class="text-muted" style="padding:1rem">${esc(e.message)}</div>`;
-  }
-  renderPhaseList(_pePhases);
-
-  $('pe-add-btn').onclick = () => {
-    const name = $('pe-pending-name').value.trim();
-    if (!name) { $('pe-pending-name').focus(); return; }
-    if (_pePending) {
-      _pePhases.push({ name, start: _pePending.start, end: _pePending.end });
-      _pePending = null;
-    }
-    $('pe-pending-row').setAttribute('hidden', '');
-    renderPhaseList(_pePhases);
-    const graph = $('pe-modal-graph');
-    if (graph && graph._rebuildSVG) graph._rebuildSVG();
-  };
-  $('pe-pending-name').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); $('pe-add-btn').click(); } };
-  $('pe-cancel-btn').onclick = () => {
-    _pePending = null;
-    $('pe-pending-row').setAttribute('hidden', '');
-    const graph = $('pe-modal-graph');
-    if (graph && graph._rebuildSVG) graph._rebuildSVG();
-  };
-
-  $('pe-save-btn').onclick = async () => {
-    $('pe-save-btn').disabled = true;
-    try {
-      await updateProfilePhases(profile.id, _pePhases);
-      profile.phases = [..._pePhases];
-      toast(`Phase map saved (${_pePhases.length} phases)`);
-      modal.setAttribute('hidden', '');
-    } catch (e) { toast(e.message, 'error'); }
-    finally { $('pe-save-btn').disabled = false; }
-  };
-}
-function closePhaseEditor() { $('phase-edit-modal').setAttribute('hidden', ''); }
-$('pe-modal-close').addEventListener('click', closePhaseEditor);
-$('pe-modal-close-footer').addEventListener('click', closePhaseEditor);
-$('phase-edit-modal').addEventListener('click', (e) => { if (e.target === $('phase-edit-modal')) closePhaseEditor(); });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('phase-edit-modal').hasAttribute('hidden')) closePhaseEditor(); });
+bindEditorCloseHandlers();

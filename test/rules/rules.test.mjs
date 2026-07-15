@@ -162,3 +162,37 @@ test('device quality rating: own uid, 1-5 only', async () => {
   await assertFails(setDoc(doc(gh('r1').firestore(), 'devices/d_rate/ratings/r1'), { uid: 'r1', rating: 9, updatedAt: new Date() }));
   await assertFails(setDoc(doc(gh('r1').firestore(), 'devices/d_rate/ratings/r2'), { uid: 'r2', rating: 3, updatedAt: new Date() }));
 });
+
+test('device owner can update settings only; cannot touch other fields', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'devices/d_owned'), validDevice('creator', { ownerId: 'owner1' }));
+  });
+  const db = gh('owner1').firestore();
+  // settings-only update -> allowed
+  await assertSucceeds(updateDoc(doc(db, 'devices/d_owned'), { settings: { min_power: 5 } }));
+  // cannot touch status or other fields
+  await assertFails(updateDoc(doc(db, 'devices/d_owned'), { status: 'approved' }));
+  await assertFails(updateDoc(doc(db, 'devices/d_owned'), { settings: { min_power: 5 }, brand: 'Other' }));
+  // non-owner cannot use this path
+  await assertFails(updateDoc(doc(gh('stranger').firestore(), 'devices/d_owned'), { settings: { min_power: 5 } }));
+  // device without ownerId set -> non-owner still cannot use this path
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'devices/d_noowner'), validDevice('creator'));
+  });
+  await assertFails(updateDoc(doc(db, 'devices/d_noowner'), { settings: { min_power: 5 } }));
+});
+
+test('profile owner (device ownerId) can update phases only; non-owner cannot', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'devices/d_pown'), validDevice('creator', { ownerId: 'powner1' }));
+    await setDoc(doc(ctx.firestore(), 'profiles/p_pown'), validProfile('creator', { deviceId: 'd_pown' }));
+  });
+  const db = gh('powner1').firestore();
+  // phases-only update -> allowed
+  await assertSucceeds(updateDoc(doc(db, 'profiles/p_pown'), { phases: [{ name: 'Wash', start: 0, end: 1800 }] }));
+  // cannot touch other profile fields
+  await assertFails(updateDoc(doc(db, 'profiles/p_pown'), { status: 'approved' }));
+  await assertFails(updateDoc(doc(db, 'profiles/p_pown'), { phases: [], program: 'Other' }));
+  // non-owner cannot update phases
+  await assertFails(updateDoc(doc(gh('stranger2').firestore(), 'profiles/p_pown'), { phases: [] }));
+});

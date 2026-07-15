@@ -1138,6 +1138,18 @@ input[type="file"]:hover {
   margin-bottom: 1rem;
   font-size: .875rem;
 }
+.owner-actions {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin-bottom: .75rem;
+  padding: .5rem .75rem;
+  background: var(--surface2);
+  border-radius: var(--radius);
+  font-size: .8125rem;
+  color: var(--text-muted);
+}
+.owner-actions::before { content: 'Owner:'; margin-right: .25rem; }
 .crumb {
   background: none;
   border: 0;

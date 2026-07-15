@@ -57,6 +57,10 @@ service cloud.firestore {
         && optUrl(request.resource.data.get('manualUrl', null))
         && optName(request.resource.data.get('createdByName', null))
         && request.resource.data.createdAt == request.time;
+      // Device owner (ownerId field, admin-set) may update settings only.
+      allow update: if isGithubUser()
+        && resource.data.get('ownerId', null) == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['settings']);
       // favoriteCount is a vanity counter: any GitHub user may nudge it by exactly +/-1.
       allow update: if isGithubUser()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['favoriteCount'])
@@ -114,6 +118,11 @@ service cloud.firestore {
         && request.resource.data.createdAt == request.time;
       // NB: cycleCount is no longer stored -- the browse count is CALCULATED via a
       // COUNT aggregation over this profile's approved+pending cycles (client side).
+      // Owner of the parent device may update phases only.
+      allow update: if isGithubUser()
+        && exists(/databases/$(database)/documents/devices/$(resource.data.deviceId))
+        && get(/databases/$(database)/documents/devices/$(resource.data.deviceId)).data.get('ownerId', null) == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phases']);
       allow update: if isAdmin();
       allow delete: if isAdmin();
     }
