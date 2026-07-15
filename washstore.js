@@ -87,16 +87,20 @@ export function onAuth(callback) {
 export async function signIn() {
   const provider = new GithubAuthProvider();
   const result = await signInWithPopup(_auth, provider);
-  // Persist GitHub login (username like "johndoe") to the user doc. Firebase Auth's
-  // user.displayName is the full name, which GitHub users often leave blank; the
-  // login is always set and makes a much better display-name fallback.
+  // getAdditionalUserInfo is only available immediately after signInWithPopup.
+  // Firebase Auth's user.displayName is GitHub's "Name" field (often blank);
+  // profile.login is the username and is always set — use it as the display fallback.
+  // Pass it into ensureUserProfile so it lands in the doc atomically, whether the
+  // doc is being created (new user) or updated (returning user). A separate setDoc
+  // after the fact would race with onAuth's ensureUserProfile call and silently fail
+  // for new users whose doc doesn't exist yet at that point.
+  let githubLogin = null;
   try {
     const info = getAdditionalUserInfo(result);
-    const githubLogin = info?.profile?.login || info?.username || null;
-    if (githubLogin) {
-      const ref = doc(_db, 'users', result.user.uid);
-      await setDoc(ref, { githubLogin }, { merge: true });
-    }
+    githubLogin = info?.profile?.login || info?.username || null;
+  } catch (_) {}
+  try {
+    await ensureUserProfile(result.user, githubLogin);
   } catch (_) {}
   return result;
 }
@@ -118,7 +122,10 @@ export async function isAdmin() {
 
 const _LASTSEEN_THROTTLE_MS = 6 * 60 * 60 * 1000;
 
-export async function ensureUserProfile(user) {
+// githubLogin is only available from getAdditionalUserInfo immediately after
+// signInWithPopup — pass it here from signIn() so it lands in the doc atomically.
+// On page-load auth (onAuth), githubLogin is null and the existing stored value is kept.
+export async function ensureUserProfile(user, githubLogin = null) {
   const ref = doc(_db, 'users', user.uid);
   const snap = await getDoc(ref);
   if (!snap.exists()) {
@@ -130,6 +137,7 @@ export async function ensureUserProfile(user) {
       lastSeen: serverTimestamp(),
       status: 'active',
       favorites: [],
+      ...(githubLogin ? { githubLogin } : {}),
     }, { merge: true });
     return;
   }
@@ -139,9 +147,8 @@ export async function ensureUserProfile(user) {
   if (!data.status) updates.status = 'active';
   // Sync displayName if GitHub profile changed
   if (user.displayName && user.displayName !== data.displayName) updates.displayName = user.displayName;
-  // githubLogin is written once at sign-in via getAdditionalUserInfo; migrate old
-  // docs that don't have it yet — on next sign-in the signIn() function will set it.
-  // Nothing to do here; the login is only available at sign-in time, not from user object.
+  // Write githubLogin when supplied (sign-in path) and not yet stored
+  if (githubLogin && !data.githubLogin) updates.githubLogin = githubLogin;
   // Throttle lastSeen writes so ordinary browsing stays read-only. A write is what
   // opens the persistent Firestore write-channel; skipping it on most page loads keeps
   // a signed-in browser to one-shot read requests.
