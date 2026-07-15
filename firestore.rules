@@ -9,7 +9,7 @@ service cloud.firestore {
     function isBanned() {
       return isSignedIn()
         && exists(/databases/$(database)/documents/users/$(request.auth.uid))
-        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('banned', false) == true;
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('status', 'active') == 'banned';
     }
     function canContribute() { return isGithubUser() && !isBanned(); }
     function strLen(v, max) { return v is string && v.size() >= 1 && v.size() <= max; }
@@ -227,12 +227,14 @@ service cloud.firestore {
       allow read: if (isSignedIn() && request.auth.uid == uid) || isAdmin();
       allow create: if isGithubUser() && request.auth.uid == uid
         && request.resource.data.uid == uid
-        && request.resource.data.get('banned', false) == false;
+        && request.resource.data.get('status', 'active') == 'active';
       allow update: if isAdmin()
         || (isGithubUser() && request.auth.uid == uid
+            // Self-service updates: name/photo/activity fields + githubLogin (set at sign-in).
+            // status must not change (only admin may ban/unban).
             && request.resource.data.diff(resource.data).affectedKeys()
-                 .hasOnly(['displayName', 'photoURL', 'lastSeen', 'favorites'])
-            && request.resource.data.banned == resource.data.banned);
+                 .hasOnly(['displayName', 'photoURL', 'lastSeen', 'favorites', 'githubLogin'])
+            && request.resource.data.get('status', 'active') == resource.data.get('status', 'active'));
       allow delete: if isAdmin();
     }
 

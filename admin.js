@@ -309,7 +309,7 @@ function populateDeviceMergeSelects() {
 function populateOwnerPicker() {
   const sel = $('owner-picker-select');
   if (!sel) return;
-  const opts = _userItems.map((u) => `<option value="${esc(u.uid)}">${esc(u.displayName || u.uid.slice(0, 12))} (${esc(u.uid.slice(0, 8))})</option>`).join('');
+  const opts = _userItems.map((u) => `<option value="${esc(u.uid)}">${esc(u.displayName || u.githubLogin || u.uid.slice(0, 12))} (${esc(u.uid.slice(0, 8))})</option>`).join('');
   sel.innerHTML = '<option value="">-- None (remove owner) --</option>' + opts;
   if (_ownerPickerDevice) sel.value = _ownerPickerDevice.ownerId || '';
 }
@@ -591,7 +591,7 @@ async function loadUsers(reset = false) {
 
 function buildUserRow(u) {
   const tr = document.createElement('tr');
-  const name = u.displayName || u.email || u.uid.slice(0, 12);
+  const name = u.displayName || u.githubLogin || u.email || u.uid.slice(0, 12);
   const initial = name.charAt(0).toUpperCase();
   const avatar = u.photoURL ? `<img src="${esc(u.photoURL)}" alt="">` : initial;
   tr.innerHTML = `
@@ -609,7 +609,7 @@ function statusBadge(u) {
 }
 function buildUserActions(cell, u, tr) {
   cell.innerHTML = '';
-  const name = u.displayName || u.email || u.uid.slice(0, 12);
+  const name = u.displayName || u.githubLogin || u.email || u.uid.slice(0, 12);
   const b = document.createElement('button');
   if (u.status === 'banned') {
     b.className = 'btn btn-ghost btn-sm'; b.textContent = 'Unban';

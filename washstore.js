@@ -5,6 +5,7 @@ import {
   signOut,
   onAuthStateChanged,
   GithubAuthProvider,
+  getAdditionalUserInfo,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 import {
   getFirestore,
@@ -85,7 +86,19 @@ export function onAuth(callback) {
 
 export async function signIn() {
   const provider = new GithubAuthProvider();
-  return signInWithPopup(_auth, provider);
+  const result = await signInWithPopup(_auth, provider);
+  // Persist GitHub login (username like "johndoe") to the user doc. Firebase Auth's
+  // user.displayName is the full name, which GitHub users often leave blank; the
+  // login is always set and makes a much better display-name fallback.
+  try {
+    const info = getAdditionalUserInfo(result);
+    const githubLogin = info?.profile?.login || info?.username || null;
+    if (githubLogin) {
+      const ref = doc(_db, 'users', result.user.uid);
+      await setDoc(ref, { githubLogin }, { merge: true });
+    }
+  } catch (_) {}
+  return result;
 }
 
 export async function signOutUser() {
@@ -126,6 +139,9 @@ export async function ensureUserProfile(user) {
   if (!data.status) updates.status = 'active';
   // Sync displayName if GitHub profile changed
   if (user.displayName && user.displayName !== data.displayName) updates.displayName = user.displayName;
+  // githubLogin is written once at sign-in via getAdditionalUserInfo; migrate old
+  // docs that don't have it yet — on next sign-in the signIn() function will set it.
+  // Nothing to do here; the login is only available at sign-in time, not from user object.
   // Throttle lastSeen writes so ordinary browsing stays read-only. A write is what
   // opens the persistent Firestore write-channel; skipping it on most page loads keeps
   // a signed-in browser to one-shot read requests.

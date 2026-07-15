@@ -176,11 +176,12 @@ function emptyHTML(icon, title, text) {
 }
 
 // ============================================================ auth
-function renderAuthArea(user) {
+function renderAuthArea(user, githubLogin) {
   const area = $('auth-status');
   if (user) {
+    const name = user.displayName || githubLogin || 'User';
     area.innerHTML = `${user.photoURL ? `<img class="user-avatar" src="${esc(user.photoURL)}" alt="">` : ''}
-      <span class="user-name">${esc(user.displayName || 'User')}</span>
+      <span class="user-name">${esc(name)}</span>
       <button class="btn btn-ghost btn-sm" id="signout-btn">Sign out</button>`;
     $('signout-btn').addEventListener('click', async () => { try { await signOutUser(); } catch (e) { toast(e.message, 'error'); } });
   } else {
@@ -204,7 +205,7 @@ onAuth(async (user) => {
   renderAuthArea(user);
   if (user) {
     try { await ensureUserProfile(user); } catch (_) {}
-    // Check ban status on login
+    // Check ban status on login; also grab githubLogin for the name chip.
     try {
       const snap = await getUserDoc(user.uid);
       if (snap && snap.status === 'banned') {
@@ -212,6 +213,7 @@ onAuth(async (user) => {
         showBannedMessage(snap.banReason);
         return;
       }
+      if (snap && snap.githubLogin) renderAuthArea(user, snap.githubLogin);
     } catch (_) {}
     // Real-time listener: sign out immediately if banned by admin
     try {
