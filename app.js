@@ -160,7 +160,11 @@ function interactiveGraph(container, cycle) {
 // Rating summaries are fetched lazily only when the details modal opens (not per card),
 // so a browse page is a single query instead of one aggregation query per cycle.
 function fetchRatingSummary(id) {
-  if (!_ratingCache.has(id)) _ratingCache.set(id, getRatingSummary(id));
+  if (!_ratingCache.has(id)) {
+    // Cache the promise, but evict it on rejection so a transient failure does not
+    // poison the cache and block the rating from ever loading for this cycle.
+    _ratingCache.set(id, getRatingSummary(id).catch((e) => { _ratingCache.delete(id); throw e; }));
+  }
   return _ratingCache.get(id);
 }
 
@@ -512,7 +516,8 @@ async function openDevice(d) {
     // Device header card
     const header = document.createElement('div');
     header.className = 'device-header-card';
-    const manualLink = d.manualUrl ? `<a class="device-header-link" href="${esc(d.manualUrl)}" target="_blank" rel="noopener noreferrer">Manual / product page &rarr;</a>` : '';
+    const manualHeaderHref = safeUrl(d.manualUrl);
+    const manualLink = manualHeaderHref ? `<a class="device-header-link" href="${esc(manualHeaderHref)}" target="_blank" rel="noopener noreferrer">Manual / product page &rarr;</a>` : '';
     const ownerNote = d.ownerId ? `<span class="device-header-owner">&#128274; Community-curated</span>` : '';
     header.innerHTML = `
       <div class="device-header-meta">

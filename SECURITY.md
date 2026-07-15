@@ -66,8 +66,9 @@ requires Cloud Storage, which needs the Blaze plan - out of scope for the zero-c
 
 ## Rate limiting and quota
 
-There is no application server, so true server-side rate limiting is not available without
-Cloud Functions (Blaze) or Firebase App Check. The current controls:
+There is no application server, so true server-side rate limiting (per-client write throttling
+or quotas) is not available without Cloud Functions (Blaze). Firebase App Check (below) is an
+abuse-mitigation control, not a rate limiter. The current controls:
 
 - **Client-side throttle (best-effort).** `washstore.js` limits writes to 20 per rolling minute
   per browser session and counts each cycle's download at most once per session. This stops
@@ -77,11 +78,15 @@ Cloud Functions (Blaze) or Firebase App Check. The current controls:
   spend the daily free write quota. Impact is bounded: on the Spark plan, quota exhaustion just
   pauses writes until the next day (no bill, no data loss), and the counter is a vanity metric.
 
-For real server-side protection against scripted abuse, enable
+To mitigate scripted abuse, enable
 [Firebase App Check](https://firebase.google.com/docs/app-check) (reCAPTCHA provider for the web
-app). Note that enforcing App Check will block the anonymous Python read client unless it is
-given a debug/exempt token, so enable enforcement deliberately. Also set a Firestore usage
-budget alert in the Google Cloud console so you are notified of unusual traffic.
+app). App Check is attestation, not rate limiting: it blocks clients that cannot prove they are
+your genuine web app, but it does not throttle a verified client's request rate. Enforcing it is
+a deliberate trade-off, because the anonymous Python read client cannot attest and will be
+blocked. If you need both App Check enforcement and anonymous reads, serve those reads through a
+dedicated public-read path rather than a debug/exempt token (debug tokens are for local
+development only, never a production fallback). Also set a Firestore usage budget alert in the
+Google Cloud console so you are notified of unusual traffic.
 
 ## Operator hardening checklist
 

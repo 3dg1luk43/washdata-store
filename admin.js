@@ -209,7 +209,7 @@ async function loadMaintenance() {
   $('threshold-save-btn').disabled = false;
 }
 $('threshold-save-btn').addEventListener('click', async () => {
-  const n = Math.max(1, Math.round(Number($('threshold-input').value) || 5));
+  const n = Math.min(1000, Math.max(1, Math.round(Number($('threshold-input').value) || 5)));
   $('threshold-save-btn').disabled = true;
   try {
     const saved = await setConfirmThreshold(n);

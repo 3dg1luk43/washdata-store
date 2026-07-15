@@ -48,6 +48,8 @@ test('public can bump downloads by exactly 1 and nothing else', async () => {
     await setDoc(doc(ctx.firestore(), 'cycles/c6'), { ...validCycle('u1'), status: 'approved', downloads: 0 });
   });
   await assertSucceeds(updateDoc(doc(anon().firestore(), 'cycles/c6'), { downloads: 1 }));
+  // A decrement (or any non +1 step) is rejected -- the counter is monotone.
+  await assertFails(updateDoc(doc(anon().firestore(), 'cycles/c6'), { downloads: 0 }));
   await assertFails(updateDoc(doc(anon().firestore(), 'cycles/c6'), { downloads: 3 }));
   await assertFails(updateDoc(doc(anon().firestore(), 'cycles/c6'), { downloads: 2, status: 'removed' }));
 });
@@ -74,7 +76,8 @@ const validDevice = (uid, over = {}) => ({
 
 test('device create requires github + matching brand_lc; anon denied', async () => {
   await assertSucceeds(setDoc(doc(gh('u1').firestore(), 'devices/washer__bosch__wat'), validDevice('u1')));
-  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/x'), validDevice('u1', { brand_lc: 'WRONG' })));
+  // brand_lc must equal brand.lower(); a lowercase-but-wrong value still fails the rule.
+  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/d_bad_brand_lc'), validDevice('u1', { brand_lc: 'other' })));
   await assertFails(setDoc(doc(anon().firestore(), 'devices/y'), validDevice('anon')));
 });
 
@@ -159,7 +162,9 @@ test('device quality rating: own uid, 1-5 only', async () => {
     await setDoc(doc(ctx.firestore(), 'devices/d_rate'), validDevice('o'));
   });
   await assertSucceeds(setDoc(doc(gh('r1').firestore(), 'devices/d_rate/ratings/r1'), { uid: 'r1', rating: 4, updatedAt: new Date() }));
-  await assertFails(setDoc(doc(gh('r1').firestore(), 'devices/d_rate/ratings/r1'), { uid: 'r1', rating: 9, updatedAt: new Date() }));
+  // Out-of-range rating rejected on the create path too (fresh user, own uid doc).
+  await assertFails(setDoc(doc(gh('r3').firestore(), 'devices/d_rate/ratings/r3'), { uid: 'r3', rating: 9, updatedAt: new Date() }));
+  // Cannot write another user's rating doc (doc id must equal your uid).
   await assertFails(setDoc(doc(gh('r1').firestore(), 'devices/d_rate/ratings/r2'), { uid: 'r2', rating: 3, updatedAt: new Date() }));
 });
 

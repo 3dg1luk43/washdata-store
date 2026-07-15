@@ -2,6 +2,7 @@
 washdata-store-plan.md
 SETUP.md
 __pycache__/
+node_modules/
 
 # Firebase CLI local state
 .firebase/

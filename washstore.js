@@ -101,7 +101,12 @@ export async function signIn() {
   } catch (_) {}
   try {
     await ensureUserProfile(result.user, githubLogin);
-  } catch (_) {}
+  } catch (e) {
+    // Best-effort: a failed profile write must not block an otherwise-successful
+    // sign-in (the user doc is not required to contribute), but never swallow it
+    // silently -- surface it so a real failure is visible.
+    console.warn('WashData store: ensureUserProfile failed', e);
+  }
   return result;
 }
 
@@ -591,7 +596,9 @@ export async function uploadReferenceCycle(meta, tracePoints, stats, qc = 3) {
     status: 'pending',
     rejectionReason: null,
     trace: { points: packPoints(points), sampleIntervalSec },
-    stats: stats && typeof stats === 'object' ? stats : cycleStats(points),
+    // Always derive stats from the DOWNSAMPLED points that are actually stored, so the
+    // stats can never disagree with the trace (and a caller can't upload fabricated stats).
+    stats: cycleStats(points),
     cycleSchemaVersion: CYCLE_SCHEMA_VERSION,
     downloads: 0,
     commentCount: 0,

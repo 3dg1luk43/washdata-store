@@ -15,9 +15,13 @@ test('packPoints -> {o,w} maps (Firestore-legal); unpackPoints round-trips to pa
 
 test('downsampleCycle caps to max points, keeps short traces intact', () => {
   const short = [[0, 1], [1, 2]];
-  assert.equal(downsampleCycle(short, 3000), short);
+  assert.deepEqual(downsampleCycle(short, 3000), short);
   const long = Array.from({ length: 10000 }, (_, i) => [i, i]);
-  assert.equal(downsampleCycle(long, 3000).length, 3000);
+  const ds = downsampleCycle(long, 3000);
+  assert.equal(ds.length, 3000);
+  // First and last samples are always preserved (true cycle start/end).
+  assert.deepEqual(ds[0], long[0]);
+  assert.deepEqual(ds[ds.length - 1], long[long.length - 1]);
 });
 
 test('parseCycle handles JSON array of pairs', () => {

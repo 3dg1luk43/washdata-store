@@ -19,7 +19,7 @@
 
 import admin from 'firebase-admin';
 import { deviceId as mkDeviceId, profileId as mkProfileId } from '../lib/ids.js';
-import { packPoints } from '../lib/trace.js';
+import { packPoints, cycleStats } from '../lib/trace.js';
 
 const projectId = process.argv[2];
 if (!projectId) {
@@ -45,14 +45,13 @@ function traceFrom(env) {
 
 function statsFrom(env, points) {
   const e = env.envelope || {};
-  let peak = 0;
-  let sum = 0;
-  for (const p of points) { peak = Math.max(peak, Number(p[1]) || 0); sum += Number(p[1]) || 0; }
+  // cycleStats does the trapezoid energy integration; the raw sample sum is NOT energy.
+  const s = cycleStats(points);
   return {
-    duration: Math.round(e.target_duration || points[points.length - 1][0] || 0),
-    energy_wh: e.avg_energy != null ? Math.round(e.avg_energy * 1000 * 1000) / 1000 : Math.round(sum),
-    peak_w: Math.round(peak),
-    mean_w: Math.round(sum / points.length),
+    duration: Math.round(e.target_duration || s.duration || 0),
+    energy_wh: e.avg_energy != null ? Math.round(e.avg_energy * 1000 * 1000) / 1000 : s.energy_wh,
+    peak_w: s.peak_w,
+    mean_w: s.mean_w,
     signature: {},
   };
 }

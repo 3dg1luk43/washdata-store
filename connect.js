@@ -22,11 +22,19 @@ function escHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// The HA panel passes its own origin. Accept only real http(s) origins (never '*').
+// The HA panel passes its own origin. Accept only a bare http(s) origin (never '*',
+// never a value with extra path/query/fragment) and require it to match URL.origin
+// EXACTLY -- that is precisely what postMessage uses as targetOrigin, so a padded or
+// malformed ?origin= can't hand the refresh token to the wrong target. http is allowed
+// on purpose: many Home Assistant instances run over plain http on the LAN, and the
+// postMessage handoff is in-browser (not network-exposed), so exact-origin match -- not
+// TLS -- is the control here.
 function isAllowedOrigin(origin) {
   try {
     const u = new URL(origin);
-    return (u.protocol === 'http:' || u.protocol === 'https:') && !!u.host;
+    return (u.protocol === 'http:' || u.protocol === 'https:')
+      && !!u.host
+      && u.origin === origin;
   } catch {
     return false;
   }

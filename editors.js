@@ -68,7 +68,7 @@ export function openSettingsEditor(d) {
         <div class="form-group" style="margin:0">
           <label for="se-${esc(f.key)}" style="font-size:.75rem">${esc(f.label)}</label>
           <input type="number" id="se-${esc(f.key)}" step="any"
-                 value="${current[f.key] != null ? current[f.key] : ''}"
+                 value="${current[f.key] != null ? esc(String(current[f.key])) : ''}"
                  placeholder="not set" class="se-input">
         </div>`).join('')}
     </div>`;

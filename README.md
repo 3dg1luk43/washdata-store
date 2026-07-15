@@ -88,7 +88,7 @@ Online features are opt-in per device and require a one-time GitHub account link
 
 - Sign-in uses GitHub OAuth. The store stores only your public GitHub display name and avatar URL, shown as attribution on your contributions.
 - Browsing and downloading require no account and leave no personal trace.
-- Reference cycles contain only power measurements over time. They carry no location data, usage habits, or personal information beyond the contributor's GitHub display name.
+- Reference cycles contain only power measurements over time. They carry no location data, usage habits, or personal information beyond the contributor's public GitHub display name and avatar URL.
 - There is no analytics, no ad tracking, and no third-party marketing scripts.
 
 ## Project status

@@ -223,15 +223,17 @@
   <script>
     (async function () {
       const README_URL =
-        'https://raw.githubusercontent.com/3dg1luk43/washdata_store/README.md';
+        'https://raw.githubusercontent.com/3dg1luk43/washdata_store/main/README.md';
 
       const elLoading = document.getElementById('docs-loading');
       const elError   = document.getElementById('docs-error');
       const elContent = document.getElementById('docs-content');
       const elErrText = document.getElementById('docs-error-text');
 
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 10000);
       try {
-        const res = await fetch(README_URL);
+        const res = await fetch(README_URL, { signal: ctrl.signal });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const md = await res.text();
         elContent.innerHTML = marked.parse(md);
@@ -240,9 +242,12 @@
       } catch (err) {
         elLoading.hidden = true;
         elErrText.textContent =
-          'Unable to fetch the README from GitHub (' + err.message +
+          'Unable to fetch the README from GitHub (' +
+          (err.name === 'AbortError' ? 'request timed out' : err.message) +
           '). Check your connection or view it on GitHub directly.';
         elError.hidden = false;
+      } finally {
+        clearTimeout(timer);
       }
     })();
   </script>
