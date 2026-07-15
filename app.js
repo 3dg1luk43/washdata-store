@@ -576,7 +576,11 @@ function renderCycleCommunity(box, c) {
       const badges = box.closest('.card') ? box.closest('.card').querySelector('.badge-pending') : null;
       const msg = box.querySelector('[data-msg]');
       if (res.status === 'approved') { if (badges) badges.remove(); if (msg) msg.textContent = 'Approved by the community'; }
-      else if (msg) msg.textContent = `${res.confirmCount}/${_confirmThreshold} confirmations`;
+      else {
+        // Still pending: keep the pill's count in sync with the message.
+        if (badges) badges.textContent = `Awaiting approval · ${res.confirmCount}/${_confirmThreshold}`;
+        if (msg) msg.textContent = `${res.confirmCount}/${_confirmThreshold} confirmations`;
+      }
       toast('Thanks for confirming');
     } catch (e) { btn.disabled = false; toast(e.message, 'error'); }
   });

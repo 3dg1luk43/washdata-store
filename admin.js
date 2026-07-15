@@ -68,7 +68,11 @@ function interactiveGraph(container, cycle) {
   const raw = cycle && cycle.trace && cycle.trace.points;
   if (!Array.isArray(raw) || raw.length < 2) { container.innerHTML = '<div class="text-muted" style="padding:1rem">No trace data.</div>'; return; }
   let pts = raw;
-  if (pts.length > 600) { const step = Math.ceil(pts.length / 600); pts = pts.filter((_, i) => i % step === 0); }
+  if (pts.length > 600) {
+    const step = Math.ceil(pts.length / 600);
+    // Keep the final sample so the graph/readout ends where the trace actually does.
+    pts = pts.filter((_, i) => i % step === 0 || i === pts.length - 1);
+  }
   const W = 640, H = 170, pad = 8;
   const xs = pts.map((p) => p[0]); const ys = pts.map((p) => p[1]);
   const x0 = xs[0]; const xN = xs[xs.length - 1] || 1; const yMax = Math.max(...ys, 1);
@@ -385,9 +389,16 @@ function bumpPending(delta) {
 function buildStatusActions(tr, rec, setter, label, extra) {
   const cell = tr.querySelector('.action-cell');
   cell.innerHTML = '';
+  // Guard against a second click while a write is in flight: two rapid clicks
+  // (e.g. Approve then Remove) would both capture wasPending and decrement the
+  // pending counter twice with competing writes.
+  let saving = false;
   const mk = (text, status) => {
     const btn = document.createElement('button'); btn.className = 'btn btn-ghost btn-sm'; btn.textContent = text;
     btn.addEventListener('click', async () => {
+      if (saving) return;
+      saving = true;
+      cell.querySelectorAll('button').forEach((b) => { b.disabled = true; });
       const wasPending = rec.status === 'pending';
       try {
         await setter(rec.id, status); rec.status = status;
@@ -395,7 +406,11 @@ function buildStatusActions(tr, rec, setter, label, extra) {
         bumpPending((wasPending ? -1 : 0) + (status === 'pending' ? 1 : 0));
         buildStatusActions(tr, rec, setter, label, extra);
         toast(`${label} ${status}`);
-      } catch (e) { toast(e.message, 'error'); }
+      } catch (e) {
+        saving = false;
+        cell.querySelectorAll('button').forEach((b) => { b.disabled = false; });
+        toast(e.message, 'error');
+      }
     });
     cell.appendChild(btn);
   };
