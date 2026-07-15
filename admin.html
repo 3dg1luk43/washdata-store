@@ -200,6 +200,55 @@
     <span>Copyright &copy; 2026</span>
   </footer>
 
+  <!-- Settings editor modal -->
+  <div class="modal-overlay" id="settings-edit-modal" hidden aria-modal="true" role="dialog">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <div>
+          <h2 class="modal-title" id="se-modal-title">Edit settings</h2>
+          <div class="modal-subtitle" id="se-modal-subtitle"></div>
+        </div>
+        <button class="modal-close" id="se-modal-close" aria-label="Close">&#215;</button>
+      </div>
+      <div class="modal-body"><div id="se-modal-body"></div></div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost btn-sm" id="se-modal-close-footer">Close</button>
+        <button class="btn btn-primary btn-sm" id="se-save-btn">Save settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Phase editor modal -->
+  <div class="modal-overlay" id="phase-edit-modal" hidden aria-modal="true" role="dialog">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <div>
+          <h2 class="modal-title" id="pe-modal-title">Edit phase map</h2>
+          <div class="modal-subtitle" id="pe-modal-subtitle"></div>
+        </div>
+        <button class="modal-close" id="pe-modal-close" aria-label="Close">&#215;</button>
+      </div>
+      <div class="modal-sparkline-area" id="pe-modal-graph"></div>
+      <div class="modal-body">
+        <div id="pe-pending-row" class="pe-pending-row" hidden>
+          <span class="text-muted" style="font-size:.8125rem">Name this phase:</span>
+          <input type="text" id="pe-pending-name" maxlength="40" placeholder="e.g. Pre-wash"
+                 autocomplete="off" class="pe-name-input">
+          <button class="btn btn-primary btn-sm" id="pe-add-btn">Add</button>
+          <button class="btn btn-ghost btn-sm" id="pe-cancel-btn">Cancel</button>
+        </div>
+        <div id="pe-phase-list" class="pe-phase-list"></div>
+        <div id="pe-no-cycle" class="text-muted" style="font-size:.8125rem;padding:.5rem 0" hidden>
+          No reference cycles found for this profile. Upload a cycle first to use the visual editor.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost btn-sm" id="pe-modal-close-footer">Close</button>
+        <button class="btn btn-primary btn-sm" id="pe-save-btn">Save phases</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast-container" id="toasts" aria-live="assertive" aria-atomic="true"></div>
   <script type="module" src="admin.js"></script>
 </body>
