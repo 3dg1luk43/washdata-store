@@ -124,7 +124,10 @@ service cloud.firestore {
         && request.resource.data.createdAt == request.time;
       // NB: cycleCount is no longer stored -- the browse count is CALCULATED via a
       // COUNT aggregation over this profile's approved+pending cycles (client side).
-      // Owner of the parent device may update phases only.
+      // Profile owner (ownerId) or parent device owner may update phases only.
+      allow update: if isGithubUser()
+        && resource.data.get('ownerId', null) == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phases']);
       allow update: if isGithubUser()
         && exists(/databases/$(database)/documents/devices/$(resource.data.deviceId))
         && get(/databases/$(database)/documents/devices/$(resource.data.deviceId)).data.get('ownerId', null) == request.auth.uid

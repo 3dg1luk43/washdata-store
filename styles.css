@@ -980,7 +980,11 @@ input[type="file"]:hover {
 .action-cell {
   display: flex;
   gap: 0.35rem;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+}
+/* Admin pages use a wider max-width so tables don't overflow the viewport */
+.admin-main {
+  padding-inline: max(1rem, calc((100% - 1500px) / 2));
 }
 
 /* Admin user avatar cell */

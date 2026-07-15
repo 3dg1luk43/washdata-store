@@ -7,7 +7,7 @@ import {
   adminListBrands, adminListProfiles,
   adminListUsers, adminBanUser, adminUnbanUser, adminGetStats,
   getSiteConfig, setMaintenance, setConfirmThreshold,
-  adminSetDeviceOwner,
+  adminSetDeviceOwner, adminSetProfileOwner,
   adminDeleteDevice, adminDeleteBrand, adminDeleteProfile, adminDeleteUser,
 } from './washstore.js';
 import { openSettingsEditor, openPhaseEditor, bindEditorCloseHandlers } from './editors.js';
@@ -24,8 +24,8 @@ let _reviewRecord = null;
 let _deviceItems = [];
 let _profileItems = [];
 let _userItems = [];
-// State for the owner-picker modal
-let _ownerPickerDevice = null;
+// State for the owner-picker modal (shared by device + profile pickers)
+let _ownerPickerCtx = null; // { record, isProfile, tr }
 
 // ============================================================ dom + toast
 function $(id) { return document.getElementById(id); }
@@ -106,6 +106,11 @@ function deviceLabel(c) {
   const p = String(c.deviceId || '').split('__');
   return `${p[1] || ''} ${p[2] || ''}`.trim() || c.deviceId || '?';
 }
+function resolveOwnerLabel(uid) {
+  if (!uid) return '-';
+  const u = _userItems.find((x) => x.uid === uid);
+  return u ? (u.githubLogin || u.displayName || truncate(uid, 10)) : truncate(uid, 10);
+}
 
 // ============================================================ auth gate
 function renderAuthArea(user) {
@@ -149,6 +154,8 @@ onAuth(async (user) => {
   $('admin-denied').setAttribute('hidden', ''); $('admin-panel').removeAttribute('hidden');
   loadOverview();
   loadMaintenance();
+  // Pre-load users in background so owner labels resolve in Devices/Profiles tabs.
+  loadUsers(true).catch(() => {});
 });
 
 // ============================================================ tabs
@@ -281,6 +288,7 @@ function buildCycleActions(container, c, tr) {
     } catch (e) { toast(e.message, 'error'); }
   };
   const mk = (label, cls, handler) => { const b = document.createElement('button'); b.className = `btn ${cls} btn-sm`; b.textContent = label; b.addEventListener('click', handler); container.appendChild(b); };
+  if (c.status === 'pending') mk('Approve', 'btn-ghost', setStatus('approved'));
   if (c.status !== 'removed') mk('Remove', 'btn-ghost', setStatus('removed'));
   else mk('Restore', 'btn-ghost', setStatus('approved'));
   mk('View', 'btn-ghost', () => openReviewModal(c));
@@ -306,12 +314,12 @@ function populateDeviceMergeSelects() {
   });
 }
 
-function populateOwnerPicker() {
+function populateOwnerPicker(currentOwnerId) {
   const sel = $('owner-picker-select');
   if (!sel) return;
-  const opts = _userItems.map((u) => `<option value="${esc(u.uid)}">${esc(u.displayName || u.githubLogin || u.uid.slice(0, 12))} (${esc(u.uid.slice(0, 8))})</option>`).join('');
+  const opts = _userItems.map((u) => `<option value="${esc(u.uid)}">${esc(u.githubLogin || u.displayName || u.uid.slice(0, 12))} (${esc(u.uid.slice(0, 8))})</option>`).join('');
   sel.innerHTML = '<option value="">-- None (remove owner) --</option>' + opts;
-  if (_ownerPickerDevice) sel.value = _ownerPickerDevice.ownerId || '';
+  if (currentOwnerId) sel.value = currentOwnerId;
 }
 
 async function loadDevices(reset = false) {
@@ -333,7 +341,6 @@ async function loadDevices(reset = false) {
 }
 
 function buildDeviceRow(d) {
-  const ownerLabel = d.ownerId ? truncate(d.ownerId, 10) : '-';
   const tr = document.createElement('tr');
   tr.innerHTML = `
     <td><code class="mono" style="font-size:.7rem">${esc(truncate(d.id, 26))}</code></td>
@@ -343,7 +350,7 @@ function buildDeviceRow(d) {
     <td><span class="badge badge-${esc(d.status)}">${esc(d.status)}</span></td>
     <td class="text-muted">${d.favoriteCount || 0}</td>
     <td class="text-muted">${d.confirmCount || 0}</td>
-    <td class="text-muted" style="font-size:.72rem"><code class="mono">${esc(ownerLabel)}</code></td>
+    <td class="text-muted" style="font-size:.75rem">${esc(resolveOwnerLabel(d.ownerId))}</td>
     <td><div class="action-cell"></div></td>`;
   const cell = tr.querySelector('.action-cell');
   const mkApprove = () => {
@@ -384,20 +391,23 @@ function buildDeviceRow(d) {
   return tr;
 }
 
-function openOwnerPicker(d, tr) {
-  _ownerPickerDevice = d;
-  populateOwnerPicker();
+function openOwnerPicker(record, tr, isProfile = false) {
+  _ownerPickerCtx = { record, isProfile, tr };
+  $('owner-picker-modal-title').textContent = isProfile ? 'Set Profile Owner' : 'Set Device Owner';
+  populateOwnerPicker(record.ownerId);
   $('owner-picker-modal').removeAttribute('hidden');
   $('owner-picker-save').onclick = async () => {
     const uid = $('owner-picker-select').value || null;
     try {
-      await adminSetDeviceOwner(d.id, uid);
-      d.ownerId = uid;
-      // Update the owner cell in the row (8th column, 0-indexed)
-      const ownerCell = tr.children[7];
-      if (ownerCell) ownerCell.innerHTML = `<code class="mono">${esc(uid ? truncate(uid, 10) : '-')}</code>`;
+      if (isProfile) await adminSetProfileOwner(record.id, uid);
+      else await adminSetDeviceOwner(record.id, uid);
+      record.ownerId = uid;
+      const ownerLabel = resolveOwnerLabel(uid);
+      // Device: owner is col 7; Profile: owner is col 5 (0-indexed, after adding owner col)
+      const ownerCell = tr.children[isProfile ? 5 : 7];
+      if (ownerCell) ownerCell.textContent = ownerLabel;
       $('owner-picker-modal').setAttribute('hidden', '');
-      toast(uid ? `Owner set` : 'Owner cleared');
+      toast(uid ? 'Owner set' : 'Owner cleared');
     } catch (e) { toast(e.message, 'error'); }
   };
 }
@@ -521,17 +531,17 @@ function populateProfileMergeSelects() {
 }
 
 async function loadProfiles() {
-  $('profiles-tbody').innerHTML = `<tr><td colspan="6" class="tbl-msg">Loading...</td></tr>`;
+  $('profiles-tbody').innerHTML = `<tr><td colspan="7" class="tbl-msg">Loading...</td></tr>`;
   try {
     const { items } = await adminListProfiles();
     _profileItems = items;
     populateProfileMergeSelects();
     $('profiles-tbody').innerHTML = '';
-    if (items.length === 0) { $('profiles-tbody').innerHTML = `<tr><td colspan="6" class="tbl-msg">No profiles found.</td></tr>`; return; }
+    if (items.length === 0) { $('profiles-tbody').innerHTML = `<tr><td colspan="7" class="tbl-msg">No profiles found.</td></tr>`; return; }
     items.sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1));
     items.forEach((p) => $('profiles-tbody').appendChild(buildProfileRow(p)));
   } catch (e) {
-    $('profiles-tbody').innerHTML = `<tr><td colspan="6" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
+    $('profiles-tbody').innerHTML = `<tr><td colspan="7" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
     toast(e.message, 'error');
   }
 }
@@ -545,6 +555,7 @@ function buildProfileRow(p) {
     <td><code class="mono" style="font-size:.68rem">${esc(truncate(p.id, 30))}</code></td>
     <td><span class="badge badge-${esc(p.status)}">${esc(p.status)}</span></td>
     <td class="text-muted" style="font-size:.75rem">${esc(p.createdByName || '-')}</td>
+    <td class="text-muted" style="font-size:.75rem">${esc(resolveOwnerLabel(p.ownerId))}</td>
     <td><div class="action-cell"></div></td>`;
   buildStatusActions(tr, p, adminSetProfileStatus, 'Profile', (cell) => {
     const target = document.createElement('button');
@@ -555,6 +566,10 @@ function buildProfileRow(p) {
     editPhases.className = 'btn btn-ghost btn-sm'; editPhases.textContent = 'Edit phases';
     editPhases.addEventListener('click', () => openPhaseEditor(p));
     cell.appendChild(editPhases);
+    const setOwnerBtn = document.createElement('button');
+    setOwnerBtn.className = 'btn btn-ghost btn-sm'; setOwnerBtn.textContent = 'Set owner';
+    setOwnerBtn.addEventListener('click', () => openOwnerPicker(p, tr, true));
+    cell.appendChild(setOwnerBtn);
   }, adminDeleteProfile);
   return tr;
 }

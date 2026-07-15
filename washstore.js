@@ -813,6 +813,10 @@ export async function adminSetDeviceOwner(deviceId, ownerUid) {
   await updateDoc(doc(_db, 'devices', deviceId), { ownerId: ownerUid || null });
 }
 
+export async function adminSetProfileOwner(profileId, ownerUid) {
+  await updateDoc(doc(_db, 'profiles', profileId), { ownerId: ownerUid || null });
+}
+
 // Admin brand/profile listings for the review tabs. No server-side status filter
 // (keeps the query on a single-field index); the admin UI filters client-side.
 export async function adminListBrands({ pageSize = 200 } = {}) {

@@ -28,8 +28,8 @@
     <div class="user-area" id="auth-status"></div>
   </header>
 
-  <main>
-    <div id="admin-gate" class="loading-center" style="padding:3rem"><div class="loading-spinner"></div></div>
+  <main class="admin-main">
+    <div id="admin-gate" class="loading-center" style="padding:3rem;max-width:none"><div class="loading-spinner"></div></div>
 
     <div id="admin-denied" class="empty-state" hidden>
       <div class="empty-icon">&#128272;</div>
@@ -157,7 +157,7 @@
         </div>
         <div class="admin-table-wrap">
           <table class="admin-table"><thead><tr>
-            <th>Profile</th><th>Device</th><th>ID</th><th>Status</th><th>Contributor</th><th>Actions</th>
+            <th>Profile</th><th>Device</th><th>ID</th><th>Status</th><th>Contributor</th><th>Owner</th><th>Actions</th>
           </tr></thead><tbody id="profiles-tbody"></tbody></table>
         </div>
       </div>
@@ -205,7 +205,7 @@
   <div class="modal-overlay" id="owner-picker-modal" hidden aria-modal="true" role="dialog">
     <div class="modal" style="max-width:420px">
       <div class="modal-header">
-        <div><h2 class="modal-title">Set Device Owner</h2></div>
+        <div><h2 class="modal-title" id="owner-picker-modal-title">Set Owner</h2></div>
         <button class="modal-close" id="owner-picker-close" aria-label="Close">&#215;</button>
       </div>
       <div class="modal-body">
