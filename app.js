@@ -193,7 +193,7 @@ async function doSignIn() { try { await signIn(); } catch (e) { toast(e.message,
 
 function showBannedMessage(reason) {
   const area = $('auth-status');
-  if (area) area.innerHTML = `<span class="user-name" style="color:var(--error,#f44336)">Account suspended${reason ? ': ' + esc(reason) : ''}</span>`;
+  if (area) area.innerHTML = `<span style="font-size:.8125rem;color:var(--error,#f44336);line-height:1.3">Account suspended${reason ? `<br><span style="font-size:.75rem;opacity:.85">${esc(reason)}</span>` : ''}</span>`;
 }
 
 onAuth(async (user) => {
