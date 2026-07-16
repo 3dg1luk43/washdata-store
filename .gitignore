@@ -12,3 +12,4 @@ firestore-debug.log
 # OS / editor cruft
 .DS_Store
 *.swp
+package-lock.json

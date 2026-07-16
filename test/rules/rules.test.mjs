@@ -22,7 +22,7 @@ import {
   initializeTestEnvironment, assertFails, assertSucceeds,
 } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
-import { doc, setDoc, updateDoc, writeBatch, getDoc } from 'firebase/firestore';
+import { doc, setDoc, updateDoc, writeBatch, getDoc, serverTimestamp } from 'firebase/firestore';
 
 let env;
 const PID = 'washdata-store';
@@ -42,10 +42,12 @@ const validCycle = (uid) => ({
   profileId: 'washer__bosch__wat__cotton-40', deviceId: 'washer__bosch__wat',
   brand_lc: 'bosch', program_lc: 'cotton-40', applianceType: 'washer',
   uploaderUid: uid, uploaderName: 'x', status: 'pending', rejectionReason: null,
-  trace: { points: [[0, 1], [5, 100]], sampleIntervalSec: 5 },
+  // Traces are stored as {o, w} maps, not nested arrays (Firestore rejects nested arrays).
+  trace: { points: [{ o: 0, w: 1 }, { o: 5, w: 100 }], sampleIntervalSec: 5 },
   stats: { duration: 3600, energy_wh: 800, peak_w: 2000, mean_w: 200, signature: {} },
-  cycleSchemaVersion: 1, downloads: 0, commentCount: 0, qc: 1,
-  createdAt: new Date(),
+  cycleSchemaVersion: 1, downloads: 0, commentCount: 0, confirmCount: 0, qc: 1,
+  // Rules require createdAt == request.time, which only holds for serverTimestamp().
+  createdAt: serverTimestamp(),
 });
 
 test('github user can create a pending cycle; anon cannot', async () => {
@@ -87,7 +89,7 @@ test('a user may update their own favorites', async () => {
 const validDevice = (uid, over = {}) => ({
   applianceType: 'washer', brand: 'Bosch', brand_lc: 'bosch', model: 'WAT', model_lc: 'wat',
   status: 'pending', createdByUid: uid, createdByName: null, manualUrl: null,
-  createdAt: new Date(), profileCount: 0, favoriteCount: 0, confirmCount: 0, ...over,
+  createdAt: serverTimestamp(), profileCount: 0, favoriteCount: 0, confirmCount: 0, ...over,
 });
 
 test('device create requires github + matching brand_lc; anon denied', async () => {
@@ -124,18 +126,18 @@ test('confirm is honest: +1 only with the matching confirmation doc, once per us
   await assertFails(updateDoc(doc(db, 'devices/d_conf'), { confirmCount: 1 }));
   // Batch: create my confirmation doc + increment -> allowed.
   const b1 = writeBatch(db);
-  b1.set(doc(db, 'devices/d_conf/confirmations/voter1'), { uid: 'voter1', createdAt: new Date() });
+  b1.set(doc(db, 'devices/d_conf/confirmations/voter1'), { uid: 'voter1', createdAt: serverTimestamp() });
   b1.update(doc(db, 'devices/d_conf'), { confirmCount: 1 });
   await assertSucceeds(b1.commit());
   // Same user cannot bump again (confirmation doc already exists).
   const b2 = writeBatch(db);
-  b2.set(doc(db, 'devices/d_conf/confirmations/voter1'), { uid: 'voter1', createdAt: new Date() });
+  b2.set(doc(db, 'devices/d_conf/confirmations/voter1'), { uid: 'voter1', createdAt: serverTimestamp() });
   b2.update(doc(db, 'devices/d_conf'), { confirmCount: 2 });
   await assertFails(b2.commit());
   // Bumping by more than 1 -> denied.
   const db2 = gh('voter2').firestore();
   const b3 = writeBatch(db2);
-  b3.set(doc(db2, 'devices/d_conf/confirmations/voter2'), { uid: 'voter2', createdAt: new Date() });
+  b3.set(doc(db2, 'devices/d_conf/confirmations/voter2'), { uid: 'voter2', createdAt: serverTimestamp() });
   b3.update(doc(db2, 'devices/d_conf'), { confirmCount: 4 });
   await assertFails(b3.commit());
 });
@@ -159,7 +161,7 @@ test('auto-promotion: only status flip, only at/above threshold', async () => {
 const validProfile = (uid, over = {}) => ({
   deviceId: 'washer__bosch__wat', applianceType: 'washer',
   program: 'Cotton 40', program_lc: 'cotton 40', status: 'pending',
-  createdByUid: uid, createdAt: new Date(), cycleCount: 0, ...over,
+  createdByUid: uid, createdAt: serverTimestamp(), cycleCount: 0, ...over,
 });
 
 test('profile create by github user; pending is publicly readable, removed is not', async () => {
