@@ -48,7 +48,10 @@ body {
   color: var(--text);
   line-height: 1.5;
   min-height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
+main { flex: 1; }
 a {
   color: var(--accent);
   text-decoration: none;
@@ -1510,7 +1513,6 @@ main,
   padding-inline: max(1.25rem, calc((100% - 1180px) / 2));
 }
 main {
-  display: block;
   padding-block: 1.75rem 3.5rem;
 }
 @media (max-width: 640px) {
@@ -1527,6 +1529,7 @@ main {
   padding: 2rem 1rem;
   color: var(--text-muted);
   font-size: .8125rem;
+  margin-top: auto;
 }
 .site-footer a { color: var(--accent); text-decoration: none; }
 .site-footer a:hover { text-decoration: underline; }
