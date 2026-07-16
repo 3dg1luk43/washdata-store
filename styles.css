@@ -1457,6 +1457,13 @@ input[type="checkbox"], input[type="radio"] {
   border-radius: var(--radius-lg) var(--radius-lg) 0 0;
 }
 
+/* App shell (index + create): fills the body flex space and propagates column layout to footer */
+#app-shell {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
 /* Boot splash - shown until the maintenance/admin state is resolved */
 #boot:not([hidden]) {
   min-height: 100vh;
