@@ -832,12 +832,18 @@ export async function adminSetDeviceStatus(id, status) {
   await updateDoc(doc(_db, 'devices', id), { status });
 }
 
-export async function adminSetDeviceOwner(deviceId, ownerUid) {
-  await updateDoc(doc(_db, 'devices', deviceId), { ownerId: ownerUid || null });
+export async function adminSetDeviceOwner(deviceId, ownerUid, ownerName) {
+  await updateDoc(doc(_db, 'devices', deviceId), {
+    ownerId: ownerUid || null,
+    createdByName: ownerUid ? (ownerName || null) : null,
+  });
 }
 
-export async function adminSetProfileOwner(profileId, ownerUid) {
-  await updateDoc(doc(_db, 'profiles', profileId), { ownerId: ownerUid || null });
+export async function adminSetProfileOwner(profileId, ownerUid, ownerName) {
+  await updateDoc(doc(_db, 'profiles', profileId), {
+    ownerId: ownerUid || null,
+    createdByName: ownerUid ? (ownerName || null) : null,
+  });
 }
 
 // Admin brand/profile listings for the review tabs. No server-side status filter
@@ -978,9 +984,9 @@ export async function adminDeleteUser(uid) {
     getDocs(query(collection(_db, 'cycles'), where('uploaderUid', '==', uid))),
   ]);
   const ops = [
-    ...devSnap.docs.map((d) => ({ ref: doc(_db, 'devices', d.id), data: { createdByUid: null, createdByName: 'Deleted User' } })),
-    ...profSnap.docs.map((p) => ({ ref: doc(_db, 'profiles', p.id), data: { createdByUid: null, createdByName: 'Deleted User' } })),
-    ...cycSnap.docs.map((c) => ({ ref: doc(_db, 'cycles', c.id), data: { uploaderUid: null, uploaderName: 'Deleted User' } })),
+    ...devSnap.docs.map((d) => ({ ref: doc(_db, 'devices', d.id), data: { createdByUid: null, createdByName: null } })),
+    ...profSnap.docs.map((p) => ({ ref: doc(_db, 'profiles', p.id), data: { createdByUid: null, createdByName: null } })),
+    ...cycSnap.docs.map((c) => ({ ref: doc(_db, 'cycles', c.id), data: { uploaderUid: null, uploaderName: null } })),
   ];
   for (let i = 0; i < ops.length; i += BATCH_SIZE) {
     const batch = writeBatch(_db);

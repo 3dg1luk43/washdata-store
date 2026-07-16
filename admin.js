@@ -347,9 +347,10 @@ function openOwnerPicker(record, card, isProfile = false) {
   $('owner-picker-modal').removeAttribute('hidden');
   $('owner-picker-save').onclick = async () => {
     const uid = $('owner-picker-select').value || null;
+    const ownerName = uid ? (() => { const u = _userItems.find((x) => x.uid === uid); return u ? (u.githubLogin || u.displayName || null) : null; })() : null;
     try {
-      if (isProfile) await adminSetProfileOwner(record.id, uid);
-      else await adminSetDeviceOwner(record.id, uid);
+      if (isProfile) await adminSetProfileOwner(record.id, uid, ownerName);
+      else await adminSetDeviceOwner(record.id, uid, ownerName);
       record.ownerId = uid;
       const ownerEl = _ownerPickerCtx.card && _ownerPickerCtx.card.querySelector('.cat-owner-label');
       if (ownerEl) ownerEl.textContent = uid ? resolveOwnerLabel(uid) : '(none)';
