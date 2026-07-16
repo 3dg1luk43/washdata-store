@@ -157,7 +157,7 @@ service cloud.firestore {
         && request.resource.data.qc is int && request.resource.data.qc >= 1 && request.resource.data.qc <= 3
         && request.resource.data.trace is map
         && request.resource.data.trace.points is list
-        && request.resource.data.trace.points.size() <= 3000
+        && request.resource.data.trace.points.size() <= 10000
         && request.resource.data.stats is map
         && (request.resource.data.uploaderName == null
             || (request.resource.data.uploaderName is string && request.resource.data.uploaderName.size() <= 100))

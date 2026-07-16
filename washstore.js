@@ -598,7 +598,7 @@ export async function uploadReferenceCycle(meta, tracePoints, stats, qc = 3) {
   await ensureBrand({ brand });
   const devId = await ensureDevice({ applianceType, brand, model });
   const profId = await ensureProfile({ deviceId: devId, program, description });
-  const points = downsampleCycle(tracePoints, 3000);
+  const points = downsampleCycle(tracePoints, 10000);
   const qcCode = (qc >= 1 && qc <= 3) ? qc : 3;
 
   const docData = {
