@@ -212,7 +212,7 @@
   </main>
 
   <footer class="site-footer">
-    <span><a href="https://github.com/3dg1luk43/ha_washdata/discussions/48" target="_blank" rel="noopener">Initial idea</a></span>
+    <span>Initial idea by <a href="https://github.com/3dg1luk43/ha_washdata/discussions/48" target="_blank" rel="noopener">oli-z</a></span>
     <span class="foot-sep">&middot;</span>
     <span>Developed by <a href="https://github.com/3dg1luk43" target="_blank" rel="noopener">3dg1luk43</a></span>
     <span class="foot-sep">&middot;</span>
@@ -222,8 +222,7 @@
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script>
     (async function () {
-      const README_URL =
-        'https://raw.githubusercontent.com/3dg1luk43/washdata_store/main/README.md';
+      const README_URL = './README.md';
 
       const elLoading = document.getElementById('docs-loading');
       const elError   = document.getElementById('docs-error');
@@ -242,7 +241,7 @@
       } catch (err) {
         elLoading.hidden = true;
         elErrText.textContent =
-          'Unable to fetch the README from GitHub (' +
+          'Unable to load the documentation (' +
           (err.name === 'AbortError' ? 'request timed out' : err.message) +
           '). Check your connection or view it on GitHub directly.';
         elError.hidden = false;

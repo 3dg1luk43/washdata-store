@@ -686,21 +686,25 @@ async function doDownload(c) {
   try { await bumpDownload(c.id); saveAsFile(c); } catch (e) { toast(e.message, 'error'); }
 }
 
-$('filter-apply').addEventListener('click', () => {
+function _applyFilters() {
   _browseFilters = {
     search: $('filter-brand').value.trim(),
     favoritesOnly: $('filter-favorites').checked,
     approvedOnly: $('filter-approved') ? $('filter-approved').checked : false,
   };
   loadBrands(true);
-});
+}
+let _filterTimer = null;
+$('filter-brand').addEventListener('input', () => { clearTimeout(_filterTimer); _filterTimer = setTimeout(_applyFilters, 350); });
+$('filter-favorites').addEventListener('change', _applyFilters);
+if ($('filter-approved')) $('filter-approved').addEventListener('change', _applyFilters);
+$('filter-apply').addEventListener('click', _applyFilters);
 $('filter-clear').addEventListener('click', () => {
   $('filter-brand').value = ''; $('filter-favorites').checked = false;
   if ($('filter-approved')) $('filter-approved').checked = false;
   _browseFilters = { search: '', favoritesOnly: false, approvedOnly: false };
   loadBrands(true);
 });
-$('filter-brand').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('filter-apply').click(); });
 $('load-more-btn').addEventListener('click', () => { if (_view === 'brands') loadBrands(false); });
 
 // ============================================================ details modal

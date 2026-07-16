@@ -41,10 +41,8 @@
     <div id="admin-panel" hidden>
       <div class="tabs" role="tablist">
         <button class="tab-btn active" id="overview-btn" role="tab">Overview</button>
+        <button class="tab-btn" id="catalog-btn" role="tab">Catalog</button>
         <button class="tab-btn" id="cycles-btn" role="tab">Cycles</button>
-        <button class="tab-btn" id="brands-btn" role="tab">Brands</button>
-        <button class="tab-btn" id="devices-btn" role="tab">Devices</button>
-        <button class="tab-btn" id="profiles-btn" role="tab">Profiles</button>
         <button class="tab-btn" id="users-btn" role="tab">Users</button>
       </div>
 
@@ -80,6 +78,10 @@
       <div class="tab-panel" id="cycles-tab" role="tabpanel" hidden>
         <div class="section-header"><h2 class="section-title">All Cycles</h2></div>
         <div class="filter-rail">
+          <div class="form-group" style="flex:1.5">
+            <label for="cy-filter-device">Device / Brand</label>
+            <input type="text" id="cy-filter-device" placeholder="e.g. Bosch, WAU28T..." autocomplete="off">
+          </div>
           <div class="form-group">
             <label for="cy-filter-status">Status</label>
             <select id="cy-filter-status">
@@ -113,58 +115,22 @@
         <div class="load-more-area"><button class="btn btn-ghost" id="cycles-load-more" hidden>Load more</button></div>
       </div>
 
-      <!-- Brands table -->
-      <div class="tab-panel" id="brands-tab" role="tabpanel" hidden>
-        <div class="section-header"><h2 class="section-title">Brands</h2></div>
-        <div class="admin-table-wrap">
-          <table class="admin-table"><thead><tr>
-            <th>Brand</th><th>ID</th><th>Status</th><th>Contributor</th><th>Actions</th>
-          </tr></thead><tbody id="brands-tbody"></tbody></table>
+      <!-- Catalog: drill-down Brands → Devices → Profiles → Cycles -->
+      <div class="tab-panel" id="catalog-tab" role="tabpanel" hidden>
+        <nav class="cat-breadcrumb" id="cat-breadcrumb" aria-label="Catalog navigation"></nav>
+        <div id="cat-merge-bar" class="merge-bar" style="display:none"></div>
+        <div class="admin-search-bar">
+          <input type="text" id="cat-search" placeholder="Filter current level..." autocomplete="off">
         </div>
-      </div>
-
-      <!-- Devices table -->
-      <div class="tab-panel" id="devices-tab" role="tabpanel" hidden>
-        <div class="section-header"><h2 class="section-title">Devices</h2></div>
-        <div class="merge-bar">
-          <span class="text-muted" style="font-size:.8125rem">Merge reassigns all profiles/cycles from the source device into the target, then deletes the source.</span>
-          <div class="merge-controls">
-            <select id="merge-from"><option value="">-- select source device --</option></select>
-            <span>&rarr;</span>
-            <select id="merge-to"><option value="">-- select target device --</option></select>
-            <button class="btn btn-danger btn-sm" id="merge-btn">Merge</button>
-          </div>
-        </div>
-        <div class="admin-table-wrap">
-          <table class="admin-table"><thead><tr>
-            <th>Device ID</th><th>Brand</th><th>Model</th><th>Type</th><th>Status</th><th>&#11088;</th><th>&#10003;</th><th>Owner</th><th>Actions</th>
-          </tr></thead><tbody id="devices-tbody"></tbody></table>
-        </div>
-        <div class="load-more-area"><button class="btn btn-ghost" id="devices-load-more" hidden>Load more</button></div>
-      </div>
-
-      <!-- Profiles table -->
-      <div class="tab-panel" id="profiles-tab" role="tabpanel" hidden>
-        <div class="section-header"><h2 class="section-title">Profiles</h2></div>
-        <div class="merge-bar">
-          <span class="text-muted" style="font-size:.8125rem">Merge reassigns all cycles from the source profile into the target, then deletes the source.</span>
-          <div class="merge-controls">
-            <select id="pmerge-from"><option value="">-- select source profile --</option></select>
-            <span>&rarr;</span>
-            <select id="pmerge-to"><option value="">-- select target profile --</option></select>
-            <button class="btn btn-danger btn-sm" id="pmerge-btn">Merge</button>
-          </div>
-        </div>
-        <div class="admin-table-wrap">
-          <table class="admin-table"><thead><tr>
-            <th>Profile</th><th>Device</th><th>ID</th><th>Status</th><th>Contributor</th><th>Owner</th><th>Actions</th>
-          </tr></thead><tbody id="profiles-tbody"></tbody></table>
-        </div>
+        <div id="cat-content"></div>
       </div>
 
       <!-- Users -->
       <div class="tab-panel" id="users-tab" role="tabpanel" hidden>
         <div class="section-header"><h2 class="section-title">Users</h2></div>
+        <div class="admin-search-bar">
+          <input type="text" id="user-search" placeholder="Search name, login..." autocomplete="off">
+        </div>
         <div class="admin-table-wrap">
           <table class="admin-table"><thead><tr>
             <th>User</th><th>UID</th><th>Status</th><th>Ban reason</th><th>Joined</th><th>Actions</th>
@@ -194,7 +160,7 @@
   </div>
 
   <footer class="site-footer">
-    <span><a href="https://github.com/3dg1luk43/ha_washdata/discussions/48" target="_blank" rel="noopener">Initial idea</a></span>
+    <span>Initial idea by <a href="https://github.com/3dg1luk43/ha_washdata/discussions/48" target="_blank" rel="noopener">oli-z</a></span>
     <span class="foot-sep">&middot;</span>
     <span>Developed by <a href="https://github.com/3dg1luk43" target="_blank" rel="noopener">3dg1luk43</a></span>
     <span class="foot-sep">&middot;</span>

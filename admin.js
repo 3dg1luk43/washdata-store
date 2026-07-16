@@ -9,6 +9,7 @@ import {
   getSiteConfig, setMaintenance, setConfirmThreshold,
   adminSetDeviceOwner, adminSetProfileOwner,
   adminDeleteDevice, adminDeleteBrand, adminDeleteProfile, adminDeleteUser,
+  getReferenceCycles,
 } from './washstore.js';
 import { openSettingsEditor, openPhaseEditor, bindEditorCloseHandlers } from './editors.js';
 
@@ -17,15 +18,23 @@ init(firebaseConfig);
 // ============================================================ state
 let _isAdmin = false;
 let _cyCursor = null;
-let _devCursor = null;
 let _userCursor = null;
 let _cyFilters = { status: '', applianceType: '' };
 let _reviewRecord = null;
+let _userItems = [];
+// Catalog hierarchy state
+let _brandItems = [];
 let _deviceItems = [];
 let _profileItems = [];
-let _userItems = [];
+let _catLevel = 'brands'; // 'brands' | 'devices' | 'profiles' | 'cycles'
+let _catBrand = null;
+let _catDevice = null;
+let _catProfile = null;
+let _catCycles = [];
+let _catCycleCursor = null;
+let _catalogLoaded = false;
 // State for the owner-picker modal (shared by device + profile pickers)
-let _ownerPickerCtx = null; // { record, isProfile, tr }
+let _ownerPickerCtx = null; // { record, isProfile, card }
 
 // ============================================================ dom + toast
 function $(id) { return document.getElementById(id); }
@@ -38,6 +47,10 @@ function toast(msg, type = 'success') {
 }
 
 // ============================================================ helpers
+function filterRows(inputId, tbody) {
+  const q = $(inputId) ? $(inputId).value.trim().toLowerCase() : '';
+  tbody.querySelectorAll('tr').forEach((tr) => { tr.hidden = q ? !((tr.dataset.search || '').includes(q)) : false; });
+}
 function esc(str) {
   if (str == null) return '';
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -159,7 +172,7 @@ onAuth(async (user) => {
 });
 
 // ============================================================ tabs
-const TABS = ['overview', 'cycles', 'brands', 'devices', 'profiles', 'users'];
+const TABS = ['overview', 'catalog', 'cycles', 'users'];
 function switchTab(name) {
   TABS.forEach((t) => {
     $(`${t}-tab`).toggleAttribute('hidden', t !== name);
@@ -169,10 +182,8 @@ function switchTab(name) {
 }
 TABS.forEach((name) => $(`${name}-btn`).addEventListener('click', () => {
   switchTab(name);
+  if (name === 'catalog' && !_catalogLoaded) loadCatalogData();
   if (name === 'cycles' && !$('cycles-tbody').hasChildNodes()) loadCycles(true);
-  if (name === 'brands' && !$('brands-tbody').hasChildNodes()) loadBrands();
-  if (name === 'devices' && !$('devices-tbody').hasChildNodes()) loadDevices(true);
-  if (name === 'profiles' && !$('profiles-tbody').hasChildNodes()) loadProfiles();
   if (name === 'users' && !$('users-tbody').hasChildNodes()) loadUsers(true);
 }));
 
@@ -244,7 +255,7 @@ $('maint-toggle-btn').addEventListener('click', async () => {
 
 // ============================================================ cycles table
 async function loadCycles(reset = false) {
-  if (reset) { _cyCursor = null; $('cycles-tbody').innerHTML = `<tr><td colspan="10" class="tbl-msg">Loading...</td></tr>`; $('cycles-load-more').setAttribute('hidden', ''); }
+  if (reset) { _cyCursor = null; $('cycles-tbody').innerHTML = `<tr><td colspan="10" class="tbl-msg">Loading...</td></tr>`; $('cycles-load-more').setAttribute('hidden', ''); if ($('cy-filter-device')) $('cy-filter-device').value = ''; }
   try {
     const { items, cursor } = await adminListCycles({ status: _cyFilters.status || null, applianceType: _cyFilters.applianceType || null, pageSize: 25, cursor: _cyCursor });
     if (reset) $('cycles-tbody').innerHTML = '';
@@ -259,12 +270,13 @@ async function loadCycles(reset = false) {
 
 function buildCycleRow(c) {
   const tr = document.createElement('tr');
+  tr.dataset.search = `${deviceLabel(c)} ${c.program_lc || ''} ${c.applianceType || ''} ${c.uploaderName || ''}`.toLowerCase();
   tr.innerHTML = `
     <td><code class="mono" style="font-size:.72rem">${esc(truncate(c.id, 8))}</code></td>
     <td>${esc(deviceLabel(c))}</td>
     <td class="truncate" style="max-width:100px" title="${esc(c.program_lc || '')}">${esc(c.program_lc || '')}</td>
     <td><span class="badge badge-type">${esc(typeLabel(c.applianceType))}</span></td>
-    <td><span class="badge badge-${esc(c.status)}">${esc(c.status)}</span></td>
+    <td><span class="badge badge-${esc(c.status)} status-badge">${esc(c.status)}</span></td>
     <td class="text-muted" style="font-size:.72rem">${esc(qcLabel(c.qc))}</td>
     <td class="text-muted truncate" title="${esc(c.uploaderName || '')}">${esc(truncate(c.uploaderName || 'Anon', 14))}</td>
     <td class="text-muted" style="white-space:nowrap;font-size:.72rem">${formatDate(c.createdAt)}</td>
@@ -281,8 +293,8 @@ function buildCycleActions(container, c, tr) {
     try {
       await adminSetCycleStatus(c.id, status);
       c.status = status;
-      const badge = tr.children[4].querySelector('.badge');
-      badge.className = `badge badge-${status}`; badge.textContent = status;
+      const badge = tr.querySelector('.status-badge');
+      if (badge) { badge.className = `badge badge-${status} status-badge`; badge.textContent = status; }
       buildCycleActions(container, c, tr);
       toast(`Set ${status}`);
     } catch (e) { toast(e.message, 'error'); }
@@ -299,21 +311,11 @@ function buildCycleActions(container, c, tr) {
 }
 
 $('cy-filter-apply').addEventListener('click', () => { _cyFilters = { status: $('cy-filter-status').value, applianceType: $('cy-filter-type').value }; loadCycles(true); });
-$('cy-filter-clear').addEventListener('click', () => { $('cy-filter-status').value = ''; $('cy-filter-type').value = ''; _cyFilters = { status: '', applianceType: '' }; loadCycles(true); });
+$('cy-filter-clear').addEventListener('click', () => { $('cy-filter-status').value = ''; $('cy-filter-type').value = ''; if ($('cy-filter-device')) $('cy-filter-device').value = ''; _cyFilters = { status: '', applianceType: '' }; loadCycles(true); });
+$('cy-filter-device').addEventListener('input', () => filterRows('cy-filter-device', $('cycles-tbody')));
 $('cycles-load-more').addEventListener('click', () => loadCycles(false));
 
-// ============================================================ devices table
-function populateDeviceMergeSelects() {
-  const opts = _deviceItems.map((d) => `<option value="${esc(d.id)}">${esc(d.brand)} ${esc(d.model)} (${esc(d.status)})</option>`).join('');
-  ['merge-from', 'merge-to'].forEach((id) => {
-    const sel = $(id);
-    if (!sel) return;
-    const current = sel.value;
-    sel.innerHTML = '<option value="">-- select device --</option>' + opts;
-    if (current) sel.value = current;
-  });
-}
-
+// ============================================================ owner picker modal
 function populateOwnerPicker(currentOwnerId) {
   const sel = $('owner-picker-select');
   if (!sel) return;
@@ -322,77 +324,8 @@ function populateOwnerPicker(currentOwnerId) {
   if (currentOwnerId) sel.value = currentOwnerId;
 }
 
-async function loadDevices(reset = false) {
-  if (reset) { _devCursor = null; _deviceItems = []; $('devices-tbody').innerHTML = `<tr><td colspan="9" class="tbl-msg">Loading...</td></tr>`; $('devices-load-more').setAttribute('hidden', ''); }
-  try {
-    const { items, cursor } = await adminListDevices({ pageSize: 40, cursor: _devCursor });
-    if (reset) $('devices-tbody').innerHTML = '';
-    // Pending first so items needing review are easy to find.
-    items.sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1));
-    _deviceItems = [..._deviceItems, ...items];
-    populateDeviceMergeSelects();
-    if (_deviceItems.length === 0 && !_devCursor) { $('devices-tbody').innerHTML = `<tr><td colspan="9" class="tbl-msg">No devices found.</td></tr>`; }
-    else { items.forEach((d) => $('devices-tbody').appendChild(buildDeviceRow(d))); }
-    _devCursor = cursor; $('devices-load-more').toggleAttribute('hidden', !cursor);
-  } catch (e) {
-    if (reset) $('devices-tbody').innerHTML = `<tr><td colspan="9" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
-    toast(e.message, 'error');
-  }
-}
-
-function buildDeviceRow(d) {
-  const tr = document.createElement('tr');
-  tr.innerHTML = `
-    <td><code class="mono" style="font-size:.7rem">${esc(truncate(d.id, 26))}</code></td>
-    <td>${esc(d.brand || '')}</td>
-    <td>${esc(d.model || '')}</td>
-    <td><span class="badge badge-type">${esc(typeLabel(d.applianceType))}</span></td>
-    <td><span class="badge badge-${esc(d.status)}">${esc(d.status)}</span></td>
-    <td class="text-muted">${d.favoriteCount || 0}</td>
-    <td class="text-muted">${d.confirmCount || 0}</td>
-    <td class="text-muted" style="font-size:.75rem">${esc(resolveOwnerLabel(d.ownerId))}</td>
-    <td><div class="action-cell"></div></td>`;
-  const cell = tr.querySelector('.action-cell');
-  const mkApprove = () => {
-    const b = document.createElement('button'); b.className = 'btn btn-ghost btn-sm'; b.textContent = 'Approve';
-    b.addEventListener('click', async () => {
-      try {
-        await adminSetDeviceStatus(d.id, 'approved'); d.status = 'approved';
-        const badge = tr.children[4].querySelector('.badge'); badge.className = 'badge badge-approved'; badge.textContent = 'approved';
-        b.remove();
-        toast('Device approved');
-      } catch (e) { toast(e.message, 'error'); }
-    });
-    cell.appendChild(b);
-  };
-  if (d.status !== 'approved') mkApprove();
-  // Hard delete instead of soft-disable
-  const delBtn = document.createElement('button');
-  delBtn.className = 'btn btn-danger btn-sm'; delBtn.textContent = 'Delete';
-  delBtn.addEventListener('click', async () => {
-    if (!confirm(`Permanently delete ${d.brand} ${d.model} and all its profiles and cycles? This cannot be undone.`)) return;
-    delBtn.disabled = true;
-    try { await adminDeleteDevice(d.id); tr.remove(); toast('Device deleted'); }
-    catch (e) { delBtn.disabled = false; toast(e.message, 'error'); }
-  });
-  cell.appendChild(delBtn);
-  const useAsTarget = document.createElement('button');
-  useAsTarget.className = 'btn btn-ghost btn-sm'; useAsTarget.textContent = 'Merge target';
-  useAsTarget.addEventListener('click', () => { const sel = $('merge-to'); if (sel) sel.value = d.id; });
-  cell.appendChild(useAsTarget);
-  const editSettings = document.createElement('button');
-  editSettings.className = 'btn btn-ghost btn-sm'; editSettings.textContent = 'Edit settings';
-  editSettings.addEventListener('click', () => openSettingsEditor(d));
-  cell.appendChild(editSettings);
-  const setOwner = document.createElement('button');
-  setOwner.className = 'btn btn-ghost btn-sm'; setOwner.textContent = 'Set owner';
-  setOwner.addEventListener('click', () => openOwnerPicker(d, tr));
-  cell.appendChild(setOwner);
-  return tr;
-}
-
-function openOwnerPicker(record, tr, isProfile = false) {
-  _ownerPickerCtx = { record, isProfile, tr };
+function openOwnerPicker(record, card, isProfile = false) {
+  _ownerPickerCtx = { record, isProfile, card };
   $('owner-picker-modal-title').textContent = isProfile ? 'Set Profile Owner' : 'Set Device Owner';
   populateOwnerPicker(record.ownerId);
   $('owner-picker-modal').removeAttribute('hidden');
@@ -402,10 +335,8 @@ function openOwnerPicker(record, tr, isProfile = false) {
       if (isProfile) await adminSetProfileOwner(record.id, uid);
       else await adminSetDeviceOwner(record.id, uid);
       record.ownerId = uid;
-      const ownerLabel = resolveOwnerLabel(uid);
-      // Device: owner is col 7; Profile: owner is col 5 (0-indexed, after adding owner col)
-      const ownerCell = tr.children[isProfile ? 5 : 7];
-      if (ownerCell) ownerCell.textContent = ownerLabel;
+      const ownerEl = _ownerPickerCtx.card && _ownerPickerCtx.card.querySelector('.cat-owner-label');
+      if (ownerEl) ownerEl.textContent = uid ? resolveOwnerLabel(uid) : '(none)';
       $('owner-picker-modal').setAttribute('hidden', '');
       toast(uid ? 'Owner set' : 'Owner cleared');
     } catch (e) { toast(e.message, 'error'); }
@@ -415,39 +346,7 @@ $('owner-picker-close').addEventListener('click', () => $('owner-picker-modal').
 $('owner-picker-cancel').addEventListener('click', () => $('owner-picker-modal').setAttribute('hidden', ''));
 $('owner-picker-modal').addEventListener('click', (e) => { if (e.target === $('owner-picker-modal')) $('owner-picker-modal').setAttribute('hidden', ''); });
 
-$('merge-btn').addEventListener('click', async () => {
-  const from = $('merge-from').value;
-  const to = $('merge-to').value;
-  if (!from || !to) { toast('Select both source and target device', 'error'); return; }
-  if (from === to) { toast('Source and target must be different', 'error'); return; }
-  const fromDev = _deviceItems.find((d) => d.id === from);
-  const toDev = _deviceItems.find((d) => d.id === to);
-  const fromLabel = fromDev ? `${fromDev.brand} ${fromDev.model}` : from;
-  const toLabel = toDev ? `${toDev.brand} ${toDev.model}` : to;
-  if (!confirm(`Merge "${fromLabel}" into "${toLabel}"? All its profiles/cycles are reassigned and the source device is deleted.`)) return;
-  try { await adminMergeDevices(from, to); toast('Merged'); $('merge-from').value = ''; $('merge-to').value = ''; loadDevices(true); }
-  catch (e) { toast(e.message, 'error'); }
-});
-$('devices-load-more').addEventListener('click', () => loadDevices(false));
-
-// ============================================================ brands review
-async function loadBrands() {
-  $('brands-tbody').innerHTML = `<tr><td colspan="5" class="tbl-msg">Loading...</td></tr>`;
-  try {
-    const { items } = await adminListBrands();
-    $('brands-tbody').innerHTML = '';
-    if (items.length === 0) { $('brands-tbody').innerHTML = `<tr><td colspan="5" class="tbl-msg">No brands found.</td></tr>`; return; }
-    // Pending first so they are easy to review.
-    items.sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1));
-    items.forEach((b) => $('brands-tbody').appendChild(buildBrandRow(b)));
-  } catch (e) {
-    $('brands-tbody').innerHTML = `<tr><td colspan="5" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
-    toast(e.message, 'error');
-  }
-}
-
-// Optimistically adjust the Overview "Pending Review" count so the UI matches what a
-// refresh would show, without re-querying.
+// Optimistically adjust the Overview "Pending Review" count.
 function bumpPending(delta) {
   if (!delta) return;
   const el = document.querySelector('#stats-grid .c-pending');
@@ -456,12 +355,10 @@ function bumpPending(delta) {
   if (!isNaN(n)) el.textContent = String(Math.max(0, n + delta));
 }
 
-// Shared Approve/Delete action cell for brands & profiles: rebuilds itself after a
-// status change (so Approve disappears once approved), updates the row badge, and
-// adjusts the pending count. `extra` appends type-specific buttons (e.g. Merge target).
-// `deleter(id)` is called for hard delete; if omitted the Delete button is not shown.
-function buildStatusActions(tr, rec, setter, label, extra, deleter) {
-  const cell = tr.querySelector('.action-cell');
+// Shared status action builder. Works on any container that has a child .action-cell.
+// Rebuilds itself after status change; updates .status-badge; adjusts pending count.
+function buildStatusActions(container, rec, setter, label, extra, deleter) {
+  const cell = container.querySelector('.action-cell');
   cell.innerHTML = '';
   let saving = false;
   const mk = (text, status) => {
@@ -473,9 +370,11 @@ function buildStatusActions(tr, rec, setter, label, extra, deleter) {
       const wasPending = rec.status === 'pending';
       try {
         await setter(rec.id, status); rec.status = status;
-        const badge = tr.querySelector('.badge'); if (badge) { badge.className = `badge badge-${status}`; badge.textContent = status; }
+        const badge = container.querySelector('.status-badge');
+        if (badge) { badge.className = `badge badge-${status} status-badge`; badge.textContent = status; }
+        container.classList.toggle('cat-pending', status === 'pending');
         bumpPending((wasPending ? -1 : 0) + (status === 'pending' ? 1 : 0));
-        buildStatusActions(tr, rec, setter, label, extra, deleter);
+        buildStatusActions(container, rec, setter, label, extra, deleter);
         toast(`${label} ${status}`);
       } catch (e) {
         saving = false;
@@ -494,7 +393,7 @@ function buildStatusActions(tr, rec, setter, label, extra, deleter) {
       try {
         await deleter(rec.id);
         bumpPending(rec.status === 'pending' ? -1 : 0);
-        tr.remove();
+        container.remove();
         toast(`${label} deleted`);
       } catch (e) { delBtn.disabled = false; toast(e.message, 'error'); }
     });
@@ -503,89 +402,248 @@ function buildStatusActions(tr, rec, setter, label, extra, deleter) {
   if (extra) extra(cell);
 }
 
-function buildBrandRow(b) {
-  const tr = document.createElement('tr');
-  tr.innerHTML = `
-    <td>${esc(b.brand || '')}</td>
-    <td><code class="mono" style="font-size:.7rem">${esc(b.id || '')}</code></td>
-    <td><span class="badge badge-${esc(b.status)}">${esc(b.status)}</span></td>
-    <td class="text-muted" style="font-size:.75rem">${esc(b.createdByName || '-')}</td>
-    <td><div class="action-cell"></div></td>`;
-  buildStatusActions(tr, b, adminSetBrandStatus, 'Brand', null, adminDeleteBrand);
-  return tr;
-}
-
-// ============================================================ profiles review
-function populateProfileMergeSelects() {
-  const opts = _profileItems.map((p) => {
-    const dev = String(p.deviceId || '').split('__').slice(1).join(' ').trim() || p.deviceId || '';
-    return `<option value="${esc(p.id)}">${esc(p.program)}${dev ? ' (' + esc(dev) + ')' : ''}</option>`;
-  }).join('');
-  ['pmerge-from', 'pmerge-to'].forEach((id) => {
-    const sel = $(id);
-    if (!sel) return;
-    const current = sel.value;
-    sel.innerHTML = '<option value="">-- select profile --</option>' + opts;
-    if (current) sel.value = current;
-  });
-}
-
-async function loadProfiles() {
-  $('profiles-tbody').innerHTML = `<tr><td colspan="7" class="tbl-msg">Loading...</td></tr>`;
+// ============================================================ catalog
+async function loadCatalogData() {
+  $('cat-content').innerHTML = '<div class="loading-center" style="padding:3rem"><div class="loading-spinner"></div></div>';
+  $('cat-merge-bar').style.display = 'none';
   try {
-    const { items } = await adminListProfiles();
-    _profileItems = items;
-    populateProfileMergeSelects();
-    $('profiles-tbody').innerHTML = '';
-    if (items.length === 0) { $('profiles-tbody').innerHTML = `<tr><td colspan="7" class="tbl-msg">No profiles found.</td></tr>`; return; }
-    items.sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1));
-    items.forEach((p) => $('profiles-tbody').appendChild(buildProfileRow(p)));
+    const [brandRes, devRes, profRes] = await Promise.all([
+      adminListBrands({ pageSize: 500 }),
+      adminListDevices({ pageSize: 500 }),
+      adminListProfiles({ pageSize: 500 }),
+    ]);
+    _brandItems = brandRes.items || [];
+    _deviceItems = devRes.items || [];
+    _profileItems = profRes.items || [];
+    _catalogLoaded = true;
+    _catLevel = 'brands'; _catBrand = null; _catDevice = null; _catProfile = null;
+    renderCatalog();
   } catch (e) {
-    $('profiles-tbody').innerHTML = `<tr><td colspan="7" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
+    $('cat-content').innerHTML = `<div class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</div>`;
     toast(e.message, 'error');
   }
 }
 
-function buildProfileRow(p) {
-  const tr = document.createElement('tr');
-  const dev = String(p.deviceId || '').split('__').slice(1).join(' ').trim() || p.deviceId || '-';
-  tr.innerHTML = `
-    <td>${esc(p.program || '')}</td>
-    <td class="text-muted">${esc(dev)}</td>
-    <td><code class="mono" style="font-size:.68rem">${esc(truncate(p.id, 30))}</code></td>
-    <td><span class="badge badge-${esc(p.status)}">${esc(p.status)}</span></td>
-    <td class="text-muted" style="font-size:.75rem">${esc(p.createdByName || '-')}</td>
-    <td class="text-muted" style="font-size:.75rem">${esc(resolveOwnerLabel(p.ownerId))}</td>
-    <td><div class="action-cell"></div></td>`;
-  buildStatusActions(tr, p, adminSetProfileStatus, 'Profile', (cell) => {
-    const target = document.createElement('button');
-    target.className = 'btn btn-ghost btn-sm'; target.textContent = 'Merge target';
-    target.addEventListener('click', () => { const sel = $('pmerge-to'); if (sel) sel.value = p.id; });
-    cell.appendChild(target);
-    const editPhases = document.createElement('button');
-    editPhases.className = 'btn btn-ghost btn-sm'; editPhases.textContent = 'Edit phases';
-    editPhases.addEventListener('click', () => openPhaseEditor(p));
-    cell.appendChild(editPhases);
-    const setOwnerBtn = document.createElement('button');
-    setOwnerBtn.className = 'btn btn-ghost btn-sm'; setOwnerBtn.textContent = 'Set owner';
-    setOwnerBtn.addEventListener('click', () => openOwnerPicker(p, tr, true));
-    cell.appendChild(setOwnerBtn);
-  }, adminDeleteProfile);
-  return tr;
+function catNavigate(level, brand, device, profile) {
+  _catLevel = level;
+  _catBrand = brand || null;
+  _catDevice = device || null;
+  _catProfile = profile || null;
+  if ($('cat-search')) $('cat-search').value = '';
+  renderCatalog();
 }
 
-$('pmerge-btn').addEventListener('click', async () => {
-  const from = $('pmerge-from').value;
-  const to = $('pmerge-to').value;
-  if (!from || !to) { toast('Select both source and target profile', 'error'); return; }
-  if (from === to) { toast('Source and target must be different', 'error'); return; }
-  const fromP = _profileItems.find((p) => p.id === from);
-  const toP = _profileItems.find((p) => p.id === to);
-  const fromLabel = fromP ? fromP.program : from;
-  const toLabel = toP ? toP.program : to;
-  if (!confirm(`Merge "${fromLabel}" into "${toLabel}"? All its cycles are reassigned and the source profile is deleted.`)) return;
-  try { await adminMergeProfiles(from, to); toast('Merged'); $('pmerge-from').value = ''; $('pmerge-to').value = ''; loadProfiles(); }
-  catch (e) { toast(e.message, 'error'); }
+function renderCatBreadcrumb() {
+  const crumbs = [{ label: 'All Brands', level: 'brands' }];
+  if (_catBrand) crumbs.push({ label: _catBrand.brand, level: 'devices' });
+  if (_catDevice) crumbs.push({ label: _catDevice.model || truncate(_catDevice.id, 20), level: 'profiles' });
+  if (_catProfile) crumbs.push({ label: _catProfile.program, level: 'cycles' });
+  $('cat-breadcrumb').innerHTML = crumbs.map((c, i) => {
+    if (i === crumbs.length - 1) return `<span class="cat-bc-current">${esc(c.label)}</span>`;
+    return `<button class="cat-bc-btn" data-cat-lvl="${esc(c.level)}">${esc(c.label)}</button><span class="cat-bc-sep"> / </span>`;
+  }).join('');
+  $('cat-breadcrumb').querySelectorAll('[data-cat-lvl]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const lvl = btn.dataset.catLvl;
+      if (lvl === 'brands') catNavigate('brands');
+      else if (lvl === 'devices') catNavigate('devices', _catBrand);
+      else if (lvl === 'profiles') catNavigate('profiles', _catBrand, _catDevice);
+    });
+  });
+}
+
+function renderCatalog() {
+  renderCatBreadcrumb();
+  switch (_catLevel) {
+    case 'brands': renderCatBrands(); break;
+    case 'devices': renderCatDevices(); break;
+    case 'profiles': renderCatProfiles(); break;
+    case 'cycles': renderCatCyclesLevel(); break;
+  }
+}
+
+// Render a contextual merge bar scoped to the current level's items.
+function catMergebar(items, noun, getLabel, mergeAction, afterMerge) {
+  const bar = $('cat-merge-bar');
+  if (items.length < 2) { bar.style.display = 'none'; return; }
+  bar.style.display = '';
+  bar.innerHTML = '';
+  const labelEl = document.createElement('span'); labelEl.className = 'merge-bar-label'; labelEl.textContent = 'Merge';
+  const mkSel = (placeholder) => {
+    const sel = document.createElement('select');
+    sel.style.cssText = 'flex:1;min-width:9rem;max-width:22rem';
+    sel.innerHTML = `<option value="">-- ${placeholder} --</option>` + items.map((i) => `<option value="${esc(i.id)}">${esc(getLabel(i))}</option>`).join('');
+    return sel;
+  };
+  const fromSel = mkSel(`source ${noun}`);
+  const arrow = document.createElement('span'); arrow.className = 'text-muted'; arrow.style.flexShrink = '0'; arrow.textContent = '→';
+  const toSel = mkSel(`target ${noun}`);
+  const mergeBtn = document.createElement('button'); mergeBtn.className = 'btn btn-danger btn-sm'; mergeBtn.textContent = 'Merge';
+  mergeBtn.addEventListener('click', async () => {
+    const from = fromSel.value; const to = toSel.value;
+    if (!from || !to) { toast(`Select both source and target ${noun}`, 'error'); return; }
+    if (from === to) { toast('Source and target must be different', 'error'); return; }
+    const fromItem = items.find((i) => i.id === from);
+    const toItem = items.find((i) => i.id === to);
+    if (!confirm(`Merge "${fromItem ? getLabel(fromItem) : from}" into "${toItem ? getLabel(toItem) : to}"? This cannot be undone.`)) return;
+    mergeBtn.disabled = true;
+    try {
+      await mergeAction(from, to); toast('Merged');
+      _catalogLoaded = false;
+      await loadCatalogData();
+      afterMerge();
+    } catch (e) { mergeBtn.disabled = false; toast(e.message, 'error'); }
+  });
+  const hint = document.createElement('span'); hint.className = 'merge-bar-hint';
+  hint.textContent = `Reassigns all data from source to target ${noun}, then deletes source.`;
+  bar.append(labelEl, fromSel, arrow, toSel, mergeBtn, hint);
+}
+
+// Build a catalog card element. metaHTML is trusted pre-escaped HTML.
+function catMakeCard(rec, name, metaHTML) {
+  const card = document.createElement('div');
+  card.className = `cat-card${rec.status === 'pending' ? ' cat-pending' : ''}`;
+  const info = document.createElement('div'); info.className = 'cat-card-info';
+  info.innerHTML = `
+    <div class="cat-card-name">${esc(name)} <span class="badge badge-${esc(rec.status)} status-badge">${esc(rec.status)}</span></div>
+    <div class="cat-card-meta">${metaHTML}</div>`;
+  const actions = document.createElement('div'); actions.className = 'cat-card-actions action-cell';
+  card.append(info, actions);
+  return card;
+}
+
+function catSearchFilter(items, getSearchStr) {
+  const q = $('cat-search') ? $('cat-search').value.trim().toLowerCase() : '';
+  return q ? items.filter((i) => getSearchStr(i).toLowerCase().includes(q)) : items;
+}
+
+// Level 1 — Brands
+function renderCatBrands() {
+  $('cat-merge-bar').style.display = 'none';
+  const sorted = [..._brandItems].sort((a, b) =>
+    (a.status === 'pending' ? -1 : 0) - (b.status === 'pending' ? -1 : 0) || (a.brand || '').localeCompare(b.brand || ''));
+  const items = catSearchFilter(sorted, (b) => `${b.brand || ''} ${b.status || ''} ${b.createdByName || ''}`);
+  const content = $('cat-content'); content.innerHTML = '';
+  if (!items.length) { content.innerHTML = '<div class="tbl-msg">No brands found.</div>'; return; }
+  const list = document.createElement('div'); list.className = 'cat-list';
+  items.forEach((brand) => {
+    const devCount = _deviceItems.filter((d) => d.brand_lc === brand.id).length;
+    const meta = `${devCount} device${devCount !== 1 ? 's' : ''}${brand.createdByName ? ` · by ${esc(brand.createdByName)}` : ''}`;
+    const card = catMakeCard(brand, brand.brand, meta);
+    buildStatusActions(card, brand, adminSetBrandStatus, 'Brand', (cell) => {
+      const drill = document.createElement('button'); drill.className = 'btn-drill'; drill.textContent = 'Devices →';
+      drill.addEventListener('click', () => catNavigate('devices', brand));
+      cell.appendChild(drill);
+    }, adminDeleteBrand);
+    list.appendChild(card);
+  });
+  content.appendChild(list);
+}
+
+// Level 2 — Devices for selected brand
+function renderCatDevices() {
+  const all = _deviceItems.filter((d) => d.brand_lc === _catBrand.id);
+  catMergebar(all, 'device', (d) => `${d.model || d.id} (${d.status})`, adminMergeDevices,
+    () => catNavigate('devices', _catBrand));
+  const sorted = [...all].sort((a, b) => (a.status === 'pending' ? -1 : 0) - (b.status === 'pending' ? -1 : 0));
+  const items = catSearchFilter(sorted, (d) => `${d.model || ''} ${d.applianceType || ''} ${d.status || ''}`);
+  const content = $('cat-content'); content.innerHTML = '';
+  if (!items.length) { content.innerHTML = '<div class="tbl-msg">No devices for this brand.</div>'; return; }
+  const list = document.createElement('div'); list.className = 'cat-list';
+  items.forEach((device) => {
+    const profCount = _profileItems.filter((p) => p.deviceId === device.id).length;
+    const metaParts = [
+      esc(typeLabel(device.applianceType)),
+      `${profCount} profile${profCount !== 1 ? 's' : ''}`,
+      device.favoriteCount ? `⭐ ${device.favoriteCount}` : null,
+      device.ownerId ? `owner: <span class="cat-owner-label">${esc(resolveOwnerLabel(device.ownerId))}</span>` : null,
+    ].filter(Boolean).join(' · ');
+    const card = catMakeCard(device, device.model || device.id, metaParts);
+    buildStatusActions(card, device, adminSetDeviceStatus, 'Device', (cell) => {
+      const settBtn = document.createElement('button'); settBtn.className = 'btn btn-ghost btn-sm'; settBtn.textContent = 'Settings';
+      settBtn.addEventListener('click', () => openSettingsEditor(device));
+      cell.appendChild(settBtn);
+      const ownerBtn = document.createElement('button'); ownerBtn.className = 'btn btn-ghost btn-sm'; ownerBtn.textContent = 'Set owner';
+      ownerBtn.addEventListener('click', () => openOwnerPicker(device, card));
+      cell.appendChild(ownerBtn);
+      const drill = document.createElement('button'); drill.className = 'btn-drill'; drill.textContent = 'Profiles →';
+      drill.addEventListener('click', () => catNavigate('profiles', _catBrand, device));
+      cell.appendChild(drill);
+    }, async (id) => { await adminDeleteDevice(id); _deviceItems = _deviceItems.filter((d) => d.id !== id); });
+    list.appendChild(card);
+  });
+  content.appendChild(list);
+}
+
+// Level 3 — Profiles for selected device
+function renderCatProfiles() {
+  const all = _profileItems.filter((p) => p.deviceId === _catDevice.id);
+  catMergebar(all, 'profile', (p) => `${p.program || p.id} (${p.status})`, adminMergeProfiles,
+    () => catNavigate('profiles', _catBrand, _catDevice));
+  const sorted = [...all].sort((a, b) => (a.status === 'pending' ? -1 : 0) - (b.status === 'pending' ? -1 : 0));
+  const items = catSearchFilter(sorted, (p) => `${p.program || ''} ${p.status || ''} ${p.createdByName || ''}`);
+  const content = $('cat-content'); content.innerHTML = '';
+  if (!items.length) { content.innerHTML = '<div class="tbl-msg">No profiles for this device.</div>'; return; }
+  const list = document.createElement('div'); list.className = 'cat-list';
+  items.forEach((profile) => {
+    const metaParts = [
+      profile.createdByName ? `by ${esc(profile.createdByName)}` : null,
+      profile.ownerId ? `owner: <span class="cat-owner-label">${esc(resolveOwnerLabel(profile.ownerId))}</span>` : null,
+    ].filter(Boolean).join(' · ');
+    const card = catMakeCard(profile, profile.program || profile.id, metaParts);
+    buildStatusActions(card, profile, adminSetProfileStatus, 'Profile', (cell) => {
+      const phaseBtn = document.createElement('button'); phaseBtn.className = 'btn btn-ghost btn-sm'; phaseBtn.textContent = 'Edit phases';
+      phaseBtn.addEventListener('click', () => openPhaseEditor(profile));
+      cell.appendChild(phaseBtn);
+      const ownerBtn = document.createElement('button'); ownerBtn.className = 'btn btn-ghost btn-sm'; ownerBtn.textContent = 'Set owner';
+      ownerBtn.addEventListener('click', () => openOwnerPicker(profile, card, true));
+      cell.appendChild(ownerBtn);
+      const drill = document.createElement('button'); drill.className = 'btn-drill'; drill.textContent = 'Cycles →';
+      drill.addEventListener('click', () => catNavigate('cycles', _catBrand, _catDevice, profile));
+      cell.appendChild(drill);
+    }, async (id) => { await adminDeleteProfile(id); _profileItems = _profileItems.filter((p) => p.id !== id); });
+    list.appendChild(card);
+  });
+  content.appendChild(list);
+}
+
+// Level 4 — Cycles for selected profile
+async function renderCatCyclesLevel() {
+  $('cat-merge-bar').style.display = 'none';
+  const content = $('cat-content');
+  content.innerHTML = '<div class="loading-center" style="padding:2rem"><div class="loading-spinner"></div></div>';
+  try {
+    const { items } = await getReferenceCycles(_catProfile.id, { includePending: true });
+    content.innerHTML = '';
+    if (!items.length) { content.innerHTML = '<div class="tbl-msg">No cycles for this profile.</div>'; return; }
+    const wrap = document.createElement('div'); wrap.className = 'admin-table-wrap';
+    const tbl = document.createElement('table'); tbl.className = 'admin-table';
+    tbl.innerHTML = '<thead><tr><th>ID</th><th>Status</th><th>Src</th><th>Uploader</th><th>Date</th><th>DL</th><th>Actions</th></tr></thead>';
+    const tbody = document.createElement('tbody');
+    items.forEach((c) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><code class="mono" style="font-size:.72rem">${esc(truncate(c.id, 8))}</code></td>
+        <td><span class="badge badge-${esc(c.status)} status-badge">${esc(c.status)}</span></td>
+        <td class="text-muted" style="font-size:.72rem">${esc(qcLabel(c.qc))}</td>
+        <td class="text-muted truncate" title="${esc(c.uploaderName || '')}">${esc(truncate(c.uploaderName || 'Anon', 14))}</td>
+        <td class="text-muted" style="white-space:nowrap;font-size:.72rem">${formatDate(c.createdAt)}</td>
+        <td class="text-muted">${c.downloads || 0}</td>
+        <td><div class="action-cell"></div></td>`;
+      buildCycleActions(tr.querySelector('.action-cell'), c, tr);
+      tbody.appendChild(tr);
+    });
+    tbl.appendChild(tbody); wrap.appendChild(tbl); content.appendChild(wrap);
+  } catch (e) {
+    content.innerHTML = `<div class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</div>`;
+    toast(e.message, 'error');
+  }
+}
+
+$('cat-search').addEventListener('input', () => {
+  if (_catLevel === 'brands') renderCatBrands();
+  else if (_catLevel === 'devices') renderCatDevices();
+  else if (_catLevel === 'profiles') renderCatProfiles();
 });
 
 // ============================================================ users table
@@ -607,6 +665,7 @@ async function loadUsers(reset = false) {
 function buildUserRow(u) {
   const tr = document.createElement('tr');
   const name = u.displayName || u.githubLogin || u.email || u.uid.slice(0, 12);
+  tr.dataset.search = `${name} ${u.githubLogin || ''} ${u.email || ''} ${u.status || ''}`.toLowerCase();
   const initial = name.charAt(0).toUpperCase();
   const avatar = u.photoURL ? `<img src="${esc(u.photoURL)}" alt="">` : initial;
   tr.innerHTML = `
@@ -661,6 +720,7 @@ function refreshUserRow(tr, u) {
   cells[3].textContent = u.banReason || '-';
   buildUserActions(cells[5].querySelector('.action-cell'), u, tr);
 }
+$('user-search').addEventListener('input', () => filterRows('user-search', $('users-tbody')));
 $('users-load-more').addEventListener('click', () => loadUsers(false));
 
 // ============================================================ review modal
