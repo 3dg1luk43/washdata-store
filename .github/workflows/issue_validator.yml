@@ -1,0 +1,233 @@
+name: Issue Validator
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      issue_body:
+        description: "Paste a simulated issue body to validate (dry-run - nothing is posted)"
+        required: true
+      issue_number:
+        description: "Real issue number to post the result to (leave blank for dry-run only)"
+        required: false
+        default: ""
+
+permissions:
+  issues: write
+
+jobs:
+  handle-fine-command:
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'issue_comment' &&
+      startsWith(github.event.comment.body, '/fine') &&
+      (github.event.comment.author_association == 'OWNER' ||
+       github.event.comment.author_association == 'MEMBER' ||
+       github.event.comment.author_association == 'COLLABORATOR')
+
+    steps:
+      - name: Handle /fine command
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = context.payload.issue.number;
+            const incompleteLabel = 'more info required';
+            const currentLabels = context.payload.issue.labels.map(l => l.name);
+
+            if (currentLabels.includes(incompleteLabel)) {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                name: incompleteLabel,
+              });
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: `✅ Cleared by @${context.payload.comment.user.login} - issue marked as fine and queued for review.`,
+            });
+
+  handle-reporter-response:
+    runs-on: ubuntu-latest
+    # When the reporter responds via a comment (instead of editing the issue body),
+    # transition the issue from "more info required" to "awaiting maintainer review"
+    # so the auto-closer doesn't close it as unanswered. The validator can't re-check
+    # comment content (it inspects body fields), so a maintainer reviews instead.
+    if: >
+      github.event_name == 'issue_comment' &&
+      github.event.comment.user.type != 'Bot' &&
+      github.event.comment.user.login == github.event.issue.user.login &&
+      !startsWith(github.event.comment.body, '/fine') &&
+      contains(github.event.issue.labels.*.name, 'more info required')
+
+    steps:
+      - name: Swap labels on reporter response
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = context.payload.issue.number;
+            const incompleteLabel = 'more info required';
+            const reviewLabel = 'awaiting maintainer review';
+
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              name: incompleteLabel,
+            }).catch(e => console.log(`Could not remove ${incompleteLabel}: ${e.message}`));
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              labels: [reviewLabel],
+            });
+
+            console.log(`#${issueNumber}: reporter responded via comment, swapped to "${reviewLabel}".`);
+
+  validate-bug-report:
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' &&
+       contains(github.event.issue.labels.*.name, 'bug'))
+
+    steps:
+      - name: Validate bug report completeness
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const isDryRun = context.eventName === 'workflow_dispatch';
+            const issue = isDryRun ? {
+              body: context.payload.inputs.issue_body,
+              number: parseInt(context.payload.inputs.issue_number) || null,
+              user: { login: 'dry-run-user', type: 'User' },
+              labels: [],
+            } : context.payload.issue;
+            const body = issue.body || '';
+            const incompleteLabel = 'more info required';
+
+            // ── Checks ────────────────────────────────────────────────────────────
+            const problems = [];
+
+            // Helper: pull the free-text under a "### Heading" up to the next heading.
+            const section = (heading) => {
+              const re = new RegExp(`###\\s*${heading}\\s*\\n+([\\s\\S]*?)(?=\\n###|$)`);
+              const m = body.match(re);
+              return m ? m[1].trim() : '';
+            };
+            const isBlank = (v) => !v || v === '_No response_';
+
+            // 1. Affected Page / URL - which part of the store the bug is on
+            const page = section('Affected Page');
+            if (isBlank(page) || page === 'e.g. index (browse), admin, connect, create, docs, or a full URL') {
+              problems.push('**Affected Page / URL** is missing. Tell us which page the bug happens on (e.g. `index` / browse, `admin`, `connect`, `create`, `docs`) or paste the full URL.');
+            }
+
+            // 2. Browser & version
+            const browser = section('Browser & Version');
+            if (isBlank(browser) || browser === 'e.g. Firefox 141, Chrome 138, Safari 18') {
+              problems.push('**Browser & Version** is missing. Store bugs are often browser-specific — tell us the browser and version you saw this on (e.g. `Firefox 141`).');
+            }
+
+            // 3. Console errors / evidence - the most important field. Must contain
+            //    real output, a screenshot/attachment, or a stated N/A reason.
+            const logContent = section('Console Errors / Evidence');
+            const logIsExplainedNA = /^n\/?a/i.test(logContent);
+            const hasAttachment = /https:\/\/github\.com\/[^)]+\/files\//.test(logContent) ||
+              /https:\/\/github\.com\/user-attachments\//.test(logContent);
+            const hasLogs = logContent &&
+              logContent !== '_No response_' &&
+              logContent !== 'Paste browser console output (F12 → Console) or attach a screenshot here...' &&
+              (logContent.length > 30 || hasAttachment);
+            if (!hasLogs && !logIsExplainedNA) {
+              problems.push(
+                '**Console Errors / Evidence** is missing or appears empty. This is the most useful information for diagnosing store bugs. ' +
+                'Open your browser DevTools (F12) → **Console** tab, reproduce the problem, and paste any red error lines — or attach a screenshot of the console/network tab. ' +
+                'If there is genuinely no console output relevant to this report (for example: a documentation typo or a purely visual layout nitpick), ' +
+                'replace the placeholder with `N/A` followed by a short one-line reason — for example: `N/A - typo on docs page, no console output involved`. ' +
+                'Do not write `N/A` just because collecting it is inconvenient.'
+              );
+            }
+
+            // ── Label management ─────────────────────────────────────────────────
+            const currentLabels = issue.labels.map(l => l.name);
+            const hasIncompleteLabel = currentLabels.includes(incompleteLabel);
+            const targetIssueNumber = issue.number;
+            const canPost = !isDryRun || (isDryRun && targetIssueNumber);
+
+            if (problems.length > 0) {
+              const problemList = problems.map(p => `- ${p}`).join('\n');
+              const comment = `👋 Hey @${issue.user.login}, thanks for the report!\n\nLooks like a few things are missing that we need before we can investigate:\n\n${problemList}\n\nPlease update the issue with the missing information. Without it, we won't be able to reproduce or debug the problem, and the issue may be closed.\n\n> **How to edit this issue:** click the three-dot menu (⋯) at the top-right of your post → *Edit*.\n\n_This check runs automatically. Once the issue is updated, it will be re-evaluated._`;
+
+              if (isDryRun) {
+                console.log('🧪 DRY RUN - validation result: INCOMPLETE');
+                console.log('Problems found:\n' + problemList);
+                console.log('Comment that would be posted:\n' + comment);
+                if (!canPost) process.exit(0);
+              }
+
+              if (canPost) {
+                if (!hasIncompleteLabel) {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: targetIssueNumber,
+                    labels: [incompleteLabel],
+                  });
+                }
+
+                const comments = await github.rest.issues.listComments({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: targetIssueNumber,
+                });
+
+                const botComments = comments.data.filter(
+                  c => c.user.type === 'Bot' && c.body.includes('missing that we need before we can investigate')
+                );
+
+                if (botComments.length === 0) {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: targetIssueNumber,
+                    body: comment,
+                  });
+                } else {
+                  await github.rest.issues.updateComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    comment_id: botComments[0].id,
+                    body: comment,
+                  });
+                }
+              }
+            } else if (hasIncompleteLabel || isDryRun) {
+              if (isDryRun) {
+                console.log('✅ DRY RUN - validation result: COMPLETE (all required fields present)');
+                if (!canPost) process.exit(0);
+              }
+
+              if (!isDryRun && hasIncompleteLabel) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  name: incompleteLabel,
+                });
+
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `Thanks for filling in the missing details, @${issue.user.login}! The issue looks complete now and has been queued for review. 🙌`,
+                });
+              }
+            }

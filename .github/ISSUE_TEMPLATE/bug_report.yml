@@ -1,0 +1,134 @@
+name: Bug Report
+description: Report a problem with the WashData Store website
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug in the WashData Store!
+
+        This tracker is for the **store website** (browsing, adopting, contributing, sign-in). If your problem is with the **Home Assistant integration itself** (detection, matching, the panel), please report it on the [ha_washdata repository](https://github.com/3dg1luk43/ha_washdata/issues) instead.
+
+        Please complete **all required fields**. For fields that don't apply, enter `N/A` with a short reason - but do not skip them without one. Issues missing key information will be automatically flagged and may be closed without investigation.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before You Submit
+      description: Please confirm all of the following before opening this issue.
+      options:
+        - label: I have searched the [existing issues](https://github.com/3dg1luk43/washdata_store/issues) and this is not a duplicate.
+          required: true
+        - label: This is a problem with the **store website**, not the Home Assistant integration (which is tracked [separately](https://github.com/3dg1luk43/ha_washdata/issues)).
+          required: true
+        - label: I have done a hard refresh (Ctrl/Cmd + Shift + R) to rule out a stale cached version of the site.
+          required: true
+        - label: I have provided console output or a screenshot in the evidence field below, or entered `N/A` with a reason if genuinely not applicable.
+          required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Bug
+      description: A clear and concise description of what the bug is.
+      placeholder: "When I click Adopt on a device, the import spinner never finishes..."
+    validations:
+      required: true
+
+  - type: input
+    id: page
+    attributes:
+      label: Affected Page
+      description: Which page or view of the store is affected? A full URL is even better.
+      placeholder: "e.g. index (browse), admin, connect, create, docs, or a full URL"
+    validations:
+      required: true
+
+  - type: input
+    id: browser
+    attributes:
+      label: Browser & Version
+      description: Which browser and version did you see this on? Store bugs are often browser-specific.
+      placeholder: "e.g. Firefox 141, Chrome 138, Safari 18"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: signed_in
+    attributes:
+      label: Sign-in State
+      description: Were you signed in with GitHub when the bug occurred? (Contribution features require sign-in.)
+      options:
+        - "Not signed in (just browsing)"
+        - "Signed in with GitHub"
+        - "The bug is about signing in / authentication"
+        - "Not sure / not applicable"
+    validations:
+      required: true
+
+  - type: input
+    id: device_context
+    attributes:
+      label: Brand / Model / Program (if relevant)
+      description: If the bug involves a specific catalog entry, name the brand, model, and program. Otherwise enter `N/A`.
+      placeholder: "e.g. Bosch WAU28T40GB → Eco 40-60, or N/A"
+    validations:
+      required: false
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction Steps
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Go to '...'
+        2. Click on '...'
+        3. Scroll down to '...'
+        4. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: A clear and concise description of what you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: console
+    attributes:
+      label: Console Errors / Evidence
+      description: |
+        **This is the most useful information for diagnosing store bugs.** Open your browser DevTools with **F12** (or right-click → Inspect), go to the **Console** tab, reproduce the problem, and paste any red error lines here. A screenshot of the Console or Network tab is also great — drag the image into this field to attach it.
+
+        - **Short output:** paste directly below.
+        - **Screenshots / long output:** attach as a file (drag & drop into this field).
+
+        If there is genuinely no relevant console output (for example: a documentation typo or a purely visual layout nitpick), replace the placeholder with `N/A` followed by a short reason — for example: `N/A - text typo on docs page, no console output involved`.
+      placeholder: "Paste browser console output (F12 → Console) or attach a screenshot here..."
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Any other context about the problem (screen size / mobile vs desktop, ad blockers or privacy extensions, unusual network setup, etc.)
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: pr_intention
+    attributes:
+      label: Contributing a Fix
+      description: >
+        If you intend to submit a PR fixing this bug yourself, check the box below.
+        The maintainer will review and — if approved — add the `accepted` label to this issue.
+        **You must wait for that label before opening a PR**, otherwise the PR will be closed automatically.
+      options:
+        - label: I plan to submit a PR fixing this and will wait for the `accepted` label before opening it
+          required: false

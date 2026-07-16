@@ -1,0 +1,86 @@
+name: Feature Request
+description: Suggest an improvement to the WashData Store website
+title: "[FR] "
+labels: ["feature request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement to the WashData Store!
+
+        This tracker is for the **store website**. Ideas about the Home Assistant integration itself belong on the [ha_washdata repository](https://github.com/3dg1luk43/ha_washdata/issues).
+
+        Please fill in the required sections. The store is intentionally minimal (a free, community-run catalog with no accounts beyond GitHub sign-in, no tracking, no paid tier) — requests should fit that scope.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before You Submit
+      options:
+        - label: I have searched the [existing issues](https://github.com/3dg1luk43/washdata_store/issues) and this has not already been requested.
+          required: true
+        - label: This request is about the **store website**, not the Home Assistant integration (tracked [separately](https://github.com/3dg1luk43/ha_washdata/issues)).
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Motivation
+      description: What problem does this solve, or what use case does it enable? Be specific.
+      placeholder: "When I browse the catalog on my phone, I can't tell which cycles are approved because..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe what you want to happen. Be as concrete as possible.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area of the Store
+      description: Which part of the store does this affect?
+      options:
+        - Browsing / catalog (index)
+        - Adopting / downloading a cycle
+        - Contributing / uploading a cycle (create)
+        - Sign-in / GitHub account (connect)
+        - Admin / moderation panel
+        - Approval & confirmation flow
+        - Documentation (docs)
+        - Firestore data model / backend
+        - General / not area-specific
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any workarounds you've tried, or alternative approaches you considered.
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Screenshots, mockups, links to related issues, or any other relevant context.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: pr_intention
+    attributes:
+      label: Contributing an Implementation
+      description: >
+        If you intend to implement this yourself and submit a PR, check the box below.
+        The maintainer will review and — if approved — add the `accepted` label to this issue.
+        **You must wait for that label before opening a PR**, otherwise the PR will be closed automatically.
+      options:
+        - label: I plan to submit a PR implementing this and will wait for the `accepted` label before opening it
+          required: false

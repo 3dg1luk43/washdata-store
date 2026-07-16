@@ -1,0 +1,92 @@
+name: CI
+
+# Runs on every push and PR: validates JS unit tests, Firestore security-rules
+# tests (against the emulator), JSON config validity, and that first-party source
+# files carry the AGPL license header. This is the store's equivalent of the
+# integration's hassfest/validate checks — adapted for a static site + Firebase.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm run test:unit
+
+  rules-tests:
+    name: Firestore rules tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Firestore security-rules tests (emulator)
+        run: npm run test:rules
+
+  validate:
+    name: Validate config & headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Validate JSON config files
+        run: |
+          set -e
+          for f in firestore.rules firestore.indexes.json firebase.json package.json; do
+            case "$f" in
+              *.json)
+                echo "Checking $f ..."
+                node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))"
+                ;;
+            esac
+          done
+          echo "All JSON config files are valid."
+
+      - name: Check every source file has the AGPL license header
+        run: |
+          set -e
+          missing=0
+          # First-party source only: skip vendored deps and build output.
+          files=$(git ls-files '*.js' '*.mjs' '*.py' \
+            | grep -v -E '^(node_modules|dist)/' || true)
+          for f in $files; do
+            if ! grep -q "SPDX-License-Identifier: AGPL-3.0-or-later" "$f"; then
+              echo "::error file=$f::missing AGPL-3.0-or-later license header"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "One or more source files are missing the license header."
+            exit 1
+          fi
+          echo "All source files carry the license header."

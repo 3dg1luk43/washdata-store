@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🏠 WashData integration bug or feature (not the store)
+    url: https://github.com/3dg1luk43/ha_washdata/issues/new/choose
+    about: Problems with the Home Assistant integration itself (cycle detection, matching, the panel, notifications) belong on the ha_washdata tracker, not here.
+  - name: 🌐 Visit the WashData Store
+    url: https://3dg1luk43.github.io/washdata_store
+    about: Browse and adopt community appliance profiles.
+  - name: 🐞 A specific shared cycle looks wrong
+    url: https://3dg1luk43.github.io/washdata_store
+    about: If a specific reference cycle in the catalog is incorrect, use the Confirm/report controls in the store UI, or sign in and flag it — no GitHub issue needed.
