@@ -100,14 +100,25 @@
               <option value="washer_dryer">Washer-Dryer</option>
             </select>
           </div>
+          <div class="form-group">
+            <label for="cy-filter-rating">Min rating</label>
+            <select id="cy-filter-rating">
+              <option value="0">Any</option>
+              <option value="4">&#9733; 4+</option>
+              <option value="3">&#9733; 3+</option>
+              <option value="2">&#9733; 2+</option>
+              <option value="1">&#9733; 1+</option>
+            </select>
+          </div>
           <div class="filter-actions">
             <button class="btn btn-primary btn-sm" id="cy-filter-apply">Apply</button>
             <button class="btn btn-ghost btn-sm" id="cy-filter-clear">Clear</button>
           </div>
         </div>
+        <p class="text-muted" style="font-size:.75rem;margin:.25rem 0 .5rem">Min-rating filters the rows loaded so far (ratings load per row).</p>
         <div class="admin-table-wrap">
           <table class="admin-table"><thead><tr>
-            <th>ID</th><th>Device</th><th>Profile</th><th>Type</th><th>Status</th><th>Src</th><th>Uploader</th><th>Date</th><th>DL</th><th>Actions</th>
+            <th>ID</th><th>Device</th><th>Profile</th><th>Type</th><th>Status</th><th>Src</th><th>Uploader</th><th>Date</th><th>DL</th><th>Rating</th><th>Actions</th>
           </tr></thead><tbody id="cycles-tbody"></tbody></table>
         </div>
         <div class="load-more-area"><button class="btn btn-ghost" id="cycles-load-more" hidden>Load more</button></div>
@@ -156,7 +167,7 @@
 
         <div class="section-header" style="margin-top:1.75rem">
           <h3 class="section-title" style="font-size:.9375rem;font-weight:600">
-            Downloads
+            Integration downloads
             <span id="analytics-period-label" class="text-muted" style="font-size:.8125rem;font-weight:400"></span>
           </h3>
         </div>

@@ -782,6 +782,11 @@ input[type="file"]:hover {
   gap: 0.75rem;
   flex-wrap: wrap;
 }
+/* Inline "Rate quality:" caption before the device stars. */
+.rating-caption { white-space: nowrap; }
+/* Read-only derived rating on a profile row + device-card meta rating (gold). */
+.profile-rating { font-weight: 400; font-size: 0.8125rem; color: var(--warning); }
+.card-meta [data-devrating] { color: var(--warning); }
 
 /* ============================================================
    Comments

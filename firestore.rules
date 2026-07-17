@@ -249,12 +249,38 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
-    // Aggregate analytics counters (daily_{YYYYMMDD} + totals documents).
-    // Writes are open so unauthenticated download/view events can be counted;
-    // the data is non-sensitive (counts only, no PII). Reads are admin-only.
+    // Aggregate usage counters (daily_{YYYYMMDD} + totals documents). Writes are
+    // anonymous (there is no backend to own them, and browse/download events are
+    // unauthenticated) but bounded: each write may only touch the known counter fields
+    // (+ a short `date` label) and may raise the SUM of all counters by at most 1 -- one
+    // +1 per event. This blocks one-shot/arbitrary inflation, junk fields, decrements,
+    // and non-numeric values. It cannot stop a client looping +1 forever; true rate
+    // limiting needs Cloud Functions (see SECURITY.md). Reads are admin-only.
     match /analytics/{docId} {
+      // Sum of all known counters in a doc (absent fields default to 0).
+      function counterSum(d) {
+        return d.get('brand_views', 0) + d.get('device_views', 0) + d.get('profile_views', 0)
+          + d.get('cycle_details', 0) + d.get('searches', 0) + d.get('favorites', 0)
+          + d.get('device_confirms', 0) + d.get('device_ratings', 0) + d.get('cycle_ratings', 0)
+          + d.get('downloads', 0);
+      }
+      function analyticsKeysOk(keys) {
+        return keys.hasOnly(['brand_views', 'device_views', 'profile_views', 'cycle_details',
+          'searches', 'favorites', 'device_confirms', 'device_ratings', 'cycle_ratings',
+          'downloads', 'date']);
+      }
+      function dateOk() {
+        return request.resource.data.get('date', '') is string
+          && request.resource.data.get('date', '').size() <= 12;
+      }
       allow read: if isAdmin();
-      allow create, update: if true;
+      allow create: if analyticsKeysOk(request.resource.data.keys())
+        && counterSum(request.resource.data) <= 1
+        && dateOk();
+      allow update: if analyticsKeysOk(request.resource.data.diff(resource.data).affectedKeys())
+        && counterSum(request.resource.data) >= counterSum(resource.data)
+        && counterSum(request.resource.data) <= counterSum(resource.data) + 1
+        && dateOk();
     }
 
     match /{document=**} { allow read, write: if false; }

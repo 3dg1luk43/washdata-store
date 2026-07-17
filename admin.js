@@ -27,6 +27,7 @@ import {
   adminDeleteDevice, adminDeleteBrand, adminDeleteProfile, adminDeleteUser,
   getReferenceCycles,
   adminGetAnalytics,
+  getRatingSummary, getDeviceQuality,
 } from './washstore.js';
 import { openSettingsEditor, openPhaseEditor, bindEditorCloseHandlers } from './editors.js';
 
@@ -37,6 +38,7 @@ let _isAdmin = false;
 let _cyCursor = null;
 let _userCursor = null;
 let _cyFilters = { status: '', applianceType: '' };
+const _cyRatingCache = new Map(); // cycleId -> Promise<{avg,count}> (evict on error)
 let _reviewRecord = null;
 let _userItems = [];
 let _statsLoaded = false;
@@ -275,17 +277,40 @@ $('maint-toggle-btn').addEventListener('click', async () => {
 
 // ============================================================ cycles table
 async function loadCycles(reset = false) {
-  if (reset) { _cyCursor = null; $('cycles-tbody').innerHTML = `<tr><td colspan="10" class="tbl-msg">Loading...</td></tr>`; $('cycles-load-more').setAttribute('hidden', ''); if ($('cy-filter-device')) $('cy-filter-device').value = ''; }
+  if (reset) { _cyCursor = null; $('cycles-tbody').innerHTML = `<tr><td colspan="11" class="tbl-msg">Loading...</td></tr>`; $('cycles-load-more').setAttribute('hidden', ''); if ($('cy-filter-device')) $('cy-filter-device').value = ''; }
   try {
     const { items, cursor } = await adminListCycles({ status: _cyFilters.status || null, applianceType: _cyFilters.applianceType || null, pageSize: 25, cursor: _cyCursor });
     if (reset) $('cycles-tbody').innerHTML = '';
-    if (items.length === 0 && !_cyCursor) { $('cycles-tbody').innerHTML = `<tr><td colspan="10" class="tbl-msg">No cycles found.</td></tr>`; }
-    else { items.forEach((c) => $('cycles-tbody').appendChild(buildCycleRow(c))); }
+    if (items.length === 0 && !_cyCursor) { $('cycles-tbody').innerHTML = `<tr><td colspan="11" class="tbl-msg">No cycles found.</td></tr>`; }
+    else { items.forEach((c) => $('cycles-tbody').appendChild(buildCycleRow(c))); applyCycleRowFilters(); }
     _cyCursor = cursor; $('cycles-load-more').toggleAttribute('hidden', !cursor);
   } catch (e) {
-    if (reset) $('cycles-tbody').innerHTML = `<tr><td colspan="10" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
+    if (reset) $('cycles-tbody').innerHTML = `<tr><td colspan="11" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
     toast(e.message, 'error');
   }
+}
+
+// Cached per-cycle rating summary (admin). Evict on error like the public side.
+function cyRating(id) {
+  if (!_cyRatingCache.has(id)) {
+    _cyRatingCache.set(id, getRatingSummary(id).catch((e) => { _cyRatingCache.delete(id); throw e; }));
+  }
+  return _cyRatingCache.get(id);
+}
+
+// Combined client-side filter over loaded rows: device/brand text + Min-rating.
+// (Ratings live in subcollections, so server-side rating filtering isn't possible
+// without a backend; this filters the rows already fetched.)
+function applyCycleRowFilters() {
+  const q = ($('cy-filter-device') ? $('cy-filter-device').value : '').trim().toLowerCase();
+  const min = Number($('cy-filter-rating') ? $('cy-filter-rating').value : 0) || 0;
+  $('cycles-tbody').querySelectorAll('tr').forEach((tr) => {
+    if (!tr.dataset.search) return; // skip message rows
+    const textOk = !q || (tr.dataset.search || '').includes(q);
+    const avg = tr.dataset.ratingAvg ? Number(tr.dataset.ratingAvg) : null;
+    const ratingOk = min <= 0 || (avg != null && avg >= min);
+    tr.hidden = !(textOk && ratingOk);
+  });
 }
 
 function buildCycleRow(c) {
@@ -301,8 +326,19 @@ function buildCycleRow(c) {
     <td class="text-muted truncate" title="${esc(c.uploaderName || '')}">${esc(truncate(c.uploaderName || 'Anon', 14))}</td>
     <td class="text-muted" style="white-space:nowrap;font-size:.72rem">${formatDate(c.createdAt)}</td>
     <td class="text-muted">${c.downloads || 0}</td>
+    <td class="text-muted" data-rating style="white-space:nowrap;font-size:.72rem">&hellip;</td>
     <td><div class="action-cell"></div></td>`;
   buildCycleActions(tr.querySelector('.action-cell'), c, tr);
+  // Rating summary (async, per row) + feed the client-side Min-rating filter.
+  cyRating(c.id).then((s) => {
+    const cell = tr.querySelector('[data-rating]');
+    tr.dataset.ratingAvg = (s && s.count > 0 && s.avg != null) ? String(s.avg) : '';
+    if (cell) cell.textContent = (s && s.count > 0) ? `★ ${s.avg.toFixed(1)} (${s.count})` : '-';
+    applyCycleRowFilters();
+  }).catch(() => {
+    const cell = tr.querySelector('[data-rating]');
+    if (cell) cell.textContent = '-';
+  });
   return tr;
 }
 
@@ -331,8 +367,14 @@ function buildCycleActions(container, c, tr) {
 }
 
 $('cy-filter-apply').addEventListener('click', () => { _cyFilters = { status: $('cy-filter-status').value, applianceType: $('cy-filter-type').value }; loadCycles(true); });
-$('cy-filter-clear').addEventListener('click', () => { $('cy-filter-status').value = ''; $('cy-filter-type').value = ''; if ($('cy-filter-device')) $('cy-filter-device').value = ''; _cyFilters = { status: '', applianceType: '' }; loadCycles(true); });
-$('cy-filter-device').addEventListener('input', () => filterRows('cy-filter-device', $('cycles-tbody')));
+$('cy-filter-clear').addEventListener('click', () => {
+  $('cy-filter-status').value = ''; $('cy-filter-type').value = '';
+  if ($('cy-filter-device')) $('cy-filter-device').value = '';
+  if ($('cy-filter-rating')) $('cy-filter-rating').value = '0';
+  _cyFilters = { status: '', applianceType: '' }; loadCycles(true);
+});
+$('cy-filter-device').addEventListener('input', applyCycleRowFilters);
+if ($('cy-filter-rating')) $('cy-filter-rating').addEventListener('change', applyCycleRowFilters);
 $('cycles-load-more').addEventListener('click', () => loadCycles(false));
 
 // ============================================================ owner picker modal
@@ -591,6 +633,13 @@ function renderCatDevices() {
       drill.addEventListener('click', () => catNavigate('profiles', _catBrand, device));
       cell.appendChild(drill);
     }, async (id) => { await adminDeleteDevice(id); _deviceItems = _deviceItems.filter((d) => d.id !== id); });
+    // Quality rating in the meta line (bounded fan-out: only this brand's devices).
+    getDeviceQuality(device.id).then((s) => {
+      if (s && s.count > 0) {
+        const meta = card.querySelector('.cat-card-meta');
+        if (meta) meta.insertAdjacentHTML('beforeend', ` · <span style="color:var(--warning)">★ ${s.avg.toFixed(1)} (${s.count})</span>`);
+      }
+    }).catch(() => {});
     list.appendChild(card);
   });
   content.appendChild(list);
@@ -639,7 +688,7 @@ async function renderCatCyclesLevel() {
     if (!items.length) { content.innerHTML = '<div class="tbl-msg">No cycles for this profile.</div>'; return; }
     const wrap = document.createElement('div'); wrap.className = 'admin-table-wrap';
     const tbl = document.createElement('table'); tbl.className = 'admin-table';
-    tbl.innerHTML = '<thead><tr><th>ID</th><th>Status</th><th>Src</th><th>Uploader</th><th>Date</th><th>DL</th><th>Actions</th></tr></thead>';
+    tbl.innerHTML = '<thead><tr><th>ID</th><th>Status</th><th>Src</th><th>Uploader</th><th>Date</th><th>DL</th><th>Rating</th><th>Actions</th></tr></thead>';
     const tbody = document.createElement('tbody');
     items.forEach((c) => {
       const tr = document.createElement('tr');
@@ -650,8 +699,13 @@ async function renderCatCyclesLevel() {
         <td class="text-muted truncate" title="${esc(c.uploaderName || '')}">${esc(truncate(c.uploaderName || 'Anon', 14))}</td>
         <td class="text-muted" style="white-space:nowrap;font-size:.72rem">${formatDate(c.createdAt)}</td>
         <td class="text-muted">${c.downloads || 0}</td>
+        <td class="text-muted" data-rating style="white-space:nowrap;font-size:.72rem">&hellip;</td>
         <td><div class="action-cell"></div></td>`;
       buildCycleActions(tr.querySelector('.action-cell'), c, tr);
+      cyRating(c.id).then((s) => {
+        const cell = tr.querySelector('[data-rating]');
+        if (cell) cell.textContent = (s && s.count > 0) ? `★ ${s.avg.toFixed(1)} (${s.count})` : '-';
+      }).catch(() => { const cell = tr.querySelector('[data-rating]'); if (cell) cell.textContent = '-'; });
       tbody.appendChild(tr);
     });
     tbl.appendChild(tbody); wrap.appendChild(tbl); content.appendChild(wrap);
@@ -773,15 +827,18 @@ $('review-modal').addEventListener('click', (e) => { if (e.target === $('review-
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('review-modal').hasAttribute('hidden')) closeReviewModal(); });
 
 // ============================================================ statistics
+// 'downloads' = integration adoptions (someone pulled a device/cycle into ha_washdata) —
+// the real usage metric. The website has no download action; the integration writes this
+// counter server-side. Distinct from the per-cycle DL column (that's per-cycle popularity).
 const _STAT_META = [
-  { field: 'downloads',      label: 'Downloads',       color: 'c-approved' },
+  { field: 'downloads',      label: 'Downloads (integration)', color: 'c-approved' },
+  { field: 'cycle_details',  label: 'Cycle detail views', color: '' },
   { field: 'device_views',   label: 'Device views',    color: '' },
   { field: 'profile_views',  label: 'Profile views',   color: '' },
-  { field: 'cycle_details',  label: 'Cycle details',   color: '' },
-  { field: 'searches',       label: 'Searches',        color: '' },
   { field: 'brand_views',    label: 'Brand views',     color: '' },
+  { field: 'searches',       label: 'Searches',        color: '' },
   { field: 'favorites',      label: 'Favorites',       color: '' },
-  { field: 'device_confirms',label: 'Device confirms', color: 'c-approved' },
+  { field: 'device_confirms',label: 'Device confirms', color: '' },
   { field: 'device_ratings', label: 'Device ratings',  color: '' },
   { field: 'cycle_ratings',  label: 'Cycle ratings',   color: '' },
 ];
@@ -794,7 +851,7 @@ function _statCard(label, value, colorClass) {
   return div;
 }
 
-function _buildDownloadsChart(daily, field) {
+function _buildActivityChart(daily, field) {
   if (!daily.length) return '<div class="text-muted" style="font-size:.875rem;padding:.5rem 0">No data yet.</div>';
   const vals = daily.map((d) => d[field] || 0);
   const maxVal = Math.max(...vals, 1);
@@ -815,7 +872,7 @@ function _buildDownloadsChart(daily, field) {
     const cx = padX + i * (barW + gap) + barW / 2;
     return `<text x="${cx}" y="${CH + LH - 1}" text-anchor="middle" font-size="9" fill="currentColor" opacity=".55">${daily[i].date.slice(5)}</text>`;
   }).join('');
-  return `<svg viewBox="0 0 ${W} ${CH + LH}" width="100%" class="analytics-chart" role="img" aria-label="Downloads per day">
+  return `<svg viewBox="0 0 ${W} ${CH + LH}" width="100%" class="analytics-chart" role="img" aria-label="Integration downloads per day">
     <g fill="var(--accent,#6c8ebf)">${bars}</g>${axis}</svg>`;
 }
 
@@ -844,7 +901,7 @@ async function loadStatistics() {
     });
 
     // Downloads chart
-    chartEl.innerHTML = _buildDownloadsChart(slice, 'downloads');
+    chartEl.innerHTML = _buildActivityChart(slice, 'downloads');
 
     // Period breakdown
     periodEl.innerHTML = '';

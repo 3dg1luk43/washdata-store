@@ -19,13 +19,14 @@ import { MAINTENANCE } from './site-config.js';
 import {
   init, onAuth, signIn, signOutUser, isAdmin, ensureUserProfile,
   listBrands, searchDevices, getDevicesByBrand, getProfiles, createProfile, getReferenceCycles,
-  bumpDownload, favoriteDevice, getFavorites,
+  favoriteDevice, getFavorites,
   addComment, listComments, deleteComment,
   submitRating, getUserRating, getRatingSummary,
   confirmDevice, rateDevice, getDeviceQuality, getUserDeviceRating, hasConfirmedDevice,
   confirmCycle, hasConfirmedCycle, countVisibleCycles, countVisibleProfiles,
+  getProfileRating,
   applianceLabel, confirmThresholdValue,
-  saveAsFile, getSiteConfig,
+  getSiteConfig,
   getUserDoc, subscribeUserStatus,
   logStoreEvent,
 } from './washstore.js';
@@ -63,7 +64,7 @@ let _brand = null;
 let _device = null;
 let _profile = null;
 let _browseCursor = null;
-let _browseFilters = { search: '', favoritesOnly: false, approvedOnly: false };
+let _browseFilters = { search: '', favoritesOnly: false, approvedOnly: false, minRating: 0 };
 let _favorites = new Set();
 let _confirmThreshold = 5;
 let _openRecord = null;
@@ -71,7 +72,9 @@ let _replyToId = null;
 let _browseLoaded = false;
 let _userStatusUnsub = null;
 
-const _ratingCache = new Map();
+const _ratingCache = new Map();        // cycleId  -> Promise<{avg,count}>
+const _deviceRatingCache = new Map();  // deviceId -> Promise<{avg,count}>
+const _profileRatingCache = new Map(); // profileId-> Promise<{avg,count}> (derived from cycles)
 
 // ============================================================ dom + toast
 function $(id) { return document.getElementById(id); }
@@ -204,6 +207,67 @@ function fetchRatingSummary(id) {
     _ratingCache.set(id, getRatingSummary(id).catch((e) => { _ratingCache.delete(id); throw e; }));
   }
   return _ratingCache.get(id);
+}
+// Device quality aggregate, cached per session (evict on error, like fetchRatingSummary).
+function fetchDeviceQuality(id) {
+  if (!_deviceRatingCache.has(id)) {
+    _deviceRatingCache.set(id, getDeviceQuality(id).catch((e) => { _deviceRatingCache.delete(id); throw e; }));
+  }
+  return _deviceRatingCache.get(id);
+}
+// Profile rating is DERIVED (read-only) from its child cycles' ratings; cached per session.
+function fetchProfileRating(id) {
+  if (!_profileRatingCache.has(id)) {
+    _profileRatingCache.set(id, getProfileRating(id).catch((e) => { _profileRatingCache.delete(id); throw e; }));
+  }
+  return _profileRatingCache.get(id);
+}
+
+// Compact "★ 4.2 (12)" label, or '' when there are no ratings.
+function ratingLabel(summary) {
+  return (summary && summary.avg != null && summary.count > 0)
+    ? `★ ${summary.avg.toFixed(1)} (${summary.count})` : '';
+}
+// Hide a card when the active Min-rating filter excludes it. Unrated items are treated
+// as below any positive threshold (so "4+" hides the not-yet-rated). Stores the summary
+// on the element so the filter can be re-applied later without re-fetching. Idempotent.
+function ratingGate(el, summary) {
+  if (!el) return;
+  el._ratingSummary = summary || { avg: null, count: 0 };
+  const min = _browseFilters.minRating || 0;
+  const avg = el._ratingSummary.count > 0 ? el._ratingSummary.avg : null;
+  el.hidden = min > 0 && (avg == null || avg < min);
+}
+// Re-evaluate the Min-rating gate on every already-rendered rateable card (device/cycle
+// cards store their summary via ratingGate). Brand cards never call it, so they're left
+// visible. Called when the Min-rating control changes -- no network, no re-render.
+function reapplyRatingGates() {
+  document.querySelectorAll('.card').forEach((el) => {
+    if (el._ratingSummary !== undefined) ratingGate(el, el._ratingSummary);
+  });
+}
+// Keep the top filter-rail's Min-rating select in step with the shared filter state
+// (inline controls in the device/cycle views write the same `minRating`).
+function syncMinRatingControls() {
+  const top = $('filter-rating');
+  if (top) top.value = String(_browseFilters.minRating || 0);
+}
+// A Min-rating <select> for views where the top filter rail is hidden (device list,
+// cycle list). Changing it re-gates the visible cards live -- no network, no re-render.
+function buildMinRatingControl() {
+  const g = document.createElement('div');
+  g.className = 'form-group';
+  const cur = _browseFilters.minRating || 0;
+  const opt = (v, label) => `<option value="${v}"${cur === v ? ' selected' : ''}>${label}</option>`;
+  g.innerHTML = `<label>Min rating</label><select>${
+    opt(0, 'Any') + opt(4, '&#9733; 4+') + opt(3, '&#9733; 3+') + opt(2, '&#9733; 2+') + opt(1, '&#9733; 1+')
+  }</select>`;
+  g.querySelector('select').addEventListener('change', (e) => {
+    _browseFilters.minRating = Number(e.target.value) || 0;
+    syncMinRatingControls();
+    reapplyRatingGates();
+  });
+  return g;
 }
 
 function loadingPlaceholder() {
@@ -423,6 +487,7 @@ function renderBrandDevices() {
   bar.className = 'filter-rail';
   bar.innerHTML = `<div class="form-group"><label for="brand-type-filter">Appliance type</label>
     <select id="brand-type-filter">${typeOpts}</select></div>`;
+  bar.appendChild(buildMinRatingControl()); // filter devices by quality rating
   body.appendChild(bar);
   bar.querySelector('#brand-type-filter').addEventListener('change', (e) => { _brandTypeFilter = e.target.value; renderBrandDevices(); });
   const grid = document.createElement('div');
@@ -450,7 +515,7 @@ function buildDeviceCard(d) {
         ${statusBadge(d)}
         <span class="badge" data-pcount hidden></span>
       </div>
-      <div class="card-meta"><span>&#11088; ${d.favoriteCount || 0}</span><span>by ${esc(d.createdByName || 'Anonymous')}</span>${manual}</div>
+      <div class="card-meta"><span>&#11088; <span data-favcount>${d.favoriteCount || 0}</span></span><span data-devrating hidden></span><span>by ${esc(d.createdByName || 'Anonymous')}</span>${manual}</div>
       <div class="card-community" data-community></div>
     </div>
     <div class="card-actions">
@@ -465,36 +530,47 @@ function buildDeviceCard(d) {
     const badge = el.querySelector('[data-pcount]');
     if (badge && n > 0) { badge.textContent = `${n} profile${n > 1 ? 's' : ''}`; badge.hidden = false; }
   }).catch(() => {});
+  // Device quality rating: show in the meta row + honor the Min-rating filter.
+  fetchDeviceQuality(d.id).then((s) => {
+    const rl = ratingLabel(s);
+    const el2 = el.querySelector('[data-devrating]');
+    if (el2 && rl) { el2.textContent = rl; el2.hidden = false; }
+    ratingGate(el, s);
+  }).catch(() => {});
   return el;
 }
 
-// Confirm ("I have this appliance / this entry is correct") + optional 5-star quality.
-// Kept cheap: the quality aggregation is fetched only when the user opens the stars.
+// Confirm ("I have this appliance / this entry is correct") + inline 5-star quality.
+// Rating is always VISIBLE (read-only for signed-out visitors) and interactable inline
+// for signed-in users -- no click-to-reveal.
 function renderDeviceCommunity(box, d) {
   if (!box) return;
   box._device = d; // stored so onAuth can re-render after sign-in
   if (!_user) {
-    box.innerHTML = `<span class="text-muted" style="font-size:.75rem">Sign in to confirm or rate this appliance.</span>`;
+    box.innerHTML = `<span class="rating-info text-muted" data-agg style="font-size:.75rem">Loading rating&hellip;</span>
+      <span class="text-muted" style="font-size:.75rem">&middot; Sign in to confirm or rate.</span>`;
+    fetchDeviceQuality(d.id).then((s) => {
+      const el = box.querySelector('[data-agg]');
+      if (el) el.textContent = s.count > 0 ? `Quality: ★ ${s.avg.toFixed(1)} (${s.count})` : 'No ratings yet';
+    }).catch(() => {});
     return;
   }
   box.innerHTML = `
     <button class="btn btn-ghost btn-sm" data-confirm>${d.status === 'pending' ? 'Confirm this appliance' : 'Confirm'}</button>
-    <button class="btn btn-ghost btn-sm" data-rate>Rate quality</button><span class="text-muted" data-rate-summary style="font-size:.75rem"></span>
     <span class="community-msg text-muted" data-msg></span>
-    <div class="device-stars" data-stars hidden></div>`;
+    <div class="device-stars" data-stars></div>`;
   const confirmBtn = box.querySelector('[data-confirm]');
   confirmBtn.addEventListener('click', () => doConfirmDevice(box, d, confirmBtn));
   hasConfirmedDevice(d.id)
     .then((did) => { if (did) { confirmBtn.disabled = true; confirmBtn.textContent = 'You confirmed this'; } })
     .catch(() => {});
-  box.querySelector('[data-rate]').addEventListener('click', () => toggleDeviceStars(box, d));
-  // Pre-load the aggregate so users can see the current rating without clicking.
-  getDeviceQuality(d.id).then((s) => {
-    const el = box.querySelector('[data-rate-summary]');
-    if (el && s.avg != null && s.count > 0) {
-      el.textContent = `— ★ ${s.avg.toFixed(1)} (${s.count})`;
-    }
-  }).catch(() => {});
+  // Interactive quality stars, rendered inline (current rating + aggregate loaded once).
+  const wrap = box.querySelector('[data-stars]');
+  wrap.innerHTML = '<span class="text-muted" style="font-size:.75rem">Loading rating&hellip;</span>';
+  Promise.all([
+    getUserDeviceRating(d.id).catch(() => 0),
+    fetchDeviceQuality(d.id).catch(() => ({ avg: null, count: 0 })),
+  ]).then(([current, summary]) => renderDeviceStars(wrap, d, current || 0, summary));
 }
 
 async function doConfirmDevice(box, d, btn) {
@@ -517,21 +593,10 @@ async function doConfirmDevice(box, d, btn) {
   } catch (e) { btn.disabled = false; toast(e.message, 'error'); }
 }
 
-async function toggleDeviceStars(box, d) {
-  const wrap = box.querySelector('[data-stars]');
-  if (!wrap.hasAttribute('hidden')) { wrap.setAttribute('hidden', ''); return; }
-  wrap.removeAttribute('hidden');
-  wrap.innerHTML = '<span class="text-muted" style="font-size:.75rem">Loading...</span>';
-  let current = 0; let summary = { avg: null, count: 0 };
-  try { current = (await getUserDeviceRating(d.id)) || 0; } catch (_) {}
-  try { summary = await getDeviceQuality(d.id); } catch (_) {}
-  // Guard: user may have clicked again while awaiting, hiding the panel.
-  if (!wrap.hasAttribute('hidden')) renderDeviceStars(wrap, d, current, summary);
-}
-
 function renderDeviceStars(wrap, d, current, summary) {
-  const avgInfo = summary.avg != null ? `Avg ${summary.avg.toFixed(1)} (${summary.count})` : 'No ratings yet';
-  wrap.innerHTML = `<div class="rating-stars">${[1, 2, 3, 4, 5].map((n) => `<button class="star${n <= current ? ' filled' : ''}" data-n="${n}" aria-label="${n} star${n > 1 ? 's' : ''}">&#9733;</button>`).join('')}</div><span class="rating-info">${esc(avgInfo)}</span>`;
+  const avgInfo = summary.count > 0 ? `Avg ${summary.avg.toFixed(1)} (${summary.count})` : 'No ratings yet';
+  wrap.innerHTML = `<span class="rating-caption text-muted" style="font-size:.75rem">Rate quality:</span>
+    <div class="rating-stars">${[1, 2, 3, 4, 5].map((n) => `<button class="star${n <= current ? ' filled' : ''}" data-n="${n}" aria-label="${n} star${n > 1 ? 's' : ''}">&#9733;</button>`).join('')}</div><span class="rating-info">${esc(avgInfo)}</span>`;
   wrap.querySelectorAll('.star').forEach((btn) => btn.addEventListener('click', async () => {
     const n = +btn.dataset.n;
     try {
@@ -539,9 +604,14 @@ function renderDeviceStars(wrap, d, current, summary) {
       toast('Quality rating saved');
       trackEvent('store_device_rate', { rating: n });
       logStoreEvent('device_ratings');
+      _deviceRatingCache.delete(d.id); // aggregate changed - drop the cached summary
       let fresh = { avg: null, count: 0 };
-      try { fresh = await getDeviceQuality(d.id); } catch (_) {}
+      try { fresh = await fetchDeviceQuality(d.id); } catch (_) {}
       renderDeviceStars(wrap, d, n, fresh);
+      // Keep the card-meta rating badge in sync with the new aggregate.
+      const card = wrap.closest('.card');
+      const el2 = card && card.querySelector('[data-devrating]');
+      if (el2) { const rl = ratingLabel(fresh); el2.textContent = rl; el2.hidden = !rl; }
     } catch (e) { toast(e.message, 'error'); }
   }));
 }
@@ -560,6 +630,11 @@ async function toggleStar(btn, d) {
     }
     btn.classList.toggle('on', on);
     btn.innerHTML = on ? '&#9733;' : '&#9734;';
+    // Keep the visible ⭐ count in sync (the doc counter was just moved +/-1).
+    d.favoriteCount = Math.max(0, (d.favoriteCount || 0) + (on ? 1 : -1));
+    const card = btn.closest('.card');
+    const fc = card && card.querySelector('[data-favcount]');
+    if (fc) fc.textContent = d.favoriteCount;
   } catch (e) { toast(e.message, 'error'); }
 }
 
@@ -632,7 +707,7 @@ async function openDevice(d) {
 function buildProfileRow(p) {
   const el = document.createElement('button');
   el.className = 'profile-row';
-  el.innerHTML = `<span class="profile-name">${esc(p.program)}${statusBadge(p)}</span>
+  el.innerHTML = `<span class="profile-name">${esc(p.program)}${statusBadge(p)}<span class="profile-rating" data-prating hidden></span></span>
     <span class="profile-meta" data-count>&hellip; &rsaquo;</span>`;
   el.addEventListener('click', () => openProfile(p));
   // Count is calculated (approved + pending), not a stored total; fill in on arrival.
@@ -643,6 +718,12 @@ function buildProfileRow(p) {
     const meta = el.querySelector('[data-count]');
     if (meta) meta.innerHTML = '&rsaquo;';
   });
+  // Rating is DERIVED (read-only) from this profile's cycles; shown beside the status badge.
+  fetchProfileRating(p.id).then((s) => {
+    const rl = ratingLabel(s);
+    const el2 = el.querySelector('[data-prating]');
+    if (el2 && rl) { el2.textContent = rl; el2.hidden = false; }
+  }).catch(() => {});
   return el;
 }
 
@@ -688,10 +769,14 @@ async function openProfile(p) {
   try {
     const { items } = await getReferenceCycles(p.id, { includePending: !_browseFilters.approvedOnly });
     if (items.length === 0) { body.innerHTML = emptyHTML('&#128200;', 'No reference cycles', 'No reference cycles for this profile yet. Upload one from the ha_washdata integration.'); return; }
+    body.innerHTML = '';
+    const bar = document.createElement('div');
+    bar.className = 'filter-rail';
+    bar.appendChild(buildMinRatingControl()); // filter cycles by rating
+    body.appendChild(bar);
     const grid = document.createElement('div');
     grid.className = 'card-grid';
     items.forEach((c) => grid.appendChild(buildCycleCard(c)));
-    body.innerHTML = '';
     body.appendChild(grid);
   } catch (e) { body.innerHTML = emptyHTML('&#9888;', 'Failed to load', esc(e.message)); }
 }
@@ -716,17 +801,17 @@ function buildCycleCard(c) {
     </div>
     <div class="card-actions">
       <button class="btn btn-primary btn-sm" data-details>Details</button>
-      <button class="btn btn-ghost btn-sm" data-dl>Download</button>
     </div>`;
   el.querySelector('[data-details]').addEventListener('click', () => openDetails(c));
-  el.querySelector('[data-dl]').addEventListener('click', () => doDownload(c));
   renderCycleCommunity(el.querySelector('[data-community]'), c);
+  el._ratingSummary = { avg: null, count: 0 }; // gated once the summary resolves
   // Lazy-load aggregate rating — shares the session Promise cache with the detail modal.
   fetchRatingSummary(c.id).then((s) => {
     if (s.avg != null && s.count > 0) {
       const badge2 = el.querySelector('[data-crating]');
       if (badge2) { badge2.querySelector('span').textContent = `${s.avg.toFixed(1)} (${s.count})`; badge2.hidden = false; }
     }
+    ratingGate(el, s); // honor the Min-rating filter
   }).catch(() => {});
   return el;
 }
@@ -761,17 +846,12 @@ function renderCycleCommunity(box, c) {
   });
 }
 
-async function doDownload(c) {
-  trackEvent('store_cycle_download', { appliance_type: c.applianceType });
-  logStoreEvent('downloads');
-  try { await bumpDownload(c.id); saveAsFile(c); } catch (e) { toast(e.message, 'error'); }
-}
-
 function _applyFilters() {
   _browseFilters = {
     search: $('filter-brand').value.trim(),
     favoritesOnly: $('filter-favorites').checked,
     approvedOnly: $('filter-approved') ? $('filter-approved').checked : false,
+    minRating: $('filter-rating') ? Number($('filter-rating').value) || 0 : 0,
   };
   if (_browseFilters.search) {
     trackEvent('store_search', { query_length: _browseFilters.search.length });
@@ -783,11 +863,17 @@ let _filterTimer = null;
 $('filter-brand').addEventListener('input', () => { clearTimeout(_filterTimer); _filterTimer = setTimeout(_applyFilters, 350); });
 $('filter-favorites').addEventListener('change', _applyFilters);
 if ($('filter-approved')) $('filter-approved').addEventListener('change', _applyFilters);
+// Min-rating filters live (re-gate the shown cards) without a full reload.
+if ($('filter-rating')) $('filter-rating').addEventListener('change', () => {
+  _browseFilters.minRating = Number($('filter-rating').value) || 0;
+  reapplyRatingGates();
+});
 $('filter-apply').addEventListener('click', _applyFilters);
 $('filter-clear').addEventListener('click', () => {
   $('filter-brand').value = ''; $('filter-favorites').checked = false;
   if ($('filter-approved')) $('filter-approved').checked = false;
-  _browseFilters = { search: '', favoritesOnly: false, approvedOnly: false };
+  if ($('filter-rating')) $('filter-rating').value = '0';
+  _browseFilters = { search: '', favoritesOnly: false, approvedOnly: false, minRating: 0 };
   loadBrands(true);
 });
 $('load-more-btn').addEventListener('click', () => { if (_view === 'brands') loadBrands(false); });
@@ -809,12 +895,13 @@ async function openDetails(c) {
   interactiveGraph($('modal-sparkline'), c);
   $('modal-detail-content').innerHTML = buildDetailGrid(c);
   switchModalTab('detail');
-  $('modal-json-content').textContent = JSON.stringify({ trace: c.trace, stats: c.stats, cycleSchemaVersion: c.cycleSchemaVersion }, null, 2);
   await loadRatingSection(c.id);
   await loadComments(c.id);
-  updateCommentFormAuth();
   $('details-modal').removeAttribute('hidden');
   $('details-modal').focus();
+  // Must run AFTER the modal is un-hidden: updateCommentFormAuth() early-returns while
+  // the modal is still hidden, so calling it before reveal left the comment box hidden.
+  updateCommentFormAuth();
 }
 
 function buildDetailGrid(c) {
@@ -840,16 +927,14 @@ $('modal-close').addEventListener('click', closeModal);
 $('modal-close-footer').addEventListener('click', closeModal);
 $('details-modal').addEventListener('click', (e) => { if (e.target === $('details-modal')) closeModal(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('details-modal').hasAttribute('hidden')) closeModal(); });
-$('modal-download-btn').addEventListener('click', () => { if (_openRecord) doDownload(_openRecord); });
 
 function switchModalTab(name) {
-  ['detail', 'json', 'comments'].forEach((t) => {
+  ['detail', 'comments'].forEach((t) => {
     $(`modal-${t}-section`).toggleAttribute('hidden', t !== name);
     $(`modal-${t}-tab-btn`).classList.toggle('active', t === name);
   });
 }
 $('modal-detail-tab-btn').addEventListener('click', () => switchModalTab('detail'));
-$('modal-json-tab-btn').addEventListener('click', () => switchModalTab('json'));
 $('modal-comments-tab-btn').addEventListener('click', () => switchModalTab('comments'));
 
 // ============================================================ rating

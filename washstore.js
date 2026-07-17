@@ -650,6 +650,33 @@ export async function countVisibleProfiles(deviceId) {
   return (a || 0) + (p || 0);
 }
 
+// Profile rating is DERIVED (read-only) from its visible cycles' ratings: the
+// count-weighted mean of each cycle's 5-star average. There is no profile-level rating
+// collection -- users rate cycles, and a profile inherits the aggregate of its cycles.
+// Bounded fan-out (approved + pending cycle ids via two status-scoped queries -- rules
+// require the status filter -- then one rating aggregation per cycle). Never throws.
+export async function getProfileRating(profileId, { includePending = true } = {}) {
+  let docs = [];
+  try {
+    const q = (status) => restQuery('cycles', {
+      filters: [
+        { field: 'profileId', op: 'EQUAL', value: profileId },
+        { field: 'status', op: 'EQUAL', value: status },
+      ],
+      limit: 40,
+    });
+    const groups = includePending ? await Promise.all([q('approved'), q('pending')]) : [await q('approved')];
+    docs = groups.flat();
+  } catch (_) { return { avg: null, count: 0 }; }
+  if (!docs.length) return { avg: null, count: 0 };
+  const summaries = await Promise.all(
+    docs.map((c) => restRatingSummary(c.id).catch(() => ({ avg: null, count: 0 }))),
+  );
+  let total = 0; let n = 0;
+  for (const s of summaries) { if (s.count > 0 && s.avg != null) { total += s.avg * s.count; n += s.count; } }
+  return { avg: n > 0 ? total / n : null, count: n };
+}
+
 export async function getReferenceCycles(profileId, { pageSize = 24, cursor = null, includePending = false } = {}) {
   const fetch = (status) => getDocs(query(collection(_db, 'cycles'),
     where('profileId', '==', profileId), where('status', '==', status),
@@ -719,9 +746,11 @@ export async function bumpDownload(id) {
 // ------------------------------------------------------------------
 
 // Fields we accept. Allowlist keeps arbitrary keys out of the analytics docs.
+// (No 'downloads': the website has no download action; the integration credits each
+// cycle's own `downloads` counter server-side instead.)
 const _ANALYTICS_FIELDS = [
   'brand_views', 'device_views', 'profile_views', 'cycle_details',
-  'downloads', 'searches', 'favorites', 'device_confirms',
+  'searches', 'favorites', 'device_confirms',
   'device_ratings', 'cycle_ratings',
 ];
 

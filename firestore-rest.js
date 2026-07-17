@@ -135,7 +135,9 @@ async function _ratingAgg(parentPath) {
       structuredQuery: { from: [{ collectionId: 'ratings' }] },
       aggregations: [
         { alias: 'cnt', count: {} },
-        { alias: 'avg', average: { field: { fieldPath: 'rating' } } },
+        // NB: the Firestore aggregation operator is `avg`, NOT `average` — using the
+        // wrong name makes the whole runAggregationQuery 400, silently zeroing ratings.
+        { alias: 'avg', avg: { field: { fieldPath: 'rating' } } },
       ],
     },
   };

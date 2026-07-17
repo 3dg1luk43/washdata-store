@@ -67,6 +67,16 @@
         <div class="form-group filter-fav">
           <label><input type="checkbox" id="filter-approved"> Approved only</label>
         </div>
+        <div class="form-group">
+          <label for="filter-rating">Min rating</label>
+          <select id="filter-rating">
+            <option value="0">Any</option>
+            <option value="4">&#9733; 4+</option>
+            <option value="3">&#9733; 3+</option>
+            <option value="2">&#9733; 2+</option>
+            <option value="1">&#9733; 1+</option>
+          </select>
+        </div>
         <div class="filter-actions">
           <button class="btn btn-primary btn-sm" id="filter-apply">Search</button>
           <button class="btn btn-ghost btn-sm" id="filter-clear">Clear</button>
@@ -105,17 +115,12 @@
       <div class="modal-sparkline-area" id="modal-sparkline"></div>
       <div class="modal-tabs">
         <button class="modal-tab-btn active" id="modal-detail-tab-btn">Details</button>
-        <button class="modal-tab-btn" id="modal-json-tab-btn">Cycle JSON</button>
         <button class="modal-tab-btn" id="modal-comments-tab-btn">Comments</button>
       </div>
       <div class="modal-body">
         <div class="modal-section" id="modal-detail-section">
           <div id="modal-detail-content"></div>
           <div id="modal-rating-section"></div>
-        </div>
-        <div class="modal-section" id="modal-json-section" hidden>
-          <p class="text-muted" style="font-size:.8125rem">Raw reference cycle as stored. Download to use with ha_washdata.</p>
-          <pre class="envelope-json" id="modal-json-content"></pre>
         </div>
         <div class="modal-section" id="modal-comments-section" hidden>
           <div id="modal-comments-list" class="comments-list"></div>
@@ -134,7 +139,6 @@
       </div>
       <div class="modal-footer">
         <button class="btn btn-ghost btn-sm" id="modal-close-footer">Close</button>
-        <button class="btn btn-primary btn-sm" id="modal-download-btn">Download JSON</button>
       </div>
     </div>
   </div>

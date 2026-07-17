@@ -22,7 +22,7 @@ import {
   initializeTestEnvironment, assertFails, assertSucceeds,
 } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
-import { doc, setDoc, updateDoc, writeBatch, getDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, setDoc, updateDoc, writeBatch, getDoc, serverTimestamp, increment } from 'firebase/firestore';
 
 let env;
 const PID = 'washdata-store';
@@ -30,7 +30,7 @@ const PID = 'washdata-store';
 before(async () => {
   env = await initializeTestEnvironment({
     projectId: PID,
-    firestore: { rules: readFileSync('firestore.rules', 'utf8'), host: '127.0.0.1', port: 8080 },
+    firestore: { rules: readFileSync('firestore.rules', 'utf8'), host: "127.0.0.1", port: 8080 },
   });
 });
 after(async () => { await env.cleanup(); });
@@ -218,4 +218,39 @@ test('profile owner (device ownerId) can update phases only; non-owner cannot', 
   await assertFails(updateDoc(doc(db, 'profiles/p_pown'), { phases: [], program: 'Other' }));
   // non-owner cannot update phases
   await assertFails(updateDoc(doc(gh('stranger2').firestore(), 'profiles/p_pown'), { phases: [] }));
+});
+
+// ── Analytics usage counters (anonymous-writable but bounded to +1 per event) ──
+test('analytics: anon can create a doc with a single +1 counter (+ short date)', async () => {
+  await assertSucceeds(setDoc(doc(anon().firestore(), 'analytics/daily_20260717'), { downloads: 1, date: '2026-07-17' }));
+  await assertSucceeds(setDoc(doc(anon().firestore(), 'analytics/totals'), { cycle_details: 1 }));
+});
+
+test('analytics: create rejects >1 total, multiple counters, junk fields, and a long date', async () => {
+  await assertFails(setDoc(doc(anon().firestore(), 'analytics/d_big'), { downloads: 5 }));
+  await assertFails(setDoc(doc(anon().firestore(), 'analytics/d_two'), { downloads: 1, searches: 1 }));
+  await assertFails(setDoc(doc(anon().firestore(), 'analytics/d_junk'), { downloads: 1, evil: 1 }));
+  await assertFails(setDoc(doc(anon().firestore(), 'analytics/d_date'), { downloads: 1, date: 'x'.repeat(20) }));
+});
+
+test('analytics: anon +1 on one counter allowed; bigger jump / two counters / decrement / overwrite / junk rejected', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'analytics/totals2'), { downloads: 10, cycle_details: 3 });
+  });
+  const db = anon().firestore();
+  await assertSucceeds(updateDoc(doc(db, 'analytics/totals2'), { downloads: increment(1) }));
+  await assertFails(updateDoc(doc(db, 'analytics/totals2'), { downloads: increment(1000) }));
+  await assertFails(updateDoc(doc(db, 'analytics/totals2'), { downloads: increment(1), cycle_details: increment(1) }));
+  await assertFails(updateDoc(doc(db, 'analytics/totals2'), { downloads: increment(-1) }));
+  await assertFails(updateDoc(doc(db, 'analytics/totals2'), { downloads: 99999 }));
+  await assertFails(updateDoc(doc(db, 'analytics/totals2'), { evil: 1 }));
+});
+
+test('analytics is admin-read-only', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'analytics/totals3'), { downloads: 1 });
+    await setDoc(doc(ctx.firestore(), 'admins/adminU'), { uid: 'adminU' });
+  });
+  await assertFails(getDoc(doc(anon().firestore(), 'analytics/totals3')));
+  await assertSucceeds(getDoc(doc(gh('adminU').firestore(), 'analytics/totals3')));
 });
