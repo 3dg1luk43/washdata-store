@@ -30,10 +30,16 @@ import {
   logStoreEvent,
 } from './washstore.js';
 import { openSettingsEditor, openPhaseEditor, bindEditorCloseHandlers } from './editors.js';
-import { trackEvent } from './ga.js';
 
 init(firebaseConfig);
 bindEditorCloseHandlers();
+
+// Thin wrapper around window.gtag — silent no-op when GA is blocked or not configured.
+function trackEvent(name, params = {}) {
+  if (typeof window.gtag === 'function') {
+    try { window.gtag('event', name, params); } catch (_) {}
+  }
+}
 
 // Initialize GA4 by dynamically injecting the gtag script so the Measurement ID
 // stays in one place (config.js). Page-view events fire automatically via
