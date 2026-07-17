@@ -1,6 +1,6 @@
 # WashData Store
 
-The WashData Store is a free, community-run library of appliance power-cycle reference recordings for the [ha_washdata](https://github.com/3dg1luk43/ha_washdata) Home Assistant integration. Instead of spending weeks recording your own washing machine programs from scratch, you can download a clean reference cycle that someone else already recorded on the same appliance, seed your local profile instantly, and start getting match results and time-remaining estimates straight away. Everything is hosted at zero cost -- GitHub Pages for the frontend, Firebase Firestore for the backend -- so there are no subscriptions, no ads, and no tracking.
+The WashData Store is a free, community-run library of appliance power-cycle reference recordings for the [ha_washdata](https://github.com/3dg1luk43/ha_washdata) Home Assistant integration. Instead of spending weeks recording your own washing machine programs from scratch, you can download a clean reference cycle that someone else already recorded on the same appliance, seed your local profile instantly, and start getting match results and time-remaining estimates straight away. Everything is hosted at zero cost -- GitHub Pages for the frontend, Firebase Firestore for the backend -- so there are no subscriptions and no ads. Aggregate usage (downloads, page views, searches) is measured via Google Analytics 4 to help maintain the library; no personal data or browsing profiles are stored.
 
 ## How it is organized
 
@@ -116,7 +116,7 @@ The `qc` field records provenance: `1` = raw recording from ha_washdata, `2` = t
 - Sign-in uses GitHub OAuth. The store stores only your public GitHub display name and avatar URL, shown as attribution on your contributions.
 - Browsing and downloading require no account and leave no personal trace.
 - Reference cycles contain only power measurements over time. They carry no location data, usage habits, or personal information beyond the contributor's public GitHub display name and avatar URL.
-- There is no analytics, no ad tracking, and no third-party marketing scripts.
+- Aggregate store usage is counted server-side (downloads, page views, searches) via Google Analytics 4 and lightweight Firestore counters. No user IDs, cookies, or browsing profiles are stored. No ad-tech, no third-party marketing scripts.
 - All Firestore security rules are [public](firestore.rules) and auditable.
 
 ---
@@ -179,7 +179,7 @@ Every push to `main` triggers the deploy workflow: it stamps a timestamp onto ev
 
 ## Project status
 
-Community project. Hosted on GitHub Pages (static site, zero cost) backed by Firebase Firestore (free tier). No ads, no tracking, no paid tier, no subscriptions.
+Community project. Hosted on GitHub Pages (static site, zero cost) backed by Firebase Firestore (free tier). No ads, no paid tier, no subscriptions. Aggregate usage is measured via Google Analytics 4 (no personal data).
 
 - **Store site:** [3dg1luk43.github.io/washdata-store](https://3dg1luk43.github.io/washdata-store)
 - **Integration:** [ha_washdata on GitHub](https://github.com/3dg1luk43/ha_washdata)

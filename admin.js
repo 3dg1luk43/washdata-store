@@ -26,6 +26,7 @@ import {
   adminSetDeviceOwner, adminSetProfileOwner,
   adminDeleteDevice, adminDeleteBrand, adminDeleteProfile, adminDeleteUser,
   getReferenceCycles,
+  adminGetAnalytics,
 } from './washstore.js';
 import { openSettingsEditor, openPhaseEditor, bindEditorCloseHandlers } from './editors.js';
 
@@ -38,6 +39,8 @@ let _userCursor = null;
 let _cyFilters = { status: '', applianceType: '' };
 let _reviewRecord = null;
 let _userItems = [];
+let _statsLoaded = false;
+let _statsDays = 7;
 // Catalog hierarchy state
 let _brandItems = [];
 let _deviceItems = [];
@@ -188,7 +191,7 @@ onAuth(async (user) => {
 });
 
 // ============================================================ tabs
-const TABS = ['overview', 'catalog', 'cycles', 'users'];
+const TABS = ['overview', 'catalog', 'cycles', 'users', 'statistics'];
 function switchTab(name) {
   TABS.forEach((t) => {
     $(`${t}-tab`).toggleAttribute('hidden', t !== name);
@@ -201,6 +204,7 @@ TABS.forEach((name) => $(`${name}-btn`).addEventListener('click', () => {
   if (name === 'catalog' && !_catalogLoaded) loadCatalogData();
   if (name === 'cycles' && !$('cycles-tbody').hasChildNodes()) loadCycles(true);
   if (name === 'users' && !$('users-tbody').hasChildNodes()) loadUsers(true);
+  if (name === 'statistics' && !_statsLoaded) loadStatistics();
 }));
 
 // ============================================================ overview
@@ -767,5 +771,107 @@ $('review-modal-close').addEventListener('click', closeReviewModal);
 $('review-modal-close-footer').addEventListener('click', closeReviewModal);
 $('review-modal').addEventListener('click', (e) => { if (e.target === $('review-modal')) closeReviewModal(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('review-modal').hasAttribute('hidden')) closeReviewModal(); });
+
+// ============================================================ statistics
+const _STAT_META = [
+  { field: 'downloads',      label: 'Downloads',       color: 'c-approved' },
+  { field: 'device_views',   label: 'Device views',    color: '' },
+  { field: 'profile_views',  label: 'Profile views',   color: '' },
+  { field: 'cycle_details',  label: 'Cycle details',   color: '' },
+  { field: 'searches',       label: 'Searches',        color: '' },
+  { field: 'brand_views',    label: 'Brand views',     color: '' },
+  { field: 'favorites',      label: 'Favorites',       color: '' },
+  { field: 'device_confirms',label: 'Device confirms', color: 'c-approved' },
+  { field: 'device_ratings', label: 'Device ratings',  color: '' },
+  { field: 'cycle_ratings',  label: 'Cycle ratings',   color: '' },
+];
+
+function _statCard(label, value, colorClass) {
+  const div = document.createElement('div');
+  div.className = 'stat-card';
+  div.innerHTML = `<div class="stat-label">${esc(label)}</div>
+    <div class="stat-value${colorClass ? ' ' + esc(colorClass) : ''}">${value == null ? '–' : Number(value).toLocaleString()}</div>`;
+  return div;
+}
+
+function _buildDownloadsChart(daily, field) {
+  if (!daily.length) return '<div class="text-muted" style="font-size:.875rem;padding:.5rem 0">No data yet.</div>';
+  const vals = daily.map((d) => d[field] || 0);
+  const maxVal = Math.max(...vals, 1);
+  const n = daily.length;
+  // Viewbox: 700 wide, 96 tall (80 chart + 16 label row).
+  const W = 700, CH = 80, LH = 16, padX = 2, gap = 2;
+  const barW = Math.max(3, Math.floor((W - 2 * padX - gap * (n - 1)) / n));
+  const bars = vals.map((v, i) => {
+    const h = Math.max(1, Math.round((v / maxVal) * CH));
+    const x = padX + i * (barW + gap);
+    const y = CH - h;
+    const op = v > 0 ? '1' : '0.2';
+    return `<rect x="${x}" y="${y}" width="${barW}" height="${h}" rx="1" opacity="${op}"><title>${daily[i].date}: ${v}</title></rect>`;
+  }).join('');
+  // Date axis: first / middle / last
+  const axisIdx = [0, Math.floor((n - 1) / 2), n - 1];
+  const axis = axisIdx.map((i) => {
+    const cx = padX + i * (barW + gap) + barW / 2;
+    return `<text x="${cx}" y="${CH + LH - 1}" text-anchor="middle" font-size="9" fill="currentColor" opacity=".55">${daily[i].date.slice(5)}</text>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${W} ${CH + LH}" width="100%" class="analytics-chart" role="img" aria-label="Downloads per day">
+    <g fill="var(--accent,#6c8ebf)">${bars}</g>${axis}</svg>`;
+}
+
+async function loadStatistics() {
+  _statsLoaded = true;
+  const totalsEl = $('analytics-totals-grid');
+  const chartEl = $('analytics-chart-wrap');
+  const periodEl = $('analytics-period-grid');
+  const labelEl = $('analytics-period-label');
+  const label2El = $('analytics-period-label2');
+
+  totalsEl.innerHTML = '<div class="loading-center" style="grid-column:1/-1"><div class="loading-spinner"></div></div>';
+  chartEl.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
+  periodEl.innerHTML = '';
+  if (labelEl) labelEl.textContent = `(last ${_statsDays} days)`;
+  if (label2El) label2El.textContent = `(last ${_statsDays} days)`;
+
+  try {
+    const { totals, daily } = await adminGetAnalytics({ days: _statsDays });
+    const slice = daily.slice(-_statsDays);
+
+    // Totals row
+    totalsEl.innerHTML = '';
+    _STAT_META.forEach(({ field, label, color }) => {
+      totalsEl.appendChild(_statCard(label, totals[field], color));
+    });
+
+    // Downloads chart
+    chartEl.innerHTML = _buildDownloadsChart(slice, 'downloads');
+
+    // Period breakdown
+    periodEl.innerHTML = '';
+    _STAT_META.forEach(({ field, label }) => {
+      const sum = slice.reduce((acc, d) => acc + (d[field] || 0), 0);
+      periodEl.appendChild(_statCard(label, sum, ''));
+    });
+  } catch (e) {
+    totalsEl.innerHTML = `<div class="text-muted" style="grid-column:1/-1;padding:1rem">${esc(e.message)}</div>`;
+    chartEl.innerHTML = '';
+    periodEl.innerHTML = '';
+    toast(e.message, 'error');
+  }
+}
+
+// Period toggle buttons
+['7', '30'].forEach((d) => {
+  const btn = $(`period-${d}-btn`);
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    _statsDays = Number(d);
+    $('period-7-btn').className = `btn btn-sm ${_statsDays === 7 ? 'btn-primary' : 'btn-ghost'}`;
+    $('period-30-btn').className = `btn btn-sm ${_statsDays === 30 ? 'btn-primary' : 'btn-ghost'}`;
+    _statsLoaded = false;
+    loadStatistics();
+  });
+});
+$('analytics-refresh-btn').addEventListener('click', () => { _statsLoaded = false; loadStatistics(); });
 
 bindEditorCloseHandlers();

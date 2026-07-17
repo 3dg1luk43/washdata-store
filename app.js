@@ -14,7 +14,7 @@
 //
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
-import firebaseConfig from './config.js';
+import firebaseConfig, { GA_MEASUREMENT_ID } from './config.js';
 import { MAINTENANCE } from './site-config.js';
 import {
   init, onAuth, signIn, signOutUser, isAdmin, ensureUserProfile,
@@ -27,11 +27,27 @@ import {
   applianceLabel, confirmThresholdValue,
   saveAsFile, getSiteConfig,
   getUserDoc, subscribeUserStatus,
+  logStoreEvent,
 } from './washstore.js';
 import { openSettingsEditor, openPhaseEditor, bindEditorCloseHandlers } from './editors.js';
+import { trackEvent } from './ga.js';
 
 init(firebaseConfig);
 bindEditorCloseHandlers();
+
+// Initialize GA4 by dynamically injecting the gtag script so the Measurement ID
+// stays in one place (config.js). Page-view events fire automatically via
+// gtag('config', ...). Custom store events are sent via trackEvent() / logStoreEvent().
+if (GA_MEASUREMENT_ID) {
+  const _gts = document.createElement('script');
+  _gts.async = true;
+  _gts.src = `https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(GA_MEASUREMENT_ID)}`;
+  document.head.appendChild(_gts);
+  window.dataLayer = window.dataLayer || [];
+  window.gtag = function () { window.dataLayer.push(arguments); };
+  window.gtag('js', new Date());
+  window.gtag('config', GA_MEASUREMENT_ID);
+}
 
 // ============================================================ state
 let _user = null;
@@ -251,6 +267,11 @@ onAuth(async (user) => {
   _authKnown = true;
   reconcile();
   updateCommentFormAuth();
+  // Re-render device community widgets that were built before this auth change.
+  // Without this, cards rendered while signed-out keep showing "Sign in to confirm or rate."
+  document.querySelectorAll('[data-community]').forEach((box) => {
+    if (box._device) renderDeviceCommunity(box, box._device);
+  });
 });
 
 function renderOwnerActions(actions) {
@@ -361,6 +382,8 @@ let _brandDevices = [];
 let _brandTypeFilter = '';
 
 async function openBrand(b) {
+  trackEvent('store_brand_view', { brand: b.brand });
+  logStoreEvent('brand_views');
   _brand = b; _device = null; _profile = null; _view = 'brand';
   _brandDevices = []; _brandTypeFilter = '';
   $('filter-rail').setAttribute('hidden', '');
@@ -443,13 +466,14 @@ function buildDeviceCard(d) {
 // Kept cheap: the quality aggregation is fetched only when the user opens the stars.
 function renderDeviceCommunity(box, d) {
   if (!box) return;
+  box._device = d; // stored so onAuth can re-render after sign-in
   if (!_user) {
     box.innerHTML = `<span class="text-muted" style="font-size:.75rem">Sign in to confirm or rate this appliance.</span>`;
     return;
   }
   box.innerHTML = `
     <button class="btn btn-ghost btn-sm" data-confirm>${d.status === 'pending' ? 'Confirm this appliance' : 'Confirm'}</button>
-    <button class="btn btn-ghost btn-sm" data-rate>Rate quality</button>
+    <button class="btn btn-ghost btn-sm" data-rate>Rate quality</button><span class="text-muted" data-rate-summary style="font-size:.75rem"></span>
     <span class="community-msg text-muted" data-msg></span>
     <div class="device-stars" data-stars hidden></div>`;
   const confirmBtn = box.querySelector('[data-confirm]');
@@ -458,6 +482,13 @@ function renderDeviceCommunity(box, d) {
     .then((did) => { if (did) { confirmBtn.disabled = true; confirmBtn.textContent = 'You confirmed this'; } })
     .catch(() => {});
   box.querySelector('[data-rate]').addEventListener('click', () => toggleDeviceStars(box, d));
+  // Pre-load the aggregate so users can see the current rating without clicking.
+  getDeviceQuality(d.id).then((s) => {
+    const el = box.querySelector('[data-rate-summary]');
+    if (el && s.avg != null && s.count > 0) {
+      el.textContent = `— ★ ${s.avg.toFixed(1)} (${s.count})`;
+    }
+  }).catch(() => {});
 }
 
 async function doConfirmDevice(box, d, btn) {
@@ -466,6 +497,8 @@ async function doConfirmDevice(box, d, btn) {
     const res = await confirmDevice(d.id);
     d.confirmCount = res.confirmCount; d.status = res.status;
     btn.textContent = 'You confirmed this';
+    trackEvent('store_device_confirm');
+    logStoreEvent('device_confirms');
     const msg = box.querySelector('[data-msg]');
     if (msg) msg.textContent = res.status === 'approved' ? 'Approved by the community' : `${res.confirmCount}/${_confirmThreshold} confirmations`;
     const badges = box.closest('.card') ? box.closest('.card').querySelector('.card-badges') : null;
@@ -486,7 +519,8 @@ async function toggleDeviceStars(box, d) {
   let current = 0; let summary = { avg: null, count: 0 };
   try { current = (await getUserDeviceRating(d.id)) || 0; } catch (_) {}
   try { summary = await getDeviceQuality(d.id); } catch (_) {}
-  renderDeviceStars(wrap, d, current, summary);
+  // Guard: user may have clicked again while awaiting, hiding the panel.
+  if (!wrap.hasAttribute('hidden')) renderDeviceStars(wrap, d, current, summary);
 }
 
 function renderDeviceStars(wrap, d, current, summary) {
@@ -497,6 +531,8 @@ function renderDeviceStars(wrap, d, current, summary) {
     try {
       await rateDevice(d.id, n);
       toast('Quality rating saved');
+      trackEvent('store_device_rate', { rating: n });
+      logStoreEvent('device_ratings');
       let fresh = { avg: null, count: 0 };
       try { fresh = await getDeviceQuality(d.id); } catch (_) {}
       renderDeviceStars(wrap, d, n, fresh);
@@ -509,7 +545,13 @@ async function toggleStar(btn, d) {
   const on = !_favorites.has(d.id);
   try {
     await favoriteDevice(d.id, on);
-    if (on) _favorites.add(d.id); else _favorites.delete(d.id);
+    if (on) {
+      _favorites.add(d.id);
+      trackEvent('store_device_favorite');
+      logStoreEvent('favorites');
+    } else {
+      _favorites.delete(d.id);
+    }
     btn.classList.toggle('on', on);
     btn.innerHTML = on ? '&#9733;' : '&#9734;';
   } catch (e) { toast(e.message, 'error'); }
@@ -517,6 +559,8 @@ async function toggleStar(btn, d) {
 
 // ============================================================ browse: device -> profiles
 async function openDevice(d) {
+  trackEvent('store_device_view', { appliance_type: d.applianceType, brand: d.brand });
+  logStoreEvent('device_views');
   _device = d; _profile = null; _view = 'device';
   $('filter-rail').setAttribute('hidden', '');
   $('load-more-btn').setAttribute('hidden', '');
@@ -626,6 +670,8 @@ function buildAddProfile(d) {
 
 // ============================================================ browse: profile -> reference cycles
 async function openProfile(p) {
+  trackEvent('store_profile_view', { program: p.program });
+  logStoreEvent('profile_views');
   _profile = p; _view = 'profile';
   renderBreadcrumb();
   renderOwnerActions(_user && _device && _device.ownerId && _device.ownerId === _user.uid
@@ -655,7 +701,11 @@ function buildCycleCard(c) {
       <div class="card-title">${esc(_profile ? _profile.program : c.program_lc)}</div>
       ${badge ? `<div class="card-badges">${badge}</div>` : ''}
       <div class="card-subtitle mono-data">${formatDuration(st.duration)} &middot; ${st.energy_wh != null ? (st.energy_wh / 1000).toFixed(2) + ' kWh' : '-'}</div>
-      <div class="card-meta"><span>by ${esc(c.uploaderName || 'Anonymous')}</span><span>&middot; ${c.downloads || 0} dl</span></div>
+      <div class="card-meta">
+        <span>by ${esc(c.uploaderName || 'Anonymous')}</span>
+        <span>&middot; ${c.downloads || 0} dl</span>
+        <span data-crating hidden>&middot; &#9733; <span></span></span>
+      </div>
       <div class="card-community" data-community></div>
     </div>
     <div class="card-actions">
@@ -665,6 +715,13 @@ function buildCycleCard(c) {
   el.querySelector('[data-details]').addEventListener('click', () => openDetails(c));
   el.querySelector('[data-dl]').addEventListener('click', () => doDownload(c));
   renderCycleCommunity(el.querySelector('[data-community]'), c);
+  // Lazy-load aggregate rating — shares the session Promise cache with the detail modal.
+  fetchRatingSummary(c.id).then((s) => {
+    if (s.avg != null && s.count > 0) {
+      const badge2 = el.querySelector('[data-crating]');
+      if (badge2) { badge2.querySelector('span').textContent = `${s.avg.toFixed(1)} (${s.count})`; badge2.hidden = false; }
+    }
+  }).catch(() => {});
   return el;
 }
 
@@ -699,6 +756,8 @@ function renderCycleCommunity(box, c) {
 }
 
 async function doDownload(c) {
+  trackEvent('store_cycle_download', { appliance_type: c.applianceType });
+  logStoreEvent('downloads');
   try { await bumpDownload(c.id); saveAsFile(c); } catch (e) { toast(e.message, 'error'); }
 }
 
@@ -708,6 +767,10 @@ function _applyFilters() {
     favoritesOnly: $('filter-favorites').checked,
     approvedOnly: $('filter-approved') ? $('filter-approved').checked : false,
   };
+  if (_browseFilters.search) {
+    trackEvent('store_search', { query_length: _browseFilters.search.length });
+    logStoreEvent('searches');
+  }
   loadBrands(true);
 }
 let _filterTimer = null;
@@ -730,6 +793,9 @@ function prettyBrand(c) { return _device ? _device.brand : (String(c.deviceId ||
 function prettyModel(c) { return _device ? modelOf(_device) : (String(c.deviceId || '').split('__')[2] || ''); }
 
 async function openDetails(c) {
+  trackEvent('store_cycle_detail', { appliance_type: c.applianceType });
+  logStoreEvent('cycle_details');
+  _ratingCache.delete(c.id); // always fetch fresh aggregate when modal opens
   _openRecord = c; _replyToId = null;
   $('modal-title').textContent = `${prettyBrand(c)} ${prettyModel(c)}`.trim() || 'Reference cycle';
   $('modal-program').textContent = _profile ? _profile.program : (c.program_lc || '');
@@ -810,6 +876,8 @@ function renderStars(summary, current, id) {
       const n = +btn.dataset.n;
       try {
         await submitRating(id, n); _ratingCache.delete(id); toast('Rating saved');
+        trackEvent('store_cycle_rate', { rating: n });
+        logStoreEvent('cycle_ratings');
         let fresh = { avg: null, count: 0 }; try { fresh = await fetchRatingSummary(id); } catch (_) {}
         renderStars(fresh, n, id);
       } catch (e) { toast(e.message, 'error'); }

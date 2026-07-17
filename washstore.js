@@ -715,6 +715,63 @@ export async function bumpDownload(id) {
 }
 
 // ------------------------------------------------------------------
+// Analytics (aggregate event counters, admin-readable only)
+// ------------------------------------------------------------------
+
+// Fields we accept. Allowlist keeps arbitrary keys out of the analytics docs.
+const _ANALYTICS_FIELDS = [
+  'brand_views', 'device_views', 'profile_views', 'cycle_details',
+  'downloads', 'searches', 'favorites', 'device_confirms',
+  'device_ratings', 'cycle_ratings',
+];
+
+// Best-effort: increments today's daily counter and the all-time totals doc.
+// Failures are silently swallowed (analytics loss is acceptable).
+export async function logStoreEvent(field) {
+  if (!_ANALYTICS_FIELDS.includes(field) || !_db) return;
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const docId = `daily_${today.replace(/-/g, '')}`;
+  const upd = { [field]: increment(1) };
+  const dailyRef = doc(_db, 'analytics', docId);
+  const totalsRef = doc(_db, 'analytics', 'totals');
+  try {
+    await Promise.all([
+      updateDoc(dailyRef, upd).catch(() =>
+        setDoc(dailyRef, { ...upd, date: today }, { merge: true })),
+      updateDoc(totalsRef, upd).catch(() =>
+        setDoc(totalsRef, upd, { merge: true })),
+    ]);
+  } catch (_) {}
+}
+
+// Reads the last `days` daily documents plus the all-time totals for the
+// admin Statistics tab. Returns { totals: {field: n, ...}, daily: [{date, ...}, ...] }
+// in chronological order (oldest first).
+export async function adminGetAnalytics({ days = 30 } = {}) {
+  const today = new Date();
+  const docEntries = Array.from({ length: days }, (_, i) => {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    const iso = d.toISOString().slice(0, 10);
+    return { id: `daily_${iso.replace(/-/g, '')}`, date: iso };
+  });
+
+  const [totalsSnap, ...dailySnaps] = await Promise.all([
+    getDoc(doc(_db, 'analytics', 'totals')),
+    ...docEntries.map(({ id }) => getDoc(doc(_db, 'analytics', id))),
+  ]);
+
+  const totals = totalsSnap.exists() ? totalsSnap.data() : {};
+  // Reverse so the array is chronological (oldest → newest).
+  const daily = dailySnaps.map((snap, i) => ({
+    date: docEntries[i].date,
+    ...(snap.exists() ? snap.data() : {}),
+  })).reverse();
+
+  return { totals, daily };
+}
+
+// ------------------------------------------------------------------
 // Comments (cycles/{id}/comments)
 // ------------------------------------------------------------------
 

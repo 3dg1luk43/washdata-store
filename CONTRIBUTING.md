@@ -132,7 +132,7 @@ Changes to `firestore.rules` or `firestore.indexes.json` are high-impact. Always
 
 - **Plain ES modules** - no bundler, no transpiler, no framework; keep it simple
 - **No external CDN dependencies** beyond Firebase SDK (already used)
-- **No tracking scripts, analytics, or ads** - the store is privacy-first by design
+- **No ad-tech or third-party marketing scripts** - aggregate usage is measured via the project's own GA4 property and Firestore counters; contributors must not add additional tracking or ad scripts
 - **Consistent style** - match the formatting of existing files (2-space indentation, single quotes)
 - **License header** - every source file (`.js`, `.mjs`, `.py`) must start with the AGPL-3.0-or-later
   header used across the project (copy it from any existing file). CI fails the build if a source

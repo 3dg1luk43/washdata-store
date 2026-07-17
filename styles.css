@@ -955,6 +955,16 @@ input[type="file"]:hover {
 .stat-value.c-ban      { color: var(--warning); }
 
 /* ============================================================
+   Admin - analytics chart
+   ============================================================ */
+.analytics-chart {
+  display: block;
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 10px 4px 4px;
+}
+
+/* ============================================================
    Admin - table
    ============================================================ */
 .table-wrap { overflow-x: auto; }

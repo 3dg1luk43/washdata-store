@@ -41,6 +41,7 @@
         <button class="tab-btn" id="catalog-btn" role="tab">Catalog</button>
         <button class="tab-btn" id="cycles-btn" role="tab">Cycles</button>
         <button class="tab-btn" id="users-btn" role="tab">Users</button>
+        <button class="tab-btn" id="statistics-btn" role="tab">Statistics</button>
       </div>
 
       <!-- Overview -->
@@ -135,6 +136,46 @@
         </div>
         <div class="load-more-area"><button class="btn btn-ghost" id="users-load-more" hidden>Load more</button></div>
       </div>
+      <!-- Statistics -->
+      <div class="tab-panel" id="statistics-tab" role="tabpanel" hidden>
+        <div class="section-header">
+          <h2 class="section-title">Statistics</h2>
+          <div style="display:flex;gap:.4rem;align-items:center">
+            <button class="btn btn-primary btn-sm" id="period-7-btn" data-days="7">7 days</button>
+            <button class="btn btn-ghost btn-sm" id="period-30-btn" data-days="30">30 days</button>
+            <button class="btn btn-ghost btn-sm" id="analytics-refresh-btn">Refresh</button>
+          </div>
+        </div>
+
+        <div class="section-header" style="margin-top:1.5rem">
+          <h3 class="section-title" style="font-size:.9375rem;font-weight:600">All-time totals</h3>
+        </div>
+        <div class="stat-grid" id="analytics-totals-grid">
+          <div class="loading-center" style="grid-column:1/-1"><div class="loading-spinner"></div></div>
+        </div>
+
+        <div class="section-header" style="margin-top:1.75rem">
+          <h3 class="section-title" style="font-size:.9375rem;font-weight:600">
+            Downloads
+            <span id="analytics-period-label" class="text-muted" style="font-size:.8125rem;font-weight:400"></span>
+          </h3>
+        </div>
+        <div id="analytics-chart-wrap" style="margin:.5rem 0 0;overflow:hidden"></div>
+
+        <div class="section-header" style="margin-top:1.75rem">
+          <h3 class="section-title" style="font-size:.9375rem;font-weight:600">
+            Period breakdown
+            <span id="analytics-period-label2" class="text-muted" style="font-size:.8125rem;font-weight:400"></span>
+          </h3>
+        </div>
+        <div class="stat-grid" id="analytics-period-grid"></div>
+
+        <div style="margin-top:1.75rem">
+          <a href="https://analytics.google.com/" target="_blank" rel="noopener noreferrer"
+             class="btn btn-ghost btn-sm">Open GA4 Dashboard &#8599;</a>
+        </div>
+      </div>
+
     </div>
   </main>
 

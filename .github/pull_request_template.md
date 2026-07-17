@@ -59,7 +59,7 @@ Closes #<!-- issue number — must have the `accepted` label -->
 ## Checklist
 
 - [ ] My code matches the style of the surrounding files (plain ES modules, 2-space indent)
-- [ ] I have **not** added any tracking scripts, analytics, ads, or third-party marketing code
+- [ ] I have **not** added any ad-tech, third-party marketing scripts, or additional analytics beyond the project's existing GA4 + Firestore counters
 - [ ] I have **not** added new external/CDN dependencies beyond the existing Firebase SDK
 - [ ] Every new source file carries the AGPL-3.0-or-later license header
 - [ ] I've validated JSON config I changed (`node -e "JSON.parse(require('fs').readFileSync('<file>','utf8'))"`)

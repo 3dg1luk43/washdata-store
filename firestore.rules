@@ -102,8 +102,9 @@ service cloud.firestore {
       // Optional 5-star quality score (information only; never affects approval).
       match /ratings/{uid} {
         allow read: if true;
-        allow write: if canContribute() && request.auth.uid == uid
+        allow create, update: if canContribute() && request.auth.uid == uid
           && request.resource.data.rating in [1, 2, 3, 4, 5];
+        allow delete: if false;
       }
     }
 
@@ -214,8 +215,9 @@ service cloud.firestore {
 
       match /ratings/{uid} {
         allow read: if true;
-        allow write: if canContribute() && request.auth.uid == uid
+        allow create, update: if canContribute() && request.auth.uid == uid
           && request.resource.data.rating in [1, 2, 3, 4, 5];
+        allow delete: if false;
       }
     }
 
@@ -245,6 +247,14 @@ service cloud.firestore {
     match /config/{doc} {
       allow read: if true;
       allow write: if isAdmin();
+    }
+
+    // Aggregate analytics counters (daily_{YYYYMMDD} + totals documents).
+    // Writes are open so unauthenticated download/view events can be counted;
+    // the data is non-sensitive (counts only, no PII). Reads are admin-only.
+    match /analytics/{docId} {
+      allow read: if isAdmin();
+      allow create, update: if true;
     }
 
     match /{document=**} { allow read, write: if false; }

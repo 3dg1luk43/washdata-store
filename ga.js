@@ -15,18 +15,13 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-// Google Analytics 4 Measurement ID (e.g. 'G-XXXXXXXXXX').
-// Find it in GA4 > Admin > Data Streams > your stream > Measurement ID.
-// Set to '' to disable GA4 event tracking entirely.
-export const GA_MEASUREMENT_ID = '';
+// Thin wrapper around window.gtag. Safe to call before the gtag script has
+// loaded (slow network, ad-blocker, GA_MEASUREMENT_ID not set): events are
+// silently dropped. Do not import this in admin.js — admin actions aren't
+// tracked, only public store browsing/download actions are.
 
-const firebaseConfig = {
-  apiKey: "AIzaSyDzq0MoWdU_21CSohZUhIIV7ZwfWppjcAk",
-  authDomain: "washdata-store.firebaseapp.com",
-  projectId: "washdata-store",
-  storageBucket: "washdata-store.firebasestorage.app",
-  messagingSenderId: "232950426887",
-  appId: "1:232950426887:web:a5fcfe4c5da36277d169a2"
-};
-
-export default firebaseConfig;
+export function trackEvent(name, params = {}) {
+  if (typeof window.gtag === 'function') {
+    try { window.gtag('event', name, params); } catch (_) {}
+  }
+}
