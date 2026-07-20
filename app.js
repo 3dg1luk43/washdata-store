@@ -29,6 +29,7 @@ import {
   getSiteConfig,
   getUserDoc, subscribeUserStatus,
   logStoreEvent,
+  submitReport, hasReported, REPORT_REASONS, reportTargetPath,
 } from './washstore.js';
 import { openSettingsEditor, openPhaseEditor, bindEditorCloseHandlers } from './editors.js';
 
@@ -444,6 +445,8 @@ function buildBrandCard(b) {
     </div>
     <div class="card-actions"><button class="btn btn-primary btn-sm" data-open>Open</button></div>`;
   el.querySelector('[data-open]').addEventListener('click', () => openBrand(b));
+  const rb = makeReportBtn(reportCtxFor('brand', b.id, b.brand, b.createdByUid));
+  if (rb) el.querySelector('.card-actions').appendChild(rb);
   return el;
 }
 
@@ -524,6 +527,8 @@ function buildDeviceCard(d) {
     </div>`;
   el.querySelector('[data-open]').addEventListener('click', () => openDevice(d));
   el.querySelector('[data-star]').addEventListener('click', (ev) => toggleStar(ev.currentTarget, d));
+  const rbD = makeReportBtn(reportCtxFor('device', d.id, `${d.brand} ${modelOf(d)}`.trim(), d.createdByUid));
+  if (rbD) el.querySelector('.card-actions').appendChild(rbD);
   renderDeviceCommunity(el.querySelector('[data-community]'), d);
   // Profile count is calculated (approved + pending), not a stored total.
   countVisibleProfiles(d.id).then((n) => {
@@ -770,6 +775,8 @@ async function openProfile(p) {
     const { items } = await getReferenceCycles(p.id, { includePending: !_browseFilters.approvedOnly });
     if (items.length === 0) { body.innerHTML = emptyHTML('&#128200;', 'No reference cycles', 'No reference cycles for this profile yet. Upload one from the ha_washdata integration.'); return; }
     body.innerHTML = '';
+    const rbP = makeReportBtn(reportCtxFor('profile', p.id, p.program, p.createdByUid), { label: true });
+    if (rbP) { const tb = document.createElement('div'); tb.className = 'view-toolbar'; tb.appendChild(rbP); body.appendChild(tb); }
     const bar = document.createElement('div');
     bar.className = 'filter-rail';
     bar.appendChild(buildMinRatingControl()); // filter cycles by rating
@@ -803,6 +810,8 @@ function buildCycleCard(c) {
       <button class="btn btn-primary btn-sm" data-details>Details</button>
     </div>`;
   el.querySelector('[data-details]').addEventListener('click', () => openDetails(c));
+  const rbC = makeReportBtn(reportCtxFor('cycle', c.id, (_profile ? _profile.program : c.program_lc) || 'cycle', c.uploaderUid));
+  if (rbC) el.querySelector('.card-actions').appendChild(rbC);
   renderCycleCommunity(el.querySelector('[data-community]'), c);
   el._ratingSummary = { avg: null, count: 0 }; // gated once the summary resolves
   // Lazy-load aggregate rating — shares the session Promise cache with the detail modal.
@@ -1005,8 +1014,12 @@ function buildCommentEl(comment, isReply, id) {
       <div class="comment-text">${esc(comment.text)}</div>
       <div class="comment-actions">
         ${!isReply && _user ? `<button class="reply-btn" data-reply-id="${esc(comment.id)}">Reply</button>` : ''}
+        ${_user && comment.authorUid !== _user.uid ? `<button class="reply-btn" data-report-cid="${esc(comment.id)}">Report</button>` : ''}
         ${canDelete ? `<button class="reply-btn danger" data-del-id="${esc(comment.id)}">Delete</button>` : ''}
       </div></div>`;
+  const repBtn = el.querySelector('[data-report-cid]');
+  if (repBtn) repBtn.addEventListener('click', () => openReportModal(
+    reportCtxFor('comment', comment.id, `Comment by ${comment.authorName || 'Anonymous'}`, comment.authorUid, id)));
   const replyBtn = el.querySelector('[data-reply-id]');
   if (replyBtn) replyBtn.addEventListener('click', () => {
     _replyToId = comment.id;
@@ -1045,6 +1058,87 @@ $('submit-comment-btn').addEventListener('click', async () => {
     await addComment(_openRecord.id, text, _replyToId || null);
     $('comment-input').value = ''; cancelReply(); toast('Comment posted'); await loadComments(_openRecord.id);
   } catch (e) { toast(e.message, 'error'); } finally { btn.disabled = false; }
+});
+
+// ============================================================ report
+let _reportCtx = null;
+
+function reportCtxFor(targetType, targetId, targetLabel, targetCreatedByUid, parentCycleId) {
+  return {
+    targetType, targetId,
+    targetLabel: targetLabel || '',
+    targetCreatedByUid: targetCreatedByUid || null,
+    parentCycleId: parentCycleId || null,
+  };
+}
+
+// Build a small "report" control for an object. Returns null when it should not be shown
+// (viewer is the object's own author) so callers can skip appending it.
+function makeReportBtn(ctx, { label = false } = {}) {
+  if (_user && ctx.targetCreatedByUid && ctx.targetCreatedByUid === _user.uid) return null;
+  const btn = document.createElement('button');
+  btn.className = 'btn btn-ghost btn-sm report-btn';
+  btn.title = 'Report this content';
+  btn.setAttribute('aria-label', `Report this ${ctx.targetType}`);
+  btn.innerHTML = label ? '&#9873; Report' : '&#9873;';
+  btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openReportModal(ctx); });
+  return btn;
+}
+
+async function openReportModal(ctx) {
+  if (!_user) { toast('Sign in to report content', 'error'); return; }
+  _reportCtx = ctx;
+  const sel = $('report-reason');
+  if (!sel.options.length) {
+    sel.innerHTML = REPORT_REASONS.map((r) => `<option value="${esc(r.value)}">${esc(r.label)}</option>`).join('');
+  }
+  sel.value = 'other';
+  $('report-comment').value = '';
+  $('report-target-label').textContent = ctx.targetLabel || '';
+  $('report-form').removeAttribute('hidden');
+  $('report-already').setAttribute('hidden', '');
+  $('report-submit').removeAttribute('hidden');
+  $('report-submit').disabled = false;
+  $('report-modal').removeAttribute('hidden');
+  $('report-comment').focus();
+  // If already reported by this user, flip to the acknowledgement state.
+  try {
+    if (await hasReported(reportTargetPath(ctx.targetType, ctx.targetId, ctx.parentCycleId))) {
+      $('report-form').setAttribute('hidden', '');
+      $('report-already').removeAttribute('hidden');
+      $('report-submit').setAttribute('hidden', '');
+    }
+  } catch (_) { /* non-fatal - allow submit, rules still enforce one-per-object */ }
+}
+
+function closeReportModal() { $('report-modal').setAttribute('hidden', ''); _reportCtx = null; }
+$('report-close').addEventListener('click', closeReportModal);
+$('report-cancel').addEventListener('click', closeReportModal);
+$('report-modal').addEventListener('click', (e) => { if (e.target === $('report-modal')) closeReportModal(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('report-modal').hasAttribute('hidden')) closeReportModal(); });
+
+$('report-submit').addEventListener('click', async () => {
+  if (!_reportCtx) return;
+  const comment = $('report-comment').value.trim();
+  if (!comment) { $('report-comment').focus(); toast('Please describe the problem', 'error'); return; }
+  const btn = $('report-submit'); btn.disabled = true;
+  try {
+    await submitReport({
+      targetType: _reportCtx.targetType,
+      targetId: _reportCtx.targetId,
+      parentCycleId: _reportCtx.parentCycleId,
+      targetLabel: _reportCtx.targetLabel,
+      targetCreatedByUid: _reportCtx.targetCreatedByUid,
+      reason: $('report-reason').value,
+      comment,
+    });
+    trackEvent('store_report', { target_type: _reportCtx.targetType });
+    toast('Report submitted - thank you');
+    closeReportModal();
+  } catch (e) {
+    btn.disabled = false;
+    toast(e.message || 'Could not submit report', 'error');
+  }
 });
 
 // ============================================================ init

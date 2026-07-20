@@ -38,6 +38,7 @@
     <div id="admin-panel" hidden>
       <div class="tabs" role="tablist">
         <button class="tab-btn active" id="overview-btn" role="tab">Overview</button>
+        <button class="tab-btn" id="reports-btn" role="tab">Reports <span class="tab-count" id="reports-tab-count" hidden></span></button>
         <button class="tab-btn" id="catalog-btn" role="tab">Catalog</button>
         <button class="tab-btn" id="cycles-btn" role="tab">Cycles</button>
         <button class="tab-btn" id="users-btn" role="tab">Users</button>
@@ -70,6 +71,26 @@
             <button class="btn btn-primary btn-sm" id="threshold-save-btn" disabled>Save</button>
           </div>
         </div>
+      </div>
+
+      <!-- Reports: community moderation queue, consolidated per object -->
+      <div class="tab-panel" id="reports-tab" role="tabpanel" hidden>
+        <div class="section-header">
+          <h2 class="section-title">Reports</h2>
+          <div style="display:flex;gap:.4rem;align-items:center">
+            <select id="reports-status-filter" aria-label="Report status">
+              <option value="open">Open</option>
+              <option value="resolved">Resolved</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" id="reports-refresh-btn">Refresh</button>
+          </div>
+        </div>
+        <p class="text-muted" style="font-size:.8125rem;margin:.25rem 0 .75rem">
+          Reported objects, grouped so every reporter&rsquo;s comment sits in one place. Remove or delete the
+          object, dismiss the reports, or ban the contributor. Removals count as a strike against the creator.
+        </p>
+        <div id="reports-list"></div>
+        <div class="load-more-area"><button class="btn btn-ghost" id="reports-load-more" hidden>Load more</button></div>
       </div>
 
       <!-- Cycles table -->
@@ -136,13 +157,33 @@
 
       <!-- Users -->
       <div class="tab-panel" id="users-tab" role="tabpanel" hidden>
-        <div class="section-header"><h2 class="section-title">Users</h2></div>
-        <div class="admin-search-bar">
-          <input type="text" id="user-search" placeholder="Search name, login..." autocomplete="off">
+        <div class="section-header">
+          <h2 class="section-title">Users <span class="text-muted" id="users-count" style="font-size:.8125rem;font-weight:400"></span></h2>
+        </div>
+        <div class="filter-rail">
+          <div class="form-group" style="flex:1.5">
+            <label for="user-search">Search</label>
+            <input type="text" id="user-search" placeholder="Search name, login, UID..." autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label for="user-status-filter">Status</label>
+            <select id="user-status-filter">
+              <option value="all">All</option>
+              <option value="active">Active</option>
+              <option value="banned">Banned</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="user-sort">Sort by</label>
+            <select id="user-sort">
+              <option value="joined">Newest</option>
+              <option value="removed">Most removed</option>
+            </select>
+          </div>
         </div>
         <div class="admin-table-wrap">
           <table class="admin-table"><thead><tr>
-            <th>User</th><th>UID</th><th>Status</th><th>Ban reason</th><th>Joined</th><th>Actions</th>
+            <th>User</th><th>UID</th><th>Status</th><th>Removed</th><th>Ban reason</th><th>Joined</th><th>Actions</th>
           </tr></thead><tbody id="users-tbody"></tbody></table>
         </div>
         <div class="load-more-area"><button class="btn btn-ghost" id="users-load-more" hidden>Load more</button></div>
@@ -159,6 +200,13 @@
         </div>
 
         <div class="section-header" style="margin-top:1.5rem">
+          <h3 class="section-title" style="font-size:.9375rem;font-weight:600">Catalog totals</h3>
+        </div>
+        <div class="stat-grid" id="catalog-totals-grid">
+          <div class="loading-center" style="grid-column:1/-1"><div class="loading-spinner"></div></div>
+        </div>
+
+        <div class="section-header" style="margin-top:1.75rem">
           <h3 class="section-title" style="font-size:.9375rem;font-weight:600">All-time totals</h3>
         </div>
         <div class="stat-grid" id="analytics-totals-grid">

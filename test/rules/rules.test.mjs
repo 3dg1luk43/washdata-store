@@ -254,3 +254,113 @@ test('analytics is admin-read-only', async () => {
   await assertFails(getDoc(doc(anon().firestore(), 'analytics/totals3')));
   await assertSucceeds(getDoc(doc(gh('adminU').firestore(), 'analytics/totals3')));
 });
+
+// ------------------------------------------------------------------
+// Content reports (moderation) + repeat-offender strike counter
+// ------------------------------------------------------------------
+// Create rules require the parent object to EXIST and the target* fields to match the
+// report's real location, so seed the parent first.
+async function seedDoc(path, data) {
+  await env.withSecurityRulesDisabled(async (ctx) => { await setDoc(doc(ctx.firestore(), path), data); });
+}
+const deviceReport = (uid, deviceId = 'd_rep', over = {}) => ({
+  reporterUid: uid, reporterName: 'Rep', reason: 'spam', comment: 'looks like spam',
+  targetType: 'device', targetId: deviceId, targetPath: 'devices/' + deviceId,
+  parentCycleId: null, targetLabel: 'Bosch WAT', targetCreatedByUid: 'creatorX',
+  status: 'open', createdAt: serverTimestamp(), ...over,
+});
+
+test('report: a github user can file on an existing object; anon cannot', async () => {
+  await seedDoc('devices/d_rep', validDevice('u9'));
+  await assertSucceeds(setDoc(doc(gh('r1').firestore(), 'devices/d_rep/reports/r1'), deviceReport('r1')));
+  await assertFails(setDoc(doc(anon().firestore(), 'devices/d_rep/reports/anon'), deviceReport('anon')));
+});
+
+test('report: cannot file on a non-existent parent object', async () => {
+  await assertFails(setDoc(doc(gh('r1').firestore(), 'devices/d_missing/reports/r1'), deviceReport('r1', 'd_missing')));
+});
+
+test('report: cannot spoof target* to another object or lie about the type', async () => {
+  await seedDoc('devices/d_real', validDevice('u9'));
+  await seedDoc('devices/d_victim', validDevice('u9'));
+  // Physically under d_real but claims to target d_victim -> path binding rejects it.
+  await assertFails(setDoc(doc(gh('r1').firestore(), 'devices/d_real/reports/r1'), deviceReport('r1', 'd_victim')));
+  // targetType lying about the parent collection is rejected.
+  await assertFails(setDoc(doc(gh('r1').firestore(), 'devices/d_real/reports/r2'), deviceReport('r1', 'd_real', { targetType: 'brand' })));
+});
+
+test('report: reporterUid must match doc id + auth; bad status / empty comment rejected', async () => {
+  await seedDoc('devices/d_rep2', validDevice('u9'));
+  await assertFails(setDoc(doc(gh('r1').firestore(), 'devices/d_rep2/reports/r1'), deviceReport('r1', 'd_rep2', { reporterUid: 'other' })));
+  await assertFails(setDoc(doc(gh('r1').firestore(), 'devices/d_rep2/reports/r2'), deviceReport('r1', 'd_rep2')));
+  await assertFails(setDoc(doc(gh('r1').firestore(), 'devices/d_rep2/reports/r1'), deviceReport('r1', 'd_rep2', { status: 'resolved' })));
+  await assertFails(setDoc(doc(gh('r1').firestore(), 'devices/d_rep2/reports/r1'), deviceReport('r1', 'd_rep2', { comment: '' })));
+});
+
+test('report: a banned user cannot file a report', async () => {
+  await seedDoc('devices/d_rep3', validDevice('u9'));
+  await seedDoc('users/rb', { uid: 'rb', status: 'banned' });
+  await assertFails(setDoc(doc(gh('rb').firestore(), 'devices/d_rep3/reports/rb'), deviceReport('rb', 'd_rep3')));
+});
+
+test('report: private reads - reporter + admin only', async () => {
+  await seedDoc('devices/d_rep4', validDevice('u9'));
+  await seedDoc('devices/d_rep4/reports/r1', deviceReport('r1', 'd_rep4'));
+  await seedDoc('admins/adminU', { uid: 'adminU' });
+  await assertSucceeds(getDoc(doc(gh('r1').firestore(), 'devices/d_rep4/reports/r1')));    // own
+  await assertFails(getDoc(doc(gh('r2').firestore(), 'devices/d_rep4/reports/r1')));        // other user
+  await assertFails(getDoc(doc(anon().firestore(), 'devices/d_rep4/reports/r1')));           // anon
+  await assertSucceeds(getDoc(doc(gh('adminU').firestore(), 'devices/d_rep4/reports/r1'))); // admin
+});
+
+test('report: only admin resolves/deletes; reporter cannot overwrite their report', async () => {
+  await seedDoc('devices/d_rep5', validDevice('u9'));
+  await seedDoc('devices/d_rep5/reports/r1', deviceReport('r1', 'd_rep5'));
+  await seedDoc('admins/adminU', { uid: 'adminU' });
+  await assertFails(updateDoc(doc(gh('r1').firestore(), 'devices/d_rep5/reports/r1'), { status: 'resolved' }));
+  await assertSucceeds(updateDoc(doc(gh('adminU').firestore(), 'devices/d_rep5/reports/r1'), { status: 'resolved', resolution: 'dismissed' }));
+});
+
+test('report: comment reports require the parent comment to exist + a bound path', async () => {
+  await seedDoc('cycles/c_x/comments/cm1', { authorUid: 'u9', text: 'hi', createdAt: serverTimestamp() });
+  const commentReport = {
+    reporterUid: 'r1', reporterName: 'Rep', reason: 'offensive', comment: 'abuse',
+    targetType: 'comment', targetId: 'cm1', parentCycleId: 'c_x', targetPath: 'cycles/c_x/comments/cm1',
+    status: 'open', createdAt: serverTimestamp(),
+  };
+  await assertSucceeds(setDoc(doc(gh('r1').firestore(), 'cycles/c_x/comments/cm1/reports/r1'), commentReport));
+  // A report under a non-existent comment is rejected.
+  await assertFails(setDoc(doc(gh('r1').firestore(), 'cycles/c_x/comments/missing/reports/r1'),
+    { ...commentReport, targetId: 'missing', targetPath: 'cycles/c_x/comments/missing' }));
+});
+
+test('report: brand / profile / cycle parents each bind target* + require existence', async () => {
+  await seedDoc('brands/b_rep', { brand: 'Bosch', brand_lc: 'bosch', status: 'approved' });
+  await seedDoc('profiles/p_rep', { deviceId: 'd', program: 'Cotton', program_lc: 'cotton', status: 'approved' });
+  await seedDoc('cycles/cy_rep', { ...validCycle('u9'), status: 'approved' });
+  const rep = (uid, type, id, path) => ({
+    reporterUid: uid, reporterName: 'Rep', reason: 'wrong', comment: 'bad data',
+    targetType: type, targetId: id, targetPath: path, parentCycleId: null,
+    status: 'open', createdAt: serverTimestamp(),
+  });
+  await assertSucceeds(setDoc(doc(gh('r1').firestore(), 'brands/b_rep/reports/r1'), rep('r1', 'brand', 'b_rep', 'brands/b_rep')));
+  await assertSucceeds(setDoc(doc(gh('r1').firestore(), 'profiles/p_rep/reports/r1'), rep('r1', 'profile', 'p_rep', 'profiles/p_rep')));
+  await assertSucceeds(setDoc(doc(gh('r1').firestore(), 'cycles/cy_rep/reports/r1'), rep('r1', 'cycle', 'cy_rep', 'cycles/cy_rep')));
+  // Wrong targetType for the parent collection is rejected.
+  await assertFails(setDoc(doc(gh('r2').firestore(), 'brands/b_rep/reports/r2'), rep('r2', 'cycle', 'b_rep', 'brands/b_rep')));
+  // Non-existent parent is rejected.
+  await assertFails(setDoc(doc(gh('r1').firestore(), 'profiles/p_missing/reports/r1'), rep('r1', 'profile', 'p_missing', 'profiles/p_missing')));
+});
+
+test('report: unknown extra fields are rejected (keys allowlist)', async () => {
+  await seedDoc('devices/d_keys', validDevice('u9'));
+  await assertFails(setDoc(doc(gh('r1').firestore(), 'devices/d_keys/reports/r1'),
+    deviceReport('r1', 'd_keys', { evil: 'inject' })));
+});
+
+test('strike counter: admin may bump removedContentCount; the user may not', async () => {
+  await seedDoc('users/rc', { uid: 'rc', status: 'active', removedContentCount: 0 });
+  await seedDoc('admins/adminU', { uid: 'adminU' });
+  await assertFails(updateDoc(doc(gh('rc').firestore(), 'users/rc'), { removedContentCount: increment(1) }));
+  await assertSucceeds(updateDoc(doc(gh('adminU').firestore(), 'users/rc'), { removedContentCount: increment(1) }));
+});

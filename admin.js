@@ -25,9 +25,13 @@ import {
   getSiteConfig, setMaintenance, setConfirmThreshold,
   adminSetDeviceOwner, adminSetProfileOwner,
   adminDeleteDevice, adminDeleteBrand, adminDeleteProfile, adminDeleteUser,
+  adminDeleteComment,
   getReferenceCycles,
   adminGetAnalytics,
   getRatingSummary, getDeviceQuality,
+  getUserDoc,
+  adminListReports, getReportsForTarget, adminResolveReports, adminRecordRemoval, adminGetByPath,
+  reportReasonLabel,
 } from './washstore.js';
 import { openSettingsEditor, openPhaseEditor, bindEditorCloseHandlers } from './editors.js';
 
@@ -56,6 +60,18 @@ let _catCycleCursor = null;
 let _catalogLoaded = false;
 // State for the owner-picker modal (shared by device + profile pickers)
 let _ownerPickerCtx = null; // { record, isProfile, card }
+// Cached site stats (catalog totals + open reports + banned count); shared by Overview,
+// Statistics, and the Users header. Refreshed on demand.
+let _statsCache = null;
+// Reports review queue state
+let _reportCursor = null;
+let _reportStatus = 'open';
+let _reportsLoaded = false;
+// Users tab client-side controls
+let _userStatusFilter = 'all'; // all | active | banned
+let _userSort = 'joined';       // joined | removed
+// Target paths already rendered as a group card this load (dedupe across pages).
+const _renderedReportKeys = new Set();
 
 // ============================================================ dom + toast
 function $(id) { return document.getElementById(id); }
@@ -193,7 +209,7 @@ onAuth(async (user) => {
 });
 
 // ============================================================ tabs
-const TABS = ['overview', 'catalog', 'cycles', 'users', 'statistics'];
+const TABS = ['overview', 'reports', 'catalog', 'cycles', 'users', 'statistics'];
 function switchTab(name) {
   TABS.forEach((t) => {
     $(`${t}-tab`).toggleAttribute('hidden', t !== name);
@@ -203,6 +219,7 @@ function switchTab(name) {
 }
 TABS.forEach((name) => $(`${name}-btn`).addEventListener('click', () => {
   switchTab(name);
+  if (name === 'reports' && !_reportsLoaded) loadReports(true);
   if (name === 'catalog' && !_catalogLoaded) loadCatalogData();
   if (name === 'cycles' && !$('cycles-tbody').hasChildNodes()) loadCycles(true);
   if (name === 'users' && !$('users-tbody').hasChildNodes()) loadUsers(true);
@@ -210,16 +227,33 @@ TABS.forEach((name) => $(`${name}-btn`).addEventListener('click', () => {
 }));
 
 // ============================================================ overview
+// Shared site stats (catalog totals + moderation counters). Cached so Overview,
+// Statistics, and the Users header can reuse one round of aggregation queries.
+async function ensureStats(force = false) {
+  if (!_statsCache || force) _statsCache = await adminGetStats();
+  return _statsCache;
+}
+// Keep the "Reports" tab button's count badge in sync with the open-report total.
+function renderReportsTabCount(n) {
+  const badge = $('reports-tab-count');
+  if (!badge) return;
+  badge.textContent = n;
+  badge.toggleAttribute('hidden', !n);
+}
 async function loadOverview() {
   $('stats-grid').innerHTML = '<div class="loading-center" style="grid-column:1/-1"><div class="loading-spinner"></div></div>';
   try {
-    const s = await adminGetStats();
+    const s = await ensureStats(true);
+    renderReportsTabCount(s.openReports);
     $('stats-grid').innerHTML = `
+      <div class="stat-card stat-card-link" id="ov-reports-card"><div class="stat-label">Open Reports</div><div class="stat-value ${s.openReports ? 'c-rejected' : 'c-approved'}">${s.openReports}</div></div>
       <div class="stat-card"><div class="stat-label">Pending Review</div><div class="stat-value c-pending">${s.pending}</div></div>
       <div class="stat-card"><div class="stat-label">Approved</div><div class="stat-value c-approved">${s.approved}</div></div>
       <div class="stat-card"><div class="stat-label">Rejected</div><div class="stat-value c-rejected">${s.rejected}</div></div>
       <div class="stat-card"><div class="stat-label">Removed</div><div class="stat-value c-removed">${s.removed}</div></div>
       <div class="stat-card"><div class="stat-label">Banned Users</div><div class="stat-value c-ban">${s.bannedUsers}</div></div>`;
+    const rc = $('ov-reports-card');
+    if (rc) rc.addEventListener('click', () => { switchTab('reports'); if (!_reportsLoaded) loadReports(true); });
   } catch (e) {
     $('stats-grid').innerHTML = `<div class="text-muted" style="grid-column:1/-1;padding:1rem">${esc(e.message)}</div>`;
     toast(e.message, 'error');
@@ -723,30 +757,57 @@ $('cat-search').addEventListener('input', () => {
 
 // ============================================================ users table
 async function loadUsers(reset = false) {
-  if (reset) { _userCursor = null; _userItems = []; $('users-tbody').innerHTML = `<tr><td colspan="6" class="tbl-msg">Loading...</td></tr>`; $('users-load-more').setAttribute('hidden', ''); }
+  const banned = _userStatusFilter === 'banned';
+  if (reset) { _userCursor = null; _userItems = []; $('users-tbody').innerHTML = `<tr><td colspan="7" class="tbl-msg">Loading...</td></tr>`; $('users-load-more').setAttribute('hidden', ''); }
   try {
-    const { items, cursor } = await adminListUsers({ pageSize: 40, cursor: _userCursor });
-    if (reset) $('users-tbody').innerHTML = '';
+    const { items, cursor } = await adminListUsers({ pageSize: banned ? 200 : 40, cursor: _userCursor, status: banned ? 'banned' : null });
     _userItems = [..._userItems, ...items];
-    if (items.length === 0 && !_userCursor) { $('users-tbody').innerHTML = `<tr><td colspan="6" class="tbl-msg">No users found.</td></tr>`; }
-    else { items.forEach((u) => $('users-tbody').appendChild(buildUserRow(u))); }
-    _userCursor = cursor; $('users-load-more').toggleAttribute('hidden', !cursor);
+    _userCursor = cursor;
+    renderUserRows();
+    $('users-load-more').toggleAttribute('hidden', !cursor);
+    updateUsersCount();
   } catch (e) {
-    if (reset) $('users-tbody').innerHTML = `<tr><td colspan="6" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
+    if (reset) $('users-tbody').innerHTML = `<tr><td colspan="7" class="tbl-msg" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
     toast(e.message, 'error');
   }
+}
+
+// Re-render the whole tbody from the loaded set, applying the client-side status filter
+// (active hides banned), the sort, and the live text-search filter.
+function renderUserRows() {
+  const tbody = $('users-tbody');
+  tbody.innerHTML = '';
+  let rows = _userItems.slice();
+  if (_userStatusFilter === 'active') rows = rows.filter((u) => (u.status || 'active') !== 'banned');
+  if (_userSort === 'removed') rows.sort((a, b) => (b.removedContentCount || 0) - (a.removedContentCount || 0));
+  if (!rows.length) { tbody.innerHTML = `<tr><td colspan="7" class="tbl-msg">No users found.</td></tr>`; return; }
+  rows.forEach((u) => tbody.appendChild(buildUserRow(u)));
+  filterRows('user-search', tbody);
+}
+
+async function updateUsersCount() {
+  const el = $('users-count'); if (!el) return;
+  try { const s = await ensureStats(); el.textContent = `· ${s.totalUsers} total · ${s.bannedUsers} banned`; } catch (_) {}
+}
+
+// Repeat-offender strike cell: number of this user's contributions an admin has removed.
+function strikeCellHTML(u) {
+  const n = u.removedContentCount || 0;
+  if (!n) return '<span class="text-muted">0</span>';
+  return `<span class="strike-badge${n >= 3 ? ' strike-high' : ''}" title="Contributions removed by moderators">&#9873; ${n}</span>`;
 }
 
 function buildUserRow(u) {
   const tr = document.createElement('tr');
   const name = u.displayName || u.githubLogin || u.email || u.uid.slice(0, 12);
-  tr.dataset.search = `${name} ${u.githubLogin || ''} ${u.email || ''} ${u.status || ''}`.toLowerCase();
+  tr.dataset.search = `${name} ${u.githubLogin || ''} ${u.email || ''} ${u.uid} ${u.status || ''}`.toLowerCase();
   const initial = name.charAt(0).toUpperCase();
   const avatar = u.photoURL ? `<img src="${esc(u.photoURL)}" alt="">` : initial;
   tr.innerHTML = `
     <td><div class="user-cell"><div class="user-cell-avatar">${avatar}</div><span style="font-size:.8125rem;font-weight:500">${esc(name)}</span></div></td>
     <td><code class="mono" style="font-size:.7rem">${esc(truncate(u.uid, 12))}</code></td>
     <td>${statusBadge(u)}</td>
+    <td>${strikeCellHTML(u)}</td>
     <td class="text-muted" style="font-size:.75rem;max-width:160px;overflow:hidden;text-overflow:ellipsis">${esc(u.banReason || '-')}</td>
     <td class="text-muted" style="white-space:nowrap;font-size:.72rem">${formatDate(u.createdAt)}</td>
     <td><div class="action-cell"></div></td>`;
@@ -792,10 +853,13 @@ function buildUserActions(cell, u, tr) {
 function refreshUserRow(tr, u) {
   const cells = tr.querySelectorAll('td');
   cells[2].innerHTML = statusBadge(u);
-  cells[3].textContent = u.banReason || '-';
-  buildUserActions(cells[5].querySelector('.action-cell'), u, tr);
+  cells[3].innerHTML = strikeCellHTML(u);
+  cells[4].textContent = u.banReason || '-';
+  buildUserActions(cells[6].querySelector('.action-cell'), u, tr);
 }
 $('user-search').addEventListener('input', () => filterRows('user-search', $('users-tbody')));
+$('user-status-filter').addEventListener('change', (e) => { _userStatusFilter = e.target.value; loadUsers(true); });
+$('user-sort').addEventListener('change', (e) => { _userSort = e.target.value; renderUserRows(); });
 $('users-load-more').addEventListener('click', () => loadUsers(false));
 
 // ============================================================ review modal
@@ -825,6 +889,237 @@ $('review-modal-close').addEventListener('click', closeReviewModal);
 $('review-modal-close-footer').addEventListener('click', closeReviewModal);
 $('review-modal').addEventListener('click', (e) => { if (e.target === $('review-modal')) closeReviewModal(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('review-modal').hasAttribute('hidden')) closeReviewModal(); });
+
+// ============================================================ reports (moderation queue)
+const _REPORT_TYPE_LABEL = { brand: 'Brand', device: 'Device', profile: 'Profile', cycle: 'Cycle', comment: 'Comment' };
+
+function creatorUidOf(obj, targetType) {
+  if (!obj) return null;
+  if (targetType === 'cycle') return obj.uploaderUid || null;
+  if (targetType === 'comment') return obj.authorUid || null;
+  return obj.createdByUid || null;
+}
+
+// Derive a report's TRUE target from the report doc's real Firestore location (_path),
+// not the client-written target* fields. This is the integrity guarantee: a spoofed
+// targetPath/targetType/targetId field can only mislead the label, never the object an
+// admin action actually hits. Falls back to the fields only if _path is unavailable.
+function deriveReportTarget(r) {
+  const p = r._path;
+  if (p && p.includes('/reports/')) {
+    const objPath = p.slice(0, p.lastIndexOf('/reports/'));
+    const s = objPath.split('/');
+    if (s[0] === 'brands' && s.length === 2) return { targetPath: objPath, targetType: 'brand', targetId: s[1], parentCycleId: null };
+    if (s[0] === 'devices' && s.length === 2) return { targetPath: objPath, targetType: 'device', targetId: s[1], parentCycleId: null };
+    if (s[0] === 'profiles' && s.length === 2) return { targetPath: objPath, targetType: 'profile', targetId: s[1], parentCycleId: null };
+    if (s[0] === 'cycles' && s[2] === 'comments' && s.length === 4) return { targetPath: objPath, targetType: 'comment', targetId: s[3], parentCycleId: s[1] };
+    if (s[0] === 'cycles' && s.length === 2) return { targetPath: objPath, targetType: 'cycle', targetId: s[1], parentCycleId: null };
+  }
+  return { targetPath: r.targetPath, targetType: r.targetType, targetId: r.targetId, parentCycleId: r.parentCycleId || null };
+}
+
+// Group a page of report docs by their target object (all reporters on one object collapse
+// into one card). Grouping key + action target both come from the derived (trusted) path.
+function groupReports(items) {
+  const map = new Map();
+  for (const r of items) {
+    const t = deriveReportTarget(r);
+    const key = t.targetPath || `${t.targetType}:${t.targetId}`;
+    if (!map.has(key)) map.set(key, { key, ...t, targetLabel: r.targetLabel || '', reports: [] });
+    map.get(key).reports.push(r);
+  }
+  return [...map.values()];
+}
+
+async function loadReports(reset = false) {
+  _reportsLoaded = true;
+  if (reset) {
+    _reportCursor = null;
+    _renderedReportKeys.clear();
+    $('reports-list').innerHTML = '<div class="loading-center" style="padding:2rem"><div class="loading-spinner"></div></div>';
+    $('reports-load-more').setAttribute('hidden', '');
+  }
+  try {
+    const { items, cursor } = await adminListReports({ status: _reportStatus, pageSize: 80, cursor: _reportCursor });
+    if (reset) $('reports-list').innerHTML = '';
+    const groups = groupReports(items).filter((g) => !_renderedReportKeys.has(g.key));
+    groups.forEach((g) => _renderedReportKeys.add(g.key));
+    if (!_renderedReportKeys.size) {
+      $('reports-list').innerHTML = `<div class="empty-state" style="padding:2.5rem"><div class="empty-icon">&#9873;</div>
+        <div class="empty-title">${_reportStatus === 'open' ? 'No open reports' : 'No resolved reports'}</div>
+        <div class="empty-text">${_reportStatus === 'open' ? 'Nothing to review right now.' : 'Resolved reports will appear here.'}</div></div>`;
+    } else {
+      groups.forEach((g) => $('reports-list').appendChild(buildReportGroupCard(g)));
+    }
+    _reportCursor = cursor;
+    $('reports-load-more').toggleAttribute('hidden', !cursor);
+  } catch (e) {
+    if (reset) $('reports-list').innerHTML = `<div class="text-muted" style="padding:1rem;color:var(--danger)">${esc(e.message)}</div>`;
+    toast(e.message, 'error');
+  }
+}
+
+// Build a consolidated card for one reported object. The shell renders immediately; the
+// live object status, creator (+ strike count), full report list, and actions fill in
+// asynchronously.
+function buildReportGroupCard(g) {
+  const card = document.createElement('div');
+  card.className = 'report-group';
+  const title = g.targetLabel || g.targetId || '(unknown)';
+  card.innerHTML = `
+    <div class="report-group-head">
+      <div class="report-target">
+        <span class="badge report-type-badge">${esc(_REPORT_TYPE_LABEL[g.targetType] || g.targetType)}</span>
+        <span class="report-target-title">${esc(title)}</span>
+        <span class="badge report-live-status" data-livestatus>&hellip;</span>
+      </div>
+      <div class="report-creator" data-creator></div>
+    </div>
+    <div class="report-path mono">${esc(g.targetPath || '')}</div>
+    <div class="report-items" data-items>
+      <div class="loading-center" style="padding:.75rem"><div class="loading-spinner"></div></div>
+    </div>
+    <div class="report-actions" data-actions></div>`;
+  hydrateReportGroupCard(card, g).catch(() => {});
+  return card;
+}
+
+async function hydrateReportGroupCard(card, g) {
+  // Full consolidation: every report on this object of the current status (independent of
+  // which queue page each landed on).
+  let allReports = g.reports;
+  try {
+    const fetched = await getReportsForTarget(g.targetPath);
+    const filtered = fetched.filter((r) => (r.status || 'open') === _reportStatus);
+    if (filtered.length) allReports = filtered;
+  } catch (_) { /* fall back to the page's reports */ }
+  renderReportItems(card.querySelector('[data-items]'), allReports);
+
+  // Live object + creator.
+  let live = null;
+  try { live = await adminGetByPath(g.targetPath); } catch (_) {}
+  const statusEl = card.querySelector('[data-livestatus]');
+  if (!live) {
+    statusEl.textContent = 'gone';
+    statusEl.className = 'badge report-live-status badge-removed';
+  } else {
+    const st = live.status || (g.targetType === 'comment' ? 'present' : 'unknown');
+    // Only approved/pending/removed/rejected have coloured badge classes; anything else
+    // (a live comment, unknown) falls back to the neutral grey badge.
+    const known = ['approved', 'pending', 'removed', 'rejected'].includes(st);
+    statusEl.textContent = st;
+    statusEl.className = `badge report-live-status ${known ? 'badge-' + st : 'badge-removed'}`;
+  }
+  // Creator identity comes ONLY from the trusted live object -- never the reporter-supplied
+  // targetCreatedByUid field (which could name a victim). If the object is gone, creatorUid
+  // stays null so neither a ban nor a strike can be aimed at an unverified uid.
+  const creatorUid = creatorUidOf(live, g.targetType) || null;
+  await renderReportCreator(card.querySelector('[data-creator]'), creatorUid, card, g);
+  renderReportGroupActions(card.querySelector('[data-actions]'), g, live, creatorUid);
+}
+
+function renderReportItems(container, reports) {
+  container.innerHTML = '';
+  reports.forEach((r) => {
+    const item = document.createElement('div');
+    item.className = 'report-item';
+    const who = r.reporterName || (r.reporterUid ? truncate(r.reporterUid, 10) : 'Anonymous');
+    item.innerHTML = `
+      <div class="report-item-head">
+        <span class="report-reason-chip">${esc(reportReasonLabel(r.reason))}</span>
+        <span class="report-item-who">${esc(who)}</span>
+        <span class="report-item-date text-muted">${formatDate(r.createdAt)}</span>
+      </div>
+      <div class="report-item-comment">${esc(r.comment || '')}</div>`;
+    container.appendChild(item);
+  });
+}
+
+async function renderReportCreator(container, creatorUid, card, g) {
+  if (!creatorUid) { container.innerHTML = `<span class="text-muted" style="font-size:.75rem">Contributor: anonymous / unknown</span>`; return; }
+  container.innerHTML = `<span class="text-muted" style="font-size:.75rem">Contributor&hellip;</span>`;
+  let u = null;
+  try { u = await getUserDoc(creatorUid); } catch (_) {}
+  const name = (u && (u.displayName || u.githubLogin)) || truncate(creatorUid, 12);
+  const strikes = (u && u.removedContentCount) || 0;
+  const banned = u && u.status === 'banned';
+  const strikeBadge = strikes > 0 ? `<span class="strike-badge${strikes >= 3 ? ' strike-high' : ''}" title="Contributions removed">&#9873; ${strikes} removed</span>` : '';
+  container.innerHTML = `
+    <span class="report-creator-name">${esc(name)}</span>
+    ${banned ? '<span class="badge badge-rejected">Banned</span>' : ''}
+    ${strikeBadge}
+    ${banned ? '' : '<button class="btn btn-danger btn-sm" data-ban>Ban contributor</button>'}`;
+  const banBtn = container.querySelector('[data-ban]');
+  if (banBtn) banBtn.addEventListener('click', async () => {
+    const reason = prompt(`Ban ${name}?\nReason (shown to the user):`);
+    if (reason === null) return;
+    banBtn.disabled = true;
+    try {
+      await adminBanUser(creatorUid, reason || '');
+      toast('Contributor banned');
+      await renderReportCreator(container, creatorUid, card, g);
+    } catch (e) { banBtn.disabled = false; toast(e.message, 'error'); }
+  });
+}
+
+function renderReportGroupActions(container, g, live, creatorUid) {
+  container.innerHTML = '';
+  if (_reportStatus !== 'open') {
+    const r0 = g.reports[0] || {};
+    container.innerHTML = `<span class="text-muted" style="font-size:.75rem">Resolved${r0.resolution ? ` (${esc(r0.resolution)})` : ''} ${r0.resolvedAt ? '&middot; ' + formatDate(r0.resolvedAt) : ''}</span>`;
+    return;
+  }
+  const finish = (verb, resolution) => async () => {
+    // Resolve reports first (the only step that can throw). The strike bump is best-effort
+    // and never throws, and runs after, so a failed-then-retried action can't double-count.
+    await adminResolveReports(g.targetPath, resolution);
+    if (creatorUid && resolution !== 'dismissed') await adminRecordRemoval(creatorUid);
+    container.closest('.report-group').remove();
+    toast(`Reports ${verb}`);
+    ensureStats(true).then((s) => renderReportsTabCount(s.openReports)).catch(() => {});
+  };
+  const mk = (label, cls, handler) => {
+    const b = document.createElement('button');
+    b.className = `btn ${cls} btn-sm`; b.textContent = label;
+    b.addEventListener('click', async () => {
+      container.querySelectorAll('button').forEach((x) => { x.disabled = true; });
+      try { await handler(); }
+      catch (e) { toast(e.message, 'error'); }
+      // Re-enable if the card survived (e.g. a cancelled confirm); on success it's removed.
+      if (container.isConnected) container.querySelectorAll('button').forEach((x) => { x.disabled = false; });
+    });
+    container.appendChild(b);
+  };
+  const objGone = !live;
+  const softRemove = {
+    brand: () => adminSetBrandStatus(g.targetId, 'removed'),
+    device: () => adminSetDeviceStatus(g.targetId, 'removed'),
+    profile: () => adminSetProfileStatus(g.targetId, 'removed'),
+    cycle: () => adminSetCycleStatus(g.targetId, 'removed'),
+  }[g.targetType];
+  const hardDelete = {
+    brand: () => adminDeleteBrand(g.targetId),
+    device: () => adminDeleteDevice(g.targetId),
+    profile: () => adminDeleteProfile(g.targetId),
+    cycle: () => deleteCycle(g.targetId),
+    comment: () => adminDeleteComment(g.parentCycleId, g.targetId),
+  }[g.targetType];
+
+  if (!objGone && softRemove) {
+    mk('Remove (hide)', 'btn-ghost', async () => { await softRemove(); await finish('cleared - object removed', 'removed')(); });
+  }
+  if (!objGone && hardDelete) {
+    mk('Delete permanently', 'btn-danger', async () => {
+      if (!confirm(`Permanently delete this ${(_REPORT_TYPE_LABEL[g.targetType] || 'object').toLowerCase()}${g.targetType === 'device' || g.targetType === 'profile' ? ' and all its data' : ''}? This cannot be undone.`)) return;
+      await hardDelete(); await finish('cleared - object deleted', 'deleted')();
+    });
+  }
+  mk('Dismiss reports', 'btn-ghost', finish('dismissed', 'dismissed'));
+}
+
+$('reports-refresh-btn').addEventListener('click', () => loadReports(true));
+$('reports-status-filter').addEventListener('change', (e) => { _reportStatus = e.target.value; loadReports(true); });
+$('reports-load-more').addEventListener('click', () => loadReports(false));
 
 // ============================================================ statistics
 // 'downloads' = integration adoptions (someone pulled a device/cycle into ha_washdata) —
@@ -890,6 +1185,21 @@ async function loadStatistics() {
   if (labelEl) labelEl.textContent = `(last ${_statsDays} days)`;
   if (label2El) label2El.textContent = `(last ${_statsDays} days)`;
 
+  // Catalog totals (users / brands / devices / profiles / cycles). Independent of the
+  // analytics fetch so an analytics error never blanks these.
+  const catEl = $('catalog-totals-grid');
+  if (catEl) {
+    catEl.innerHTML = '<div class="loading-center" style="grid-column:1/-1"><div class="loading-spinner"></div></div>';
+    ensureStats().then((s) => {
+      catEl.innerHTML = '';
+      catEl.appendChild(_statCard('Users', s.totalUsers, ''));
+      catEl.appendChild(_statCard('Brands', s.totalBrands, ''));
+      catEl.appendChild(_statCard('Devices', s.totalDevices, ''));
+      catEl.appendChild(_statCard('Profiles', s.totalProfiles, ''));
+      catEl.appendChild(_statCard('Cycles', s.totalCycles, 'c-approved'));
+    }).catch((e) => { catEl.innerHTML = `<div class="text-muted" style="grid-column:1/-1;padding:1rem">${esc(e.message)}</div>`; });
+  }
+
   try {
     const { totals, daily } = await adminGetAnalytics({ days: _statsDays });
     const slice = daily.slice(-_statsDays);
@@ -929,6 +1239,6 @@ async function loadStatistics() {
     loadStatistics();
   });
 });
-$('analytics-refresh-btn').addEventListener('click', () => { _statsLoaded = false; loadStatistics(); });
+$('analytics-refresh-btn').addEventListener('click', () => { _statsLoaded = false; _statsCache = null; loadStatistics(); });
 
 bindEditorCloseHandlers();

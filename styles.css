@@ -1702,3 +1702,114 @@ input[type="url"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
 .cg-cross { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 3 3; opacity: .7; }
 .cg-dot { fill: var(--accent); stroke: var(--bg-surface); stroke-width: 1.5; }
 .cycle-graph-readout { font-size: .8125rem; margin-top: .5rem; font-family: 'JetBrains Mono', monospace; }
+
+/* ============================================================
+   Content reports & moderation
+   ============================================================ */
+/* Public "report" affordance: a quiet flag button on cards / views. */
+.report-btn {
+  color: var(--text-muted);
+  padding-left: .55rem;
+  padding-right: .55rem;
+}
+.report-btn:hover { color: var(--danger); border-color: rgba(255, 107, 107, 0.4); }
+.view-toolbar { display: flex; justify-content: flex-end; margin-bottom: .5rem; }
+
+/* Report modal acknowledgement (already reported). */
+.report-already {
+  background: rgba(63, 185, 80, 0.1);
+  border: 1px solid rgba(63, 185, 80, 0.3);
+  color: var(--success);
+  border-radius: var(--radius);
+  padding: .75rem .9rem;
+  font-size: .875rem;
+}
+
+/* Reports tab button count badge. */
+.tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  padding: 0 .35rem;
+  margin-left: .35rem;
+  border-radius: 2rem;
+  background: rgba(255, 107, 107, 0.18);
+  color: var(--danger);
+  font-size: .6875rem;
+  font-weight: 700;
+}
+
+/* Clickable overview stat cards (open reports -> reports tab). */
+.stat-card-link { cursor: pointer; transition: border-color var(--transition), transform var(--transition); }
+.stat-card-link:hover { border-color: var(--accent); transform: translateY(-1px); }
+
+/* Repeat-offender strike badge (users table + review card). */
+.strike-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: .2rem;
+  padding: .1rem .45rem;
+  border-radius: 2rem;
+  font-size: .7rem;
+  font-weight: 700;
+  background: var(--pulse-dim);
+  color: var(--warning);
+  border: 1px solid rgba(255, 180, 90, 0.3);
+  white-space: nowrap;
+}
+.strike-badge.strike-high { background: rgba(255, 107, 107, 0.16); color: var(--danger); border-color: rgba(255, 107, 107, 0.35); }
+
+/* Admin review queue: one consolidated card per reported object. */
+.report-group {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-lg);
+  padding: 1rem 1.1rem;
+  margin-bottom: 1rem;
+}
+.report-group-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.report-target { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.report-type-badge { background: var(--accent-dim); color: var(--accent); border-color: rgba(124, 156, 255, 0.25); }
+.report-target-title { font-weight: 600; font-size: .95rem; }
+.report-live-status { text-transform: uppercase; }
+.report-path { font-size: .7rem; color: var(--text-muted); margin: .35rem 0 .6rem; word-break: break-all; }
+.report-creator { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.report-creator-name { font-size: .8125rem; font-weight: 600; }
+
+.report-items {
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  margin: .25rem 0 .75rem;
+}
+.report-item {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  padding: .55rem .7rem;
+}
+.report-item-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: .3rem; }
+.report-reason-chip {
+  font-size: .6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  color: var(--warning);
+  background: var(--pulse-dim);
+  border: 1px solid rgba(255, 180, 90, 0.3);
+  padding: .1rem .45rem;
+  border-radius: 2rem;
+}
+.report-item-who { font-size: .8rem; font-weight: 600; }
+.report-item-date { font-size: .72rem; }
+.report-item-comment { font-size: .875rem; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+.report-actions { display: flex; gap: .5rem; flex-wrap: wrap; padding-top: .6rem; border-top: 1px solid var(--border-subtle); }

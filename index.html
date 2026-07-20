@@ -192,6 +192,39 @@
     </div>
   </div>
 
+  <!-- Report content modal -->
+  <div class="modal-overlay" id="report-modal" hidden aria-modal="true" role="dialog" aria-labelledby="report-modal-title">
+    <div class="modal" style="max-width:460px">
+      <div class="modal-header">
+        <div>
+          <h2 class="modal-title" id="report-modal-title">Report content</h2>
+          <div class="modal-subtitle" id="report-target-label"></div>
+        </div>
+        <button class="modal-close" id="report-close" aria-label="Close">&#215;</button>
+      </div>
+      <div class="modal-body">
+        <div id="report-already" class="report-already" hidden>
+          &#10003; You already reported this. Thanks &mdash; our moderators will review it.
+        </div>
+        <div id="report-form">
+          <div class="form-group">
+            <label for="report-reason">Reason</label>
+            <select id="report-reason"></select>
+          </div>
+          <div class="form-group">
+            <label for="report-comment">What&rsquo;s wrong?</label>
+            <textarea id="report-comment" rows="4" maxlength="1000" placeholder="Give the moderators the details (required)."></textarea>
+          </div>
+          <div class="form-hint">Reports are private &mdash; only site moderators can see them.</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost btn-sm" id="report-cancel">Cancel</button>
+        <button class="btn btn-danger btn-sm" id="report-submit">Submit report</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast-container" id="toasts" aria-live="assertive" aria-atomic="true"></div>
   <script type="module" src="app.js"></script>
 </body>

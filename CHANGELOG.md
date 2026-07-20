@@ -11,7 +11,20 @@ to share and adopt appliance power-cycle reference recordings so nobody has to t
 washing-machine program from scratch. It is a static site hosted on GitHub Pages, backed by
 Firebase Firestore, with no ads, no tracking, and no paid tier.
 
-## 1.0.0 (16.07.2026)
+## 1.1.0 (2026-07-20)
+
+### Added
+
+- **Content reporting**: Any signed-in contributor can report a brand, device, program, cycle, or comment, choosing a reason (spam, wrong data, offensive, duplicate, or other) and adding a comment. Reports are private (only moderators can read them) and limited to one per user per object, enforced in the security rules.
+- **Moderation review queue**: A new **Reports** tab in the admin panel consolidates every report filed against the same object into one card, so all reporters' comments sit in one place. From the card a moderator can hide the object (soft-remove), delete it permanently, dismiss the reports, or ban the contributor - and sees the object's live status and the contributor's strike count before acting.
+- **Repeat-offender tracking**: Removing or deleting a contribution records a strike on the contributor's account (`removedContentCount`). Strikes surface in the review card and as a "Removed" column in the Users tab so repeat offenders are easy to spot.
+
+### Changed
+
+- **Admin Users tab**: Adds a total/banned user count, a status filter (all / active / banned), a sort (newest / most removed), a removed-content strike column, and UID search.
+- **Admin Statistics tab**: Adds catalog totals - total users, brands, devices, programs, and cycles.
+
+## 1.0.0 (2026-07-16)
 
 Everything below is the initial build, accumulating toward the first public release. The
 

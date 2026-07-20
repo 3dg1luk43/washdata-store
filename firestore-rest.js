@@ -72,6 +72,10 @@ function decodeDoc(doc) {
   const o = {};
   for (const [k, v] of Object.entries(doc.fields || {})) o[k] = decodeValue(v);
   o.id = doc.name.split('/').pop();
+  // Path of the doc relative to the database root (e.g. "devices/x/reports/uid"). Lets
+  // callers derive a doc's true location instead of trusting denormalized path fields.
+  const parts = doc.name.split('/documents/');
+  o._path = parts.length > 1 ? parts[1] : null;
   return o;
 }
 
@@ -79,8 +83,11 @@ function decodeDoc(doc) {
 // opts: { filters, orderBy:[{field,dir}], limit, startAfter:[values], parent }
 // parent (e.g. "cycles/abc") scopes the query to a subcollection.
 export async function restQuery(collectionId, opts = {}) {
-  const { filters = [], orderBy = [], limit, startAfter, parent } = opts;
-  const sq = { from: [{ collectionId }] };
+  const { filters = [], orderBy = [], limit, startAfter, parent, allDescendants = false } = opts;
+  // allDescendants=true turns this into a collection-group query (every subcollection with
+  // this id at any depth). Collection-group queries always run from the database root, so
+  // `parent` is ignored in that mode.
+  const sq = { from: [{ collectionId, ...(allDescendants ? { allDescendants: true } : {}) }] };
   const ff = filters.map((f) => ({ fieldFilter: { field: { fieldPath: f.field }, op: f.op, value: encodeValue(f.value) } }));
   if (ff.length === 1) sq.where = ff[0];
   else if (ff.length > 1) sq.where = { compositeFilter: { op: 'AND', filters: ff } };
@@ -110,9 +117,11 @@ export async function restGet(path, opts = {}) {
   return decodeDoc(await res.json());
 }
 
-// count() aggregation over a collection with optional equality filters.
+// count() aggregation over a collection with optional equality filters. Pass
+// opts.allDescendants=true to count across a collection group (all subcollections with
+// this id at any depth).
 export async function restCount(collectionId, filters = [], opts = {}) {
-  const sq = { from: [{ collectionId }] };
+  const sq = { from: [{ collectionId, ...(opts.allDescendants ? { allDescendants: true } : {}) }] };
   const ff = filters.map((f) => ({ fieldFilter: { field: { fieldPath: f.field }, op: f.op, value: encodeValue(f.value) } }));
   if (ff.length === 1) sq.where = ff[0];
   else if (ff.length > 1) sq.where = { compositeFilter: { op: 'AND', filters: ff } };

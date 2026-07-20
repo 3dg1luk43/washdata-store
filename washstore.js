@@ -61,6 +61,19 @@ function hydrateCycle(rec) {
 export const STORE_SCHEMA_VERSION = 2;
 export const CYCLE_SCHEMA_VERSION = 1;
 
+// Content-report reason categories (value stored on the report doc; label shown in the UI
+// and grouped in the admin review queue). Keep values <= 40 chars to satisfy the rule.
+export const REPORT_REASONS = [
+  { value: 'spam', label: 'Spam or advertising' },
+  { value: 'wrong', label: 'Wrong or misleading data' },
+  { value: 'offensive', label: 'Offensive or abusive' },
+  { value: 'duplicate', label: 'Duplicate' },
+  { value: 'other', label: 'Something else' },
+];
+const _REPORT_REASON_LABELS = Object.fromEntries(REPORT_REASONS.map((r) => [r.value, r.label]));
+export function reportReasonLabel(v) { return _REPORT_REASON_LABELS[v] || v || 'Other'; }
+export const REPORT_TARGET_TYPES = ['brand', 'device', 'profile', 'cycle', 'comment'];
+
 // Client size cap. Firestore hard-caps a document at 1 MiB server-side; this is a
 // friendlier client-side gate well below that so uploads fail early with a clear message.
 export const MAX_DOC_BYTES = 900 * 1024;
@@ -998,14 +1011,18 @@ export async function adminMergeProfiles(fromId, toId) {
   await batch.commit();
 }
 
-export async function adminListUsers({ pageSize = 50, cursor = null } = {}) {
+export async function adminListUsers({ pageSize = 50, cursor = null, status = null } = {}) {
+  // A status equality filter (e.g. banned-only) drops the createdAt ordering so it needs
+  // only the automatic single-field index -- no composite index/deploy. Those views load a
+  // single (large) batch rather than paginating, which is fine for the small banned set.
   const items = await restQuery('users', {
-    orderBy: [{ field: 'createdAt', dir: 'DESCENDING' }],
+    filters: status ? [{ field: 'status', op: 'EQUAL', value: status }] : [],
+    orderBy: status ? [] : [{ field: 'createdAt', dir: 'DESCENDING' }],
     limit: pageSize,
-    startAfter: cursor ? [cursor] : null,
+    startAfter: (!status && cursor) ? [cursor] : null,
     auth: true,
   });
-  const next = items.length === pageSize ? items[items.length - 1].createdAt : null;
+  const next = (!status && items.length === pageSize) ? items[items.length - 1].createdAt : null;
   return { items, cursor: next };
 }
 
@@ -1084,11 +1101,143 @@ export async function adminDeleteUser(uid) {
 
 export async function adminGetStats() {
   const c = (coll, s) => restCount(coll, [{ field: 'status', op: 'EQUAL', value: s }], { auth: true });
-  const [pb, pd, pp, pc, approved, rejected, removed, bannedUsers] = await Promise.all([
+  const total = (coll) => restCount(coll, [], { auth: true });
+  const [
+    pb, pd, pp, pc, approved, rejected, removed, bannedUsers,
+    totalUsers, totalBrands, totalDevices, totalProfiles, totalCycles, openReports,
+  ] = await Promise.all([
     // "Pending review" spans the whole catalog, not just cycles.
     c('brands', 'pending'), c('devices', 'pending'), c('profiles', 'pending'), c('cycles', 'pending'),
     c('cycles', 'approved'), c('cycles', 'rejected'), c('cycles', 'removed'),
     restCount('users', [{ field: 'status', op: 'EQUAL', value: 'banned' }], { auth: true }),
+    total('users'), total('brands'), total('devices'), total('profiles'), total('cycles'),
+    // Open reports span every `reports` subcollection (collection-group count).
+    restCount('reports', [{ field: 'status', op: 'EQUAL', value: 'open' }], { auth: true, allDescendants: true }),
   ]);
-  return { pending: pb + pd + pp + pc, approved, rejected, removed, bannedUsers };
+  return {
+    pending: pb + pd + pp + pc, approved, rejected, removed, bannedUsers,
+    totalUsers, totalBrands, totalDevices, totalProfiles, totalCycles, openReports,
+  };
+}
+
+// ------------------------------------------------------------------
+// Content reports (community moderation)
+// ------------------------------------------------------------------
+
+// Build the Firestore path of a reportable object. `targetType` is one of REPORT_TARGET_TYPES.
+// For comments, `parentCycleId` locates the parent cycle (comments live under cycles).
+export function reportTargetPath(targetType, targetId, parentCycleId = null) {
+  switch (targetType) {
+    case 'brand': return `brands/${targetId}`;
+    case 'device': return `devices/${targetId}`;
+    case 'profile': return `profiles/${targetId}`;
+    case 'cycle': return `cycles/${targetId}`;
+    case 'comment': return `cycles/${parentCycleId}/comments/${targetId}`;
+    default: throw new Error('Unknown report target type');
+  }
+}
+
+// Submit a report against an object. One report per user per object: the doc id is the
+// reporter's uid, so a second report on the same object from the same user is denied by
+// the rules (create-only). `targetLabel` is a denormalized display hint for the queue.
+export async function submitReport({
+  targetType, targetId, parentCycleId = null, targetLabel = null,
+  targetCreatedByUid = null, reason = 'other', comment,
+}) {
+  const user = _auth.currentUser;
+  if (!user) throw new Error('Not signed in');
+  const text = (comment || '').trim();
+  if (!text) throw new Error('Please describe the problem');
+  if (!REPORT_TARGET_TYPES.includes(targetType)) throw new Error('Unknown report target type');
+  _rateGuard();
+  const targetPath = reportTargetPath(targetType, targetId, parentCycleId);
+  const ref = doc(_db, `${targetPath}/reports/${user.uid}`);
+  await setDoc(ref, {
+    reporterUid: user.uid,
+    // Cap at the rule's optName() limit so a long GitHub display name can't get the whole
+    // report rejected.
+    reporterName: user.displayName ? String(user.displayName).slice(0, 100) : null,
+    reason: String(reason).slice(0, 40),
+    comment: text.slice(0, 1000),
+    targetType,
+    targetId,
+    targetPath,
+    parentCycleId: parentCycleId || null,
+    targetLabel: targetLabel ? String(targetLabel).slice(0, 200) : null,
+    targetCreatedByUid: targetCreatedByUid || null,
+    status: 'open',
+    createdAt: serverTimestamp(),
+  });
+}
+
+// Has the signed-in user already reported this object? (Drives the "already reported" UI.)
+export async function hasReported(targetPath) {
+  const user = _auth.currentUser;
+  if (!user) return false;
+  const rec = await restGet(`${targetPath}/reports/${user.uid}`, { auth: true });
+  return !!rec;
+}
+
+// Admin review queue: every open report across all object types, newest first
+// (collection-group query). Grouped per object client-side.
+export async function adminListReports({ status = 'open', pageSize = 60, cursor = null } = {}) {
+  const filters = [];
+  if (status) filters.push({ field: 'status', op: 'EQUAL', value: status });
+  const items = await restQuery('reports', {
+    allDescendants: true,
+    filters,
+    orderBy: [{ field: 'createdAt', dir: 'DESCENDING' }],
+    limit: pageSize,
+    startAfter: cursor ? [cursor] : null,
+    auth: true,
+  });
+  const next = items.length === pageSize ? items[items.length - 1].createdAt : null;
+  return { items, cursor: next };
+}
+
+// All reports filed against one object (full consolidation, independent of queue paging).
+export async function getReportsForTarget(targetPath) {
+  return restQuery('reports', {
+    parent: targetPath,
+    orderBy: [{ field: 'createdAt', dir: 'ASCENDING' }],
+    auth: true,
+  });
+}
+
+// Resolve every report on an object (admin). `resolution` is 'removed' | 'deleted' |
+// 'dismissed'. Batched so many reporters on one object collapse to one write round-trip.
+export async function adminResolveReports(targetPath, resolution) {
+  const user = _auth.currentUser;
+  const reports = await getReportsForTarget(targetPath);
+  if (!reports.length) return 0;
+  const stamp = { status: 'resolved', resolution, resolvedAt: serverTimestamp(), resolvedBy: user ? user.uid : null };
+  const BATCH = 400;
+  for (let i = 0; i < reports.length; i += BATCH) {
+    const batch = writeBatch(_db);
+    // r.id is the report doc's real id (== reporterUid); prefer it over the stored field.
+    for (const r of reports.slice(i, i + BATCH)) {
+      batch.update(doc(_db, `${targetPath}/reports/${r.id || r.reporterUid}`), stamp);
+    }
+    await batch.commit();
+  }
+  return reports.length;
+}
+
+// Repeat-offender strike counter: bump the creator's removedContentCount whenever one of
+// their contributions is removed. Best-effort -- a missing/anonymous creator user doc is
+// skipped silently (it must not break the removal itself).
+export async function adminRecordRemoval(creatorUid) {
+  if (!creatorUid) return;
+  try {
+    await updateDoc(doc(_db, 'users', creatorUid), {
+      removedContentCount: increment(1),
+      lastRemovalAt: serverTimestamp(),
+    });
+  } catch (_) { /* creator has no user doc (anonymized/deleted) -- skip */ }
+}
+
+// Load any reportable object by its stored path (admin-authed read). Used by the review
+// queue to show the object's live status + real creator before acting on it.
+export async function adminGetByPath(targetPath) {
+  return restGet(targetPath, { auth: true, noStore: true });
 }

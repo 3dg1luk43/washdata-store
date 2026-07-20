@@ -23,6 +23,30 @@ service cloud.firestore {
         ? get(/databases/$(database)/documents/config/site).data.get('confirmThreshold', 5)
         : 5;
     }
+    // Shape/identity validation for a content report. Target existence + the target*/path
+    // binding are checked in each per-parent create rule (which knows the concrete path),
+    // so a reporter can neither file on a non-existent object nor point a report at an
+    // unrelated one.
+    function reportCreateOk(reporterUid) {
+      return canContribute()
+        && request.auth.uid == reporterUid
+        // Exactly the fields the client writes -- no junk / oversized extra keys.
+        && request.resource.data.keys().hasOnly(['reporterUid', 'reporterName', 'reason',
+             'comment', 'targetType', 'targetId', 'targetPath', 'parentCycleId', 'targetLabel',
+             'targetCreatedByUid', 'status', 'createdAt'])
+        && request.resource.data.reporterUid == reporterUid
+        && request.resource.data.status == 'open'
+        && request.resource.data.reason is string
+        && request.resource.data.reason.size() <= 40
+        && strLen(request.resource.data.comment, 1000)
+        && request.resource.data.targetType in ['brand', 'device', 'profile', 'cycle', 'comment']
+        && optName(request.resource.data.get('reporterName', null))
+        && (request.resource.data.get('targetLabel', null) == null
+            || (request.resource.data.targetLabel is string && request.resource.data.targetLabel.size() <= 200))
+        && (request.resource.data.get('targetCreatedByUid', null) == null
+            || (request.resource.data.targetCreatedByUid is string && request.resource.data.targetCreatedByUid.size() <= 128))
+        && request.resource.data.createdAt == request.time;
+    }
 
     // brands
     match /brands/{brandId} {
@@ -40,6 +64,16 @@ service cloud.firestore {
         && request.resource.data.createdAt == request.time;
       allow update: if isAdmin();
       allow delete: if isAdmin();
+
+      // Reports on this brand. The parent must exist and the report's target* fields must
+      // match this exact object, so a report can only ever point at the brand it hangs off.
+      match /reports/{reporterUid} {
+        allow create: if reportCreateOk(reporterUid)
+          && request.resource.data.targetType == 'brand'
+          && request.resource.data.targetId == brandId
+          && request.resource.data.targetPath == 'brands/' + brandId
+          && exists(/databases/$(database)/documents/brands/$(brandId));
+      }
     }
 
     // devices
@@ -106,6 +140,15 @@ service cloud.firestore {
           && request.resource.data.rating in [1, 2, 3, 4, 5];
         allow delete: if false;
       }
+
+      // Reports on this device (parent must exist; target* fields bound to this object).
+      match /reports/{reporterUid} {
+        allow create: if reportCreateOk(reporterUid)
+          && request.resource.data.targetType == 'device'
+          && request.resource.data.targetId == deviceId
+          && request.resource.data.targetPath == 'devices/' + deviceId
+          && exists(/databases/$(database)/documents/devices/$(deviceId));
+      }
     }
 
     // profiles
@@ -135,6 +178,15 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phases']);
       allow update: if isAdmin();
       allow delete: if isAdmin();
+
+      // Reports on this profile (parent must exist; target* fields bound to this object).
+      match /reports/{reporterUid} {
+        allow create: if reportCreateOk(reporterUid)
+          && request.resource.data.targetType == 'profile'
+          && request.resource.data.targetId == profileId
+          && request.resource.data.targetPath == 'profiles/' + profileId
+          && exists(/databases/$(database)/documents/profiles/$(profileId));
+      }
     }
 
     // cycles (reference golden cycles) - community-voted like devices (no admin review)
@@ -211,6 +263,16 @@ service cloud.firestore {
               || request.resource.data.parentId is string);
         allow delete: if (isSignedIn() && resource.data.authorUid == request.auth.uid) || isAdmin();
         allow update: if false;
+
+        // Reports on this comment (parent comment must exist; target* bound to this path).
+        match /reports/{reporterUid} {
+          allow create: if reportCreateOk(reporterUid)
+            && request.resource.data.targetType == 'comment'
+            && request.resource.data.targetId == commentId
+            && request.resource.data.parentCycleId == cycleId
+            && request.resource.data.targetPath == 'cycles/' + cycleId + '/comments/' + commentId
+            && exists(/databases/$(database)/documents/cycles/$(cycleId)/comments/$(commentId));
+        }
       }
 
       match /ratings/{uid} {
@@ -218,6 +280,15 @@ service cloud.firestore {
         allow create, update: if canContribute() && request.auth.uid == uid
           && request.resource.data.rating in [1, 2, 3, 4, 5];
         allow delete: if false;
+      }
+
+      // Reports on this cycle (parent must exist; target* fields bound to this object).
+      match /reports/{reporterUid} {
+        allow create: if reportCreateOk(reporterUid)
+          && request.resource.data.targetType == 'cycle'
+          && request.resource.data.targetId == cycleId
+          && request.resource.data.targetPath == 'cycles/' + cycleId
+          && exists(/databases/$(database)/documents/cycles/$(cycleId));
       }
     }
 
@@ -227,7 +298,11 @@ service cloud.firestore {
       allow write: if false;
     }
 
-    // users collection - self-service cannot touch moderation fields
+    // users collection - self-service cannot touch moderation fields.
+    // NB: `status`/`banReason`/`bannedAt`/`bannedBy` (ban state) and
+    // `removedContentCount`/`lastRemovalAt` (repeat-offender strike counter, bumped by an
+    // admin each time one of this user's contributions is removed) are all admin-only --
+    // the self-service branch's hasOnly() allowlist deliberately excludes them.
     match /users/{uid} {
       allow read: if (isSignedIn() && request.auth.uid == uid) || isAdmin();
       allow create: if isGithubUser() && request.auth.uid == uid
@@ -241,6 +316,26 @@ service cloud.firestore {
                  .hasOnly(['displayName', 'photoURL', 'lastSeen', 'favorites', 'githubLogin'])
             && request.resource.data.get('status', 'active') == resource.data.get('status', 'active'));
       allow delete: if isAdmin();
+    }
+
+    // Content reports (community moderation) -- read / resolve side.
+    //
+    // A `reports/{reporterUid}` subcollection hangs off every reportable object -- brands,
+    // devices, profiles, cycles, and cycle comments. One report per user per object (the doc
+    // id IS the reporter uid, un-gameable; create-only for non-admins so re-reporting is a
+    // no-op). CREATE is defined per-parent below so each create can verify the parent object
+    // EXISTS and that the denormalized target* fields match the report's real location.
+    //
+    // This RECURSIVE-WILDCARD match ({path=**}) is required to authorize the admin
+    // *collection-group* query over every `reports` subcollection at any depth (a per-parent
+    // rule does NOT authorize a collection-group query -- see the Firestore docs). It also
+    // covers per-report reads and admin resolve/delete.
+    match /{path=**}/reports/{reporterUid} {
+      // Reports are private: only admins (the review queue) and the reporter themselves
+      // (so the UI can show an "already reported" state) may read them.
+      allow read: if isAdmin() || (isSignedIn() && request.auth.uid == reporterUid);
+      // Only admins resolve (status -> resolved) or delete reports.
+      allow update, delete: if isAdmin();
     }
 
     // site config (e.g. maintenance flag) - world-readable so clients can gate; admin-only writes
