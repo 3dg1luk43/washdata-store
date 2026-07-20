@@ -663,6 +663,40 @@ export async function countVisibleProfiles(deviceId) {
   return (a || 0) + (p || 0);
 }
 
+// Visible (approved + pending) reference cycles across ALL of a device's profiles, counted
+// directly off the cycle's denormalized deviceId (one aggregation pair, not a per-profile
+// fan-out). Needs the cycles (deviceId, status) composite index.
+export async function countVisibleCyclesByDevice(deviceId) {
+  const [a, p] = await Promise.all([
+    restCount('cycles', [{ field: 'deviceId', op: 'EQUAL', value: deviceId }, { field: 'status', op: 'EQUAL', value: 'approved' }]),
+    restCount('cycles', [{ field: 'deviceId', op: 'EQUAL', value: deviceId }, { field: 'status', op: 'EQUAL', value: 'pending' }]),
+  ]);
+  return (a || 0) + (p || 0);
+}
+
+// Visible (approved + pending) models for a brand. Uses the existing devices
+// (status, brand_lc, ...) composite index (equality prefix on status + brand_lc).
+export async function countVisibleDevicesByBrand(brandLc) {
+  const [a, p] = await Promise.all([
+    restCount('devices', [{ field: 'brand_lc', op: 'EQUAL', value: brandLc }, { field: 'status', op: 'EQUAL', value: 'approved' }]),
+    restCount('devices', [{ field: 'brand_lc', op: 'EQUAL', value: brandLc }, { field: 'status', op: 'EQUAL', value: 'pending' }]),
+  ]);
+  return (a || 0) + (p || 0);
+}
+
+// Visible (approved + pending) reference cycles across a whole brand, counted off the
+// cycle's denormalized brand_lc. Needs the cycles (brand_lc, status) composite index.
+// NB: there is no cheap brand-level PROFILE count -- profiles key off deviceId, not
+// brand_lc, so a per-brand profile total would need a device fan-out or a schema
+// denormalization; models + cycles are the cheap brand-level depth signals.
+export async function countVisibleCyclesByBrand(brandLc) {
+  const [a, p] = await Promise.all([
+    restCount('cycles', [{ field: 'brand_lc', op: 'EQUAL', value: brandLc }, { field: 'status', op: 'EQUAL', value: 'approved' }]),
+    restCount('cycles', [{ field: 'brand_lc', op: 'EQUAL', value: brandLc }, { field: 'status', op: 'EQUAL', value: 'pending' }]),
+  ]);
+  return (a || 0) + (p || 0);
+}
+
 // Profile rating is DERIVED (read-only) from its visible cycles' ratings: the
 // count-weighted mean of each cycle's 5-star average. There is no profile-level rating
 // collection -- users rate cycles, and a profile inherits the aggregate of its cycles.
@@ -1102,20 +1136,31 @@ export async function adminDeleteUser(uid) {
 export async function adminGetStats() {
   const c = (coll, s) => restCount(coll, [{ field: 'status', op: 'EQUAL', value: s }], { auth: true });
   const total = (coll) => restCount(coll, [], { auth: true });
+  // Pending / Approved / Removed all span the WHOLE catalog (brands + devices + profiles +
+  // cycles), not just cycles -- otherwise "Approved" reads 0 on a store that has approved
+  // devices/profiles but no approved cycles. Each is returned with a per-type breakdown too.
+  // `rejected` is cycle-only (only cycles carry a 'rejected' state; brands/devices/profiles
+  // are pending/approved/removed).
+  const byType = async (s) => {
+    const [brands, devices, profiles, cycles] = await Promise.all([c('brands', s), c('devices', s), c('profiles', s), c('cycles', s)]);
+    return { brands, devices, profiles, cycles, total: brands + devices + profiles + cycles };
+  };
   const [
-    pb, pd, pp, pc, approved, rejected, removed, bannedUsers,
+    pendingB, approvedB, removedB, rejected, bannedUsers,
     totalUsers, totalBrands, totalDevices, totalProfiles, totalCycles, openReports,
   ] = await Promise.all([
-    // "Pending review" spans the whole catalog, not just cycles.
-    c('brands', 'pending'), c('devices', 'pending'), c('profiles', 'pending'), c('cycles', 'pending'),
-    c('cycles', 'approved'), c('cycles', 'rejected'), c('cycles', 'removed'),
+    byType('pending'), byType('approved'), byType('removed'),
+    c('cycles', 'rejected'),
     restCount('users', [{ field: 'status', op: 'EQUAL', value: 'banned' }], { auth: true }),
     total('users'), total('brands'), total('devices'), total('profiles'), total('cycles'),
     // Open reports span every `reports` subcollection (collection-group count).
     restCount('reports', [{ field: 'status', op: 'EQUAL', value: 'open' }], { auth: true, allDescendants: true }),
   ]);
   return {
-    pending: pb + pd + pp + pc, approved, rejected, removed, bannedUsers,
+    pending: pendingB.total, pendingByType: pendingB,
+    approved: approvedB.total, approvedByType: approvedB,
+    removed: removedB.total, removedByType: removedB,
+    rejected, bannedUsers,
     totalUsers, totalBrands, totalDevices, totalProfiles, totalCycles, openReports,
   };
 }

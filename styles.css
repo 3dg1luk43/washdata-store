@@ -302,6 +302,22 @@ ul, ol {
   border-top: 1px solid var(--border-subtle);
 }
 
+/* Brand/device card: eyebrow left, status pill pinned top-right of the box. */
+.card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+.card-status-pill:empty { display: none; }
+/* Per-object-type counts under the card title (models/profiles/cycles). */
+.card-counts {
+  margin-top: 0.2rem;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+.card-counts .dot { opacity: 0.5; margin: 0 0.15rem; }
+
 /* ============================================================
    Badges
    ============================================================ */
@@ -1744,6 +1760,9 @@ input[type="url"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
 /* Clickable overview stat cards (open reports -> reports tab). */
 .stat-card-link { cursor: pointer; transition: border-color var(--transition), transform var(--transition); }
 .stat-card-link:hover { border-color: var(--accent); transform: translateY(-1px); }
+
+/* Per-object-type breakdown under a stat value (pending/approved/removed). */
+.stat-breakdown { margin-top: .35rem; font-size: .7rem; color: var(--text-muted); line-height: 1.5; }
 
 /* Repeat-offender strike badge (users table + review card). */
 .strike-badge {

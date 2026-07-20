@@ -131,7 +131,16 @@ export async function restCount(collectionId, filters = [], opts = {}) {
     headers: { 'Content-Type': 'application/json', ...(await authHeaders(opts.auth)) },
     body: JSON.stringify(body),
   });
-  if (!res.ok) return 0;
+  if (!res.ok) {
+    // Read as zero, but never SILENTLY: a filtered/collection-group aggregation that fails
+    // (missing index -> 400 with a create-index URL, or permission -> 403) would otherwise
+    // look identical to a real zero. Surface it so counts that read 0 can be diagnosed.
+    try {
+      const body = (await res.text()).slice(0, 600);
+      console.warn(`restCount(${collectionId}${opts.allDescendants ? ' [group]' : ''}) HTTP ${res.status}:`, body);
+    } catch (_) { /* ignore */ }
+    return 0;
+  }
   const rows = await res.json();
   const r = rows.find((x) => x.result);
   return r && r.result.aggregateFields.cnt ? decodeValue(r.result.aggregateFields.cnt) : 0;

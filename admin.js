@@ -240,6 +240,13 @@ function renderReportsTabCount(n) {
   badge.textContent = n;
   badge.toggleAttribute('hidden', !n);
 }
+// Compact per-object-type breakdown line for a stat card (only non-zero types shown).
+function statBreakdown(by) {
+  if (!by) return '';
+  const defs = [['brands', 'brand'], ['devices', 'device'], ['profiles', 'profile'], ['cycles', 'cycle']];
+  const parts = defs.filter(([k]) => (by[k] || 0) > 0).map(([k, sing]) => `${by[k]} ${by[k] === 1 ? sing : sing + 's'}`);
+  return parts.length ? `<div class="stat-breakdown">${parts.join(' &middot; ')}</div>` : '';
+}
 async function loadOverview() {
   $('stats-grid').innerHTML = '<div class="loading-center" style="grid-column:1/-1"><div class="loading-spinner"></div></div>';
   try {
@@ -247,10 +254,10 @@ async function loadOverview() {
     renderReportsTabCount(s.openReports);
     $('stats-grid').innerHTML = `
       <div class="stat-card stat-card-link" id="ov-reports-card"><div class="stat-label">Open Reports</div><div class="stat-value ${s.openReports ? 'c-rejected' : 'c-approved'}">${s.openReports}</div></div>
-      <div class="stat-card"><div class="stat-label">Pending Review</div><div class="stat-value c-pending">${s.pending}</div></div>
-      <div class="stat-card"><div class="stat-label">Approved</div><div class="stat-value c-approved">${s.approved}</div></div>
+      <div class="stat-card"><div class="stat-label">Pending Review</div><div class="stat-value c-pending">${s.pending}</div>${statBreakdown(s.pendingByType)}</div>
+      <div class="stat-card"><div class="stat-label">Approved</div><div class="stat-value c-approved">${s.approved}</div>${statBreakdown(s.approvedByType)}</div>
       <div class="stat-card"><div class="stat-label">Rejected</div><div class="stat-value c-rejected">${s.rejected}</div></div>
-      <div class="stat-card"><div class="stat-label">Removed</div><div class="stat-value c-removed">${s.removed}</div></div>
+      <div class="stat-card"><div class="stat-label">Removed</div><div class="stat-value c-removed">${s.removed}</div>${statBreakdown(s.removedByType)}</div>
       <div class="stat-card"><div class="stat-label">Banned Users</div><div class="stat-value c-ban">${s.bannedUsers}</div></div>`;
     const rc = $('ov-reports-card');
     if (rc) rc.addEventListener('click', () => { switchTab('reports'); if (!_reportsLoaded) loadReports(true); });

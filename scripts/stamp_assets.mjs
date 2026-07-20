@@ -35,7 +35,7 @@ import { join, dirname } from 'node:path';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-const HTML = ['index.html', 'admin.html', 'connect.html', 'create.html', 'docs.html'];
+const HTML = ['index.html', 'admin.html', 'connect.html', 'create.html', 'docs.html', 'changelog.html'];
 const JS = ['app.js', 'admin.js', 'connect.js', 'create.js', 'editors.js', 'washstore.js', 'firestore-rest.js', 'site-config.js', 'lib/ids.js', 'lib/trace.js'];
 const HASH_FILES = [...HTML, ...JS, 'config.js', 'styles.css'];
 

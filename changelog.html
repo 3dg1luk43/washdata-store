@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="WashData Store documentation - how to browse, contribute, and adopt appliance profiles.">
-  <title>Docs - WashData Store</title>
+  <meta name="description" content="WashData Store changelog - what's new and what changed.">
+  <title>Changelog - WashData Store</title>
   <link rel="icon" type="image/png" href="img/icon.png">
   <link rel="apple-touch-icon" href="img/icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -173,8 +173,8 @@
     </a>
     <nav aria-label="Main navigation">
       <a class="nav-link" href="index.html">Browse</a>
-      <a class="nav-link active" href="docs.html">Docs</a>
-      <a class="nav-link" href="changelog.html">Changelog</a>
+      <a class="nav-link" href="docs.html">Docs</a>
+      <a class="nav-link active" href="changelog.html">Changelog</a>
     </nav>
   </header>
 
@@ -183,24 +183,24 @@
       <div class="docs-toolbar">
         <a class="btn btn-ghost btn-sm" href="index.html">&#8592; Back to Store</a>
         <a class="btn btn-ghost btn-sm"
-           href="https://github.com/3dg1luk43/washdata_store/blob/main/README.md"
+           href="https://github.com/3dg1luk43/washdata_store/blob/main/CHANGELOG.md"
            target="_blank" rel="noopener">View on GitHub</a>
       </div>
 
       <div class="docs-card">
         <div id="docs-loading" class="loading-center">
           <div class="loading-spinner"></div>
-          <span>Loading documentation...</span>
+          <span>Loading changelog...</span>
         </div>
 
         <div id="docs-error" class="empty-state" hidden>
           <div class="empty-icon">&#9888;</div>
-          <div class="empty-title">Could not load documentation</div>
+          <div class="empty-title">Could not load the changelog</div>
           <div class="empty-text" id="docs-error-text">
-            Unable to fetch the README from GitHub. Check your connection and try again.
+            Unable to fetch the changelog. Check your connection and try again.
           </div>
           <a class="btn btn-ghost btn-sm mt-1"
-             href="https://github.com/3dg1luk43/washdata_store/blob/main/README.md"
+             href="https://github.com/3dg1luk43/washdata_store/blob/main/CHANGELOG.md"
              target="_blank" rel="noopener">View on GitHub instead</a>
         </div>
 
@@ -220,7 +220,7 @@
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script>
     (async function () {
-      const README_URL = './README.md';
+      const CHANGELOG_URL = './CHANGELOG.md';
 
       const elLoading = document.getElementById('docs-loading');
       const elError   = document.getElementById('docs-error');
@@ -230,7 +230,7 @@
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 10000);
       try {
-        const res = await fetch(README_URL, { signal: ctrl.signal });
+        const res = await fetch(CHANGELOG_URL, { signal: ctrl.signal });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const md = await res.text();
         elContent.innerHTML = marked.parse(md);
@@ -239,7 +239,7 @@
       } catch (err) {
         elLoading.hidden = true;
         elErrText.textContent =
-          'Unable to load the documentation (' +
+          'Unable to load the changelog (' +
           (err.name === 'AbortError' ? 'request timed out' : err.message) +
           '). Check your connection or view it on GitHub directly.';
         elError.hidden = false;

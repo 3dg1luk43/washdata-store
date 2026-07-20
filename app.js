@@ -23,7 +23,7 @@ import {
   addComment, listComments, deleteComment,
   submitRating, getUserRating, getRatingSummary,
   confirmDevice, rateDevice, getDeviceQuality, getUserDeviceRating, hasConfirmedDevice,
-  confirmCycle, hasConfirmedCycle, countVisibleCycles, countVisibleProfiles,
+  confirmCycle, hasConfirmedCycle, countVisibleCycles, countVisibleCyclesByDevice, countVisibleCyclesByBrand, countVisibleDevicesByBrand, countVisibleProfiles,
   getProfileRating,
   applianceLabel, confirmThresholdValue,
   getSiteConfig,
@@ -421,8 +421,8 @@ function statusBadge(rec) {
     // Only devices auto-promote via confirmations, so only they show the N/threshold
     // progress. Brands/profiles are admin-approved -> just "awaiting approval".
     const label = (typeof rec.confirmCount === 'number')
-      ? `Awaiting approval &middot; ${rec.confirmCount}/${_confirmThreshold}`
-      : 'Awaiting approval';
+      ? `Pending &middot; ${rec.confirmCount}/${_confirmThreshold}`
+      : 'Pending';
     return `<span class="badge badge-pending">${label}</span>`;
   }
   if (rec.status === 'approved') return `<span class="badge badge-approved">Approved</span>`;
@@ -438,15 +438,26 @@ function buildBrandCard(b) {
   el.className = 'card device-card';
   el.innerHTML = `
     <div class="card-body">
-      <span class="eyebrow">Brand</span>
+      <div class="card-top">
+        <span class="eyebrow">Brand</span>
+        <span class="card-status-pill" data-status>${statusBadge(b)}</span>
+      </div>
       <div class="card-title">${esc(b.brand)}</div>
-      <div class="card-badges">${statusBadge(b)}</div>
-      <div class="card-subtitle">Browse models &rsaquo;</div>
+      <div class="card-counts"><span data-dcount>&hellip;</span> <span class="dot">&middot;</span> <span data-ccount>&hellip;</span></div>
     </div>
-    <div class="card-actions"><button class="btn btn-primary btn-sm" data-open>Open</button></div>`;
+    <div class="card-actions"><button class="btn btn-primary btn-sm" data-open>Browse models &rsaquo;</button></div>`;
   el.querySelector('[data-open]').addEventListener('click', () => openBrand(b));
   const rb = makeReportBtn(reportCtxFor('brand', b.id, b.brand, b.createdByUid));
   if (rb) el.querySelector('.card-actions').appendChild(rb);
+  // Models + reference-cycle counts under the brand name (both approved + pending).
+  countVisibleDevicesByBrand(b.brand_lc).then((n) => {
+    const c = el.querySelector('[data-dcount]');
+    if (c) c.textContent = `${n} model${n === 1 ? '' : 's'}`;
+  }).catch(() => { const c = el.querySelector('[data-dcount]'); if (c) c.textContent = '0 models'; });
+  countVisibleCyclesByBrand(b.brand_lc).then((n) => {
+    const c = el.querySelector('[data-ccount]');
+    if (c) c.textContent = `${n} cycle${n === 1 ? '' : 's'}`;
+  }).catch(() => { const c = el.querySelector('[data-ccount]'); if (c) c.textContent = '0 cycles'; });
   return el;
 }
 
@@ -512,12 +523,12 @@ function buildDeviceCard(d) {
     : '';
   el.innerHTML = `
     <div class="card-body">
-      <span class="eyebrow">${esc(typeLabel(d.applianceType))}</span>
-      <div class="card-title">${esc(d.brand)} ${esc(modelOf(d))}</div>
-      <div class="card-badges">
-        ${statusBadge(d)}
-        <span class="badge" data-pcount hidden></span>
+      <div class="card-top">
+        <span class="eyebrow">${esc(typeLabel(d.applianceType))}</span>
+        <span class="card-status-pill" data-status>${statusBadge(d)}</span>
       </div>
+      <div class="card-title">${esc(d.brand)} ${esc(modelOf(d))}</div>
+      <div class="card-counts"><span data-pcount>&hellip;</span> <span class="dot">&middot;</span> <span data-ccount>&hellip;</span></div>
       <div class="card-meta"><span>&#11088; <span data-favcount>${d.favoriteCount || 0}</span></span><span data-devrating hidden></span><span>by ${esc(d.createdByName || 'Anonymous')}</span>${manual}</div>
       <div class="card-community" data-community></div>
     </div>
@@ -530,11 +541,15 @@ function buildDeviceCard(d) {
   const rbD = makeReportBtn(reportCtxFor('device', d.id, `${d.brand} ${modelOf(d)}`.trim(), d.createdByUid));
   if (rbD) el.querySelector('.card-actions').appendChild(rbD);
   renderDeviceCommunity(el.querySelector('[data-community]'), d);
-  // Profile count is calculated (approved + pending), not a stored total.
+  // Profile + cycle counts under the title (both calculated = approved + pending).
   countVisibleProfiles(d.id).then((n) => {
-    const badge = el.querySelector('[data-pcount]');
-    if (badge && n > 0) { badge.textContent = `${n} profile${n > 1 ? 's' : ''}`; badge.hidden = false; }
-  }).catch(() => {});
+    const c = el.querySelector('[data-pcount]');
+    if (c) c.textContent = `${n} profile${n === 1 ? '' : 's'}`;
+  }).catch(() => { const c = el.querySelector('[data-pcount]'); if (c) c.textContent = '0 profiles'; });
+  countVisibleCyclesByDevice(d.id).then((n) => {
+    const c = el.querySelector('[data-ccount]');
+    if (c) c.textContent = `${n} cycle${n === 1 ? '' : 's'}`;
+  }).catch(() => { const c = el.querySelector('[data-ccount]'); if (c) c.textContent = '0 cycles'; });
   // Device quality rating: show in the meta row + honor the Min-rating filter.
   fetchDeviceQuality(d.id).then((s) => {
     const rl = ratingLabel(s);
@@ -588,11 +603,11 @@ async function doConfirmDevice(box, d, btn) {
     logStoreEvent('device_confirms');
     const msg = box.querySelector('[data-msg]');
     if (msg) msg.textContent = res.status === 'approved' ? 'Approved by the community' : `${res.confirmCount}/${_confirmThreshold} confirmations`;
-    const badges = box.closest('.card') ? box.closest('.card').querySelector('.card-badges') : null;
+    const badges = box.closest('.card') ? box.closest('.card').querySelector('.card-status-pill') : null;
     if (badges) {
       const b = badges.querySelector('.badge-pending');
       if (res.status === 'approved') { if (b) b.remove(); }
-      else if (b) b.innerHTML = `Awaiting approval &middot; ${res.confirmCount}/${_confirmThreshold}`;
+      else if (b) b.innerHTML = `Pending &middot; ${res.confirmCount}/${_confirmThreshold}`;
     }
     toast('Thanks for confirming');
   } catch (e) { btn.disabled = false; toast(e.message, 'error'); }
@@ -847,7 +862,7 @@ function renderCycleCommunity(box, c) {
       if (res.status === 'approved') { if (badges) badges.remove(); if (msg) msg.textContent = 'Approved by the community'; }
       else {
         // Still pending: keep the pill's count in sync with the message.
-        if (badges) badges.textContent = `Awaiting approval · ${res.confirmCount}/${_confirmThreshold}`;
+        if (badges) badges.textContent = `Pending · ${res.confirmCount}/${_confirmThreshold}`;
         if (msg) msg.textContent = `${res.confirmCount}/${_confirmThreshold} confirmations`;
       }
       toast('Thanks for confirming');
