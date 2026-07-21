@@ -23,7 +23,7 @@ import {
   addComment, listComments, deleteComment,
   submitRating, getUserRating, getRatingSummary,
   confirmDevice, rateDevice, getDeviceQuality, getUserDeviceRating, hasConfirmedDevice,
-  confirmCycle, hasConfirmedCycle, countVisibleCycles, countVisibleCyclesByDevice, countVisibleCyclesByBrand, countVisibleDevicesByBrand, countVisibleProfiles,
+  confirmCycle, hasConfirmedCycle,
   getProfileRating,
   applianceLabel, confirmThresholdValue,
   getSiteConfig,
@@ -116,6 +116,7 @@ function browseVisible() { return _maintenanceKnown && (!_maintenance || _adminF
 function maybeLoadBrowse() { if (browseVisible() && !_browseLoaded) { _browseLoaded = true; loadBrands(true); } }
 
 // ============================================================ helpers
+function _pluralize(n, word) { return `${n} ${word}${n === 1 ? '' : 's'}`; }
 function esc(str) {
   if (str == null) return '';
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -443,21 +444,12 @@ function buildBrandCard(b) {
         <span class="card-status-pill" data-status>${statusBadge(b)}</span>
       </div>
       <div class="card-title">${esc(b.brand)}</div>
-      <div class="card-counts"><span data-dcount>&hellip;</span> <span class="dot">&middot;</span> <span data-ccount>&hellip;</span></div>
+      <div class="card-counts"><span>${_pluralize(b.deviceCount || 0, 'model')}</span> <span class="dot">&middot;</span> <span>${_pluralize(b.cycleCount || 0, 'cycle')}</span></div>
     </div>
     <div class="card-actions"><button class="btn btn-primary btn-sm" data-open>Browse models &rsaquo;</button></div>`;
   el.querySelector('[data-open]').addEventListener('click', () => openBrand(b));
   const rb = makeReportBtn(reportCtxFor('brand', b.id, b.brand, b.createdByUid));
   if (rb) el.querySelector('.card-actions').appendChild(rb);
-  // Models + reference-cycle counts under the brand name (both approved + pending).
-  countVisibleDevicesByBrand(b.brand_lc).then((n) => {
-    const c = el.querySelector('[data-dcount]');
-    if (c) c.textContent = `${n} model${n === 1 ? '' : 's'}`;
-  }).catch(() => { const c = el.querySelector('[data-dcount]'); if (c) c.textContent = '0 models'; });
-  countVisibleCyclesByBrand(b.brand_lc).then((n) => {
-    const c = el.querySelector('[data-ccount]');
-    if (c) c.textContent = `${n} cycle${n === 1 ? '' : 's'}`;
-  }).catch(() => { const c = el.querySelector('[data-ccount]'); if (c) c.textContent = '0 cycles'; });
   return el;
 }
 
@@ -528,7 +520,7 @@ function buildDeviceCard(d) {
         <span class="card-status-pill" data-status>${statusBadge(d)}</span>
       </div>
       <div class="card-title">${esc(d.brand)} ${esc(modelOf(d))}</div>
-      <div class="card-counts"><span data-pcount>&hellip;</span> <span class="dot">&middot;</span> <span data-ccount>&hellip;</span></div>
+      <div class="card-counts"><span>${_pluralize(d.profileCount || 0, 'profile')}</span> <span class="dot">&middot;</span> <span>${_pluralize(d.cycleCount || 0, 'cycle')}</span></div>
       <div class="card-meta"><span>&#11088; <span data-favcount>${d.favoriteCount || 0}</span></span><span data-devrating hidden></span><span>by ${esc(d.createdByName || 'Anonymous')}</span>${manual}</div>
       <div class="card-community" data-community></div>
     </div>
@@ -541,15 +533,6 @@ function buildDeviceCard(d) {
   const rbD = makeReportBtn(reportCtxFor('device', d.id, `${d.brand} ${modelOf(d)}`.trim(), d.createdByUid));
   if (rbD) el.querySelector('.card-actions').appendChild(rbD);
   renderDeviceCommunity(el.querySelector('[data-community]'), d);
-  // Profile + cycle counts under the title (both calculated = approved + pending).
-  countVisibleProfiles(d.id).then((n) => {
-    const c = el.querySelector('[data-pcount]');
-    if (c) c.textContent = `${n} profile${n === 1 ? '' : 's'}`;
-  }).catch(() => { const c = el.querySelector('[data-pcount]'); if (c) c.textContent = '0 profiles'; });
-  countVisibleCyclesByDevice(d.id).then((n) => {
-    const c = el.querySelector('[data-ccount]');
-    if (c) c.textContent = `${n} cycle${n === 1 ? '' : 's'}`;
-  }).catch(() => { const c = el.querySelector('[data-ccount]'); if (c) c.textContent = '0 cycles'; });
   // Device quality rating: show in the meta row + honor the Min-rating filter.
   fetchDeviceQuality(d.id).then((s) => {
     const rl = ratingLabel(s);
@@ -692,26 +675,12 @@ async function openDevice(d) {
         <span>&middot;</span>
         <span>&#10003; ${d.confirmCount || 0} confirmations</span>
         <span>&middot;</span>
-        <span>${profiles.length} profile${profiles.length === 1 ? '' : 's'}</span>
+        <span>${_pluralize(profiles.length, 'profile')}</span>
         <span>&middot;</span>
-        <span data-totalcycles>&hellip;</span>
+        <span>${_pluralize(_device.cycleCount || 0, 'reference cycle')}</span>
       </div>
       ${manualLink}`;
     body.appendChild(header);
-    // Cycle count is calculated per-profile; fill in asynchronously.
-    if (profiles.length > 0) {
-      Promise.all(profiles.map((p) => countVisibleCycles(p.id))).then((counts) => {
-        const total = counts.reduce((a, b) => a + b, 0);
-        const el = header.querySelector('[data-totalcycles]');
-        if (el) el.textContent = `${total} reference cycle${total === 1 ? '' : 's'}`;
-      }).catch(() => {
-        const el = header.querySelector('[data-totalcycles]');
-        if (el) el.textContent = '';
-      });
-    } else {
-      const el = header.querySelector('[data-totalcycles]');
-      if (el) el.textContent = '0 reference cycles';
-    }
     if (profiles.length === 0) {
       body.insertAdjacentHTML('beforeend', emptyHTML('&#128203;', 'No profiles yet', 'No profiles for this appliance yet.'));
     } else {
@@ -730,14 +699,7 @@ function buildProfileRow(p) {
   el.innerHTML = `<span class="profile-name">${esc(p.program)}${statusBadge(p)}<span class="profile-rating" data-prating hidden></span></span>
     <span class="profile-meta" data-count>&hellip; &rsaquo;</span>`;
   el.addEventListener('click', () => openProfile(p));
-  // Count is calculated (approved + pending), not a stored total; fill in on arrival.
-  countVisibleCycles(p.id).then((n) => {
-    const meta = el.querySelector('[data-count]');
-    if (meta) meta.innerHTML = `${n} cycle${n === 1 ? '' : 's'} &rsaquo;`;
-  }).catch(() => {
-    const meta = el.querySelector('[data-count]');
-    if (meta) meta.innerHTML = '&rsaquo;';
-  });
+  el.querySelector('[data-count]').innerHTML = `${_pluralize(p.cycleCount || 0, 'cycle')} &rsaquo;`;
   // Rating is DERIVED (read-only) from this profile's cycles; shown beside the status badge.
   fetchProfileRating(p.id).then((s) => {
     const rl = ratingLabel(s);

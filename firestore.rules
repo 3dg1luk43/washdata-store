@@ -62,6 +62,14 @@ service cloud.firestore {
         && request.resource.data.brand_lc == request.resource.data.brand.lower()
         && optName(request.resource.data.get('createdByName', null))
         && request.resource.data.createdAt == request.time;
+      // Denormalized counters: contributors may increment deviceCount or cycleCount by
+      // exactly +1 when they add a new device or upload a cycle. Decrement is admin-only.
+      allow update: if canContribute()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deviceCount'])
+        && request.resource.data.deviceCount == resource.data.get('deviceCount', 0) + 1;
+      allow update: if canContribute()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cycleCount'])
+        && request.resource.data.cycleCount == resource.data.get('cycleCount', 0) + 1;
       allow update: if isAdmin();
       allow delete: if isAdmin();
 
@@ -104,8 +112,14 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['favoriteCount'])
         && (request.resource.data.favoriteCount == resource.data.favoriteCount + 1
             || request.resource.data.favoriteCount == resource.data.favoriteCount - 1);
-      // NB: profileCount is no longer stored -- the browse count is CALCULATED via a
-      // COUNT aggregation over this device's approved+pending profiles (client side).
+      // Denormalized counters: contributors may increment profileCount or cycleCount by
+      // exactly +1 when creating a profile or uploading a cycle. Decrement is admin-only.
+      allow update: if canContribute()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['profileCount'])
+        && request.resource.data.profileCount == resource.data.get('profileCount', 0) + 1;
+      allow update: if canContribute()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cycleCount'])
+        && request.resource.data.cycleCount == resource.data.get('cycleCount', 0) + 1;
       // Honest confirm-count bump: +1 on confirmCount ONLY when the same batch creates
       // this user's confirmation doc that did not already exist. One per uid, un-gameable.
       allow update: if isGithubUser()
@@ -166,8 +180,11 @@ service cloud.firestore {
         && strLen(request.resource.data.program, 60)
         && request.resource.data.program_lc == request.resource.data.program.lower()
         && request.resource.data.createdAt == request.time;
-      // NB: cycleCount is no longer stored -- the browse count is CALCULATED via a
-      // COUNT aggregation over this profile's approved+pending cycles (client side).
+      // Denormalized counter: contributors may increment cycleCount by exactly +1 when
+      // uploading a cycle. Decrement is admin-only.
+      allow update: if canContribute()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cycleCount'])
+        && request.resource.data.cycleCount == resource.data.get('cycleCount', 0) + 1;
       // Profile owner (ownerId) or parent device owner may update phases only.
       allow update: if isGithubUser()
         && resource.data.get('ownerId', null) == request.auth.uid

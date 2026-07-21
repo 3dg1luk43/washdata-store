@@ -269,6 +269,8 @@ export async function ensureDevice({ applianceType, brand, model, manualUrl = nu
       favoriteCount: 0,
       confirmCount: 0,
     });
+    // Increment brand's stored device counter (best-effort; rules allow exactly +1).
+    try { await updateDoc(doc(_db, 'brands', brand.toLowerCase()), { deviceCount: increment(1) }); } catch (_) {}
   }
   return id;
 }
@@ -420,9 +422,8 @@ export async function ensureProfile({ deviceId, program, description = '' }) {
       createdByUid: user.uid,
       createdAt: serverTimestamp(),
     });
-    // Counts (profiles per device, cycles per profile) are CALCULATED on read via
-    // countVisibleProfiles/countVisibleCycles -- never a stored running total, which
-    // silently drifted to 0 when a best-effort increment was denied by rules.
+    // Increment device's stored profile counter (best-effort; rules allow exactly +1).
+    try { await updateDoc(doc(_db, 'devices', deviceId), { profileCount: increment(1) }); } catch (_) {}
   }
   return id;
 }
@@ -641,60 +642,33 @@ export async function uploadReferenceCycle(meta, tracePoints, stats, qc = 3) {
   }
 
   const ref = await addDoc(collection(_db, 'cycles'), docData);
+  // Increment denormalized counts on the profile, device, and brand (best-effort).
+  try {
+    await Promise.all([
+      updateDoc(doc(_db, 'profiles', profId), { cycleCount: increment(1) }),
+      updateDoc(doc(_db, 'devices', devId), { cycleCount: increment(1) }),
+      updateDoc(doc(_db, 'brands', brand.toLowerCase()), { cycleCount: increment(1) }),
+    ]);
+  } catch (_) {}
   return ref.id;
 }
 
-// Calculated counts (not stored running totals). Both the approved and the
-// still-pending docs are visible in browse, so the honest count sums the two.
-// Uses the same (field, status) composite index the browse queries already rely on.
-export async function countVisibleCycles(profileId) {
-  const [a, p] = await Promise.all([
-    restCount('cycles', [{ field: 'profileId', op: 'EQUAL', value: profileId }, { field: 'status', op: 'EQUAL', value: 'approved' }]),
-    restCount('cycles', [{ field: 'profileId', op: 'EQUAL', value: profileId }, { field: 'status', op: 'EQUAL', value: 'pending' }]),
-  ]);
-  return (a || 0) + (p || 0);
-}
+// ------------------------------------------------------------------
+// Denormalized counter helpers
+// ------------------------------------------------------------------
+// Counts (deviceCount on brands, profileCount/cycleCount on devices, cycleCount on
+// profiles) are now stored and maintained incrementally at every mutation point, so the
+// browse page never fires per-card aggregation queries. A status is "visible" when it
+// is pending or approved (not removed/rejected); counters track visible items only.
 
-export async function countVisibleProfiles(deviceId) {
-  const [a, p] = await Promise.all([
-    restCount('profiles', [{ field: 'deviceId', op: 'EQUAL', value: deviceId }, { field: 'status', op: 'EQUAL', value: 'approved' }]),
-    restCount('profiles', [{ field: 'deviceId', op: 'EQUAL', value: deviceId }, { field: 'status', op: 'EQUAL', value: 'pending' }]),
-  ]);
-  return (a || 0) + (p || 0);
-}
+function _isVisible(status) { return status === 'pending' || status === 'approved'; }
 
-// Visible (approved + pending) reference cycles across ALL of a device's profiles, counted
-// directly off the cycle's denormalized deviceId (one aggregation pair, not a per-profile
-// fan-out). Needs the cycles (deviceId, status) composite index.
-export async function countVisibleCyclesByDevice(deviceId) {
-  const [a, p] = await Promise.all([
-    restCount('cycles', [{ field: 'deviceId', op: 'EQUAL', value: deviceId }, { field: 'status', op: 'EQUAL', value: 'approved' }]),
-    restCount('cycles', [{ field: 'deviceId', op: 'EQUAL', value: deviceId }, { field: 'status', op: 'EQUAL', value: 'pending' }]),
-  ]);
-  return (a || 0) + (p || 0);
-}
-
-// Visible (approved + pending) models for a brand. Uses the existing devices
-// (status, brand_lc, ...) composite index (equality prefix on status + brand_lc).
-export async function countVisibleDevicesByBrand(brandLc) {
-  const [a, p] = await Promise.all([
-    restCount('devices', [{ field: 'brand_lc', op: 'EQUAL', value: brandLc }, { field: 'status', op: 'EQUAL', value: 'approved' }]),
-    restCount('devices', [{ field: 'brand_lc', op: 'EQUAL', value: brandLc }, { field: 'status', op: 'EQUAL', value: 'pending' }]),
-  ]);
-  return (a || 0) + (p || 0);
-}
-
-// Visible (approved + pending) reference cycles across a whole brand, counted off the
-// cycle's denormalized brand_lc. Needs the cycles (brand_lc, status) composite index.
-// NB: there is no cheap brand-level PROFILE count -- profiles key off deviceId, not
-// brand_lc, so a per-brand profile total would need a device fan-out or a schema
-// denormalization; models + cycles are the cheap brand-level depth signals.
-export async function countVisibleCyclesByBrand(brandLc) {
-  const [a, p] = await Promise.all([
-    restCount('cycles', [{ field: 'brand_lc', op: 'EQUAL', value: brandLc }, { field: 'status', op: 'EQUAL', value: 'approved' }]),
-    restCount('cycles', [{ field: 'brand_lc', op: 'EQUAL', value: brandLc }, { field: 'status', op: 'EQUAL', value: 'pending' }]),
-  ]);
-  return (a || 0) + (p || 0);
+// Returns +1 when a status transition makes an item appear, -1 when it disappears, 0 otherwise.
+function _counterDelta(oldStatus, newStatus) {
+  const was = _isVisible(oldStatus), now = _isVisible(newStatus);
+  if (was && !now) return -1;
+  if (!was && now) return 1;
+  return 0;
 }
 
 // Profile rating is DERIVED (read-only) from its visible cycles' ratings: the
@@ -764,7 +738,15 @@ export async function getCycle(id) {
 }
 
 export async function deleteCycle(id) {
+  const cyc = await restGet(`cycles/${id}`, { auth: true, noStore: true });
   await deleteDoc(doc(_db, 'cycles', id));
+  if (cyc && _isVisible(cyc.status)) {
+    const updates = [];
+    if (cyc.profileId) updates.push(updateDoc(doc(_db, 'profiles', cyc.profileId), { cycleCount: increment(-1) }));
+    if (cyc.deviceId) updates.push(updateDoc(doc(_db, 'devices', cyc.deviceId), { cycleCount: increment(-1) }));
+    if (cyc.brand_lc) updates.push(updateDoc(doc(_db, 'brands', cyc.brand_lc), { cycleCount: increment(-1) }));
+    try { await Promise.all(updates); } catch (_) {}
+  }
 }
 
 export async function updateProfilePhases(profileId, phases) {
@@ -944,9 +926,20 @@ export async function adminListCycles({ status = null, applianceType = null, pag
 }
 
 export async function adminSetCycleStatus(id, status, reason = null) {
+  const cyc = await restGet(`cycles/${id}`, { auth: true, noStore: true });
   const update = { status };
   if (reason != null) update.rejectionReason = reason;
   await updateDoc(doc(_db, 'cycles', id), update);
+  if (cyc) {
+    const delta = _counterDelta(cyc.status, status);
+    if (delta !== 0) {
+      const updates = [];
+      if (cyc.profileId) updates.push(updateDoc(doc(_db, 'profiles', cyc.profileId), { cycleCount: increment(delta) }));
+      if (cyc.deviceId) updates.push(updateDoc(doc(_db, 'devices', cyc.deviceId), { cycleCount: increment(delta) }));
+      if (cyc.brand_lc) updates.push(updateDoc(doc(_db, 'brands', cyc.brand_lc), { cycleCount: increment(delta) }));
+      try { await Promise.all(updates); } catch (_) {}
+    }
+  }
 }
 
 export async function adminListDevices({ status = null, pageSize = 50 } = {}) {
@@ -962,7 +955,14 @@ export async function adminListDevices({ status = null, pageSize = 50 } = {}) {
 }
 
 export async function adminSetDeviceStatus(id, status) {
+  const dev = await restGet(`devices/${id}`, { auth: true, noStore: true });
   await updateDoc(doc(_db, 'devices', id), { status });
+  if (dev?.brand_lc) {
+    const delta = _counterDelta(dev.status, status);
+    if (delta !== 0) {
+      try { await updateDoc(doc(_db, 'brands', dev.brand_lc), { deviceCount: increment(delta) }); } catch (_) {}
+    }
+  }
 }
 
 export async function adminSetDeviceOwner(deviceId, ownerUid, ownerName) {
@@ -1000,7 +1000,14 @@ export async function adminListProfiles({ pageSize = 200 } = {}) {
 }
 
 export async function adminSetProfileStatus(id, status) {
+  const prof = await restGet(`profiles/${id}`, { auth: true, noStore: true });
   await updateDoc(doc(_db, 'profiles', id), { status });
+  if (prof?.deviceId) {
+    const delta = _counterDelta(prof.status, status);
+    if (delta !== 0) {
+      try { await updateDoc(doc(_db, 'devices', prof.deviceId), { profileCount: increment(delta) }); } catch (_) {}
+    }
+  }
 }
 
 export async function adminSetBrandStatus(brandLc, status) {
@@ -1012,7 +1019,8 @@ export async function adminSetBrandStatus(brandLc, status) {
 // the small clusters near-duplicate devices produce).
 export async function adminMergeDevices(fromId, toId) {
   if (fromId === toId) throw new Error('Cannot merge a device into itself');
-  const [profSnap, cycSnap] = await Promise.all([
+  const [fromDev, profSnap, cycSnap] = await Promise.all([
+    restGet(`devices/${fromId}`, { auth: true, noStore: true }),
     getDocs(query(collection(_db, 'profiles'), where('deviceId', '==', fromId))),
     getDocs(query(collection(_db, 'cycles'), where('deviceId', '==', fromId))),
   ]);
@@ -1031,6 +1039,17 @@ export async function adminMergeDevices(fromId, toId) {
     batch.update(doc(_db, 'cycles', c.id), { deviceId: toId, profileId: newPid });
   }
   batch.delete(doc(_db, 'devices', fromId));
+  // fromId device removed from brand count; toId gains its profiles and cycles.
+  if (fromDev?.brand_lc && _isVisible(fromDev.status)) {
+    batch.update(doc(_db, 'brands', fromDev.brand_lc), { deviceCount: increment(-1) });
+  }
+  const visibleProfiles = profSnap.docs.filter((p) => _isVisible(p.data().status)).length;
+  const visibleCycles = cycSnap.docs.filter((c) => _isVisible(c.data().status)).length;
+  const toUpdate = {};
+  if (visibleProfiles > 0) toUpdate.profileCount = increment(visibleProfiles);
+  if (visibleCycles > 0) toUpdate.cycleCount = increment(visibleCycles);
+  if (Object.keys(toUpdate).length > 0) batch.update(doc(_db, 'devices', toId), toUpdate);
+  // Brand cycle balance skipped for cross-brand merges (rare; admin can recount manually).
   await batch.commit();
 }
 
@@ -1038,10 +1057,20 @@ export async function adminMergeDevices(fromId, toId) {
 // Admin-only; for deduping near-duplicate profiles (e.g. "Eco 50" / "Eco 50C").
 export async function adminMergeProfiles(fromId, toId) {
   if (fromId === toId) throw new Error('Cannot merge a profile into itself');
-  const cycSnap = await getDocs(query(collection(_db, 'cycles'), where('profileId', '==', fromId)));
+  const [fromProf, cycSnap] = await Promise.all([
+    restGet(`profiles/${fromId}`, { auth: true, noStore: true }),
+    getDocs(query(collection(_db, 'cycles'), where('profileId', '==', fromId))),
+  ]);
   const batch = writeBatch(_db);
   for (const c of cycSnap.docs) batch.update(doc(_db, 'cycles', c.id), { profileId: toId });
   batch.delete(doc(_db, 'profiles', fromId));
+  // fromId profile deleted → device loses one profile; cycles move to toId.
+  if (fromProf?.deviceId && _isVisible(fromProf.status)) {
+    batch.update(doc(_db, 'devices', fromProf.deviceId), { profileCount: increment(-1) });
+  }
+  const visibleCycles = cycSnap.docs.filter((c) => _isVisible(c.data().status)).length;
+  if (visibleCycles > 0) batch.update(doc(_db, 'profiles', toId), { cycleCount: increment(visibleCycles) });
+  // device.cycleCount and brand.cycleCount are unchanged (same number of cycles, same device).
   await batch.commit();
 }
 
@@ -1086,7 +1115,8 @@ export async function adminDeleteComment(cycleId, commentId) {
 
 // Hard-delete a device and cascade: all its profiles and all their cycles.
 export async function adminDeleteDevice(deviceId) {
-  const [profSnap, cycSnap] = await Promise.all([
+  const [dev, profSnap, cycSnap] = await Promise.all([
+    restGet(`devices/${deviceId}`, { auth: true, noStore: true }),
     getDocs(query(collection(_db, 'profiles'), where('deviceId', '==', deviceId))),
     getDocs(query(collection(_db, 'cycles'), where('deviceId', '==', deviceId))),
   ]);
@@ -1094,6 +1124,13 @@ export async function adminDeleteDevice(deviceId) {
   for (const p of profSnap.docs) batch.delete(doc(_db, 'profiles', p.id));
   for (const c of cycSnap.docs) batch.delete(doc(_db, 'cycles', c.id));
   batch.delete(doc(_db, 'devices', deviceId));
+  if (dev?.brand_lc) {
+    const brandUpdate = {};
+    if (_isVisible(dev.status)) brandUpdate.deviceCount = increment(-1);
+    const visibleCycles = cycSnap.docs.filter((c) => _isVisible(c.data().status)).length;
+    if (visibleCycles > 0) brandUpdate.cycleCount = increment(-visibleCycles);
+    if (Object.keys(brandUpdate).length > 0) batch.update(doc(_db, 'brands', dev.brand_lc), brandUpdate);
+  }
   await batch.commit();
 }
 
@@ -1104,10 +1141,24 @@ export async function adminDeleteBrand(brandId) {
 
 // Hard-delete a profile and all its reference cycles.
 export async function adminDeleteProfile(profileId) {
-  const cycSnap = await getDocs(query(collection(_db, 'cycles'), where('profileId', '==', profileId)));
+  const [prof, cycSnap] = await Promise.all([
+    restGet(`profiles/${profileId}`, { auth: true, noStore: true }),
+    getDocs(query(collection(_db, 'cycles'), where('profileId', '==', profileId))),
+  ]);
+  const dev = prof?.deviceId ? await restGet(`devices/${prof.deviceId}`, { auth: true, noStore: true }) : null;
+  const visibleCycles = cycSnap.docs.filter((c) => _isVisible(c.data().status)).length;
   const batch = writeBatch(_db);
   for (const c of cycSnap.docs) batch.delete(doc(_db, 'cycles', c.id));
   batch.delete(doc(_db, 'profiles', profileId));
+  if (prof?.deviceId) {
+    const devUpdate = {};
+    if (_isVisible(prof.status)) devUpdate.profileCount = increment(-1);
+    if (visibleCycles > 0) devUpdate.cycleCount = increment(-visibleCycles);
+    if (Object.keys(devUpdate).length > 0) batch.update(doc(_db, 'devices', prof.deviceId), devUpdate);
+  }
+  if (dev?.brand_lc && visibleCycles > 0) {
+    batch.update(doc(_db, 'brands', dev.brand_lc), { cycleCount: increment(-visibleCycles) });
+  }
   await batch.commit();
 }
 
