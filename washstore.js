@@ -1184,6 +1184,48 @@ export async function adminDeleteUser(uid) {
   await deleteDoc(doc(_db, 'users', uid));
 }
 
+// One-time (or on-demand) backfill: recompute and store the denormalized deviceCount,
+// profileCount, and cycleCount fields on every brand, device, and profile doc. Run this
+// once after deploying the stored-counter feature to populate existing documents. Safe to
+// run multiple times (idempotent: always overwrites with the correct value).
+export async function adminRecount() {
+  const LIMIT = 5000;
+  const [brands, devices, profiles, cycles] = await Promise.all([
+    restQuery('brands', { limit: LIMIT, auth: true }),
+    restQuery('devices', { limit: LIMIT, auth: true }),
+    restQuery('profiles', { limit: LIMIT, auth: true }),
+    restQuery('cycles', { limit: LIMIT, auth: true }),
+  ]);
+
+  const vis = (s) => s === 'pending' || s === 'approved';
+
+  // Tally counts grouped by parent key
+  const devByBrand = {}, cycByBrand = {}, cycByDevice = {}, cycByProfile = {}, profByDevice = {};
+  for (const d of devices) if (vis(d.status) && d.brand_lc) devByBrand[d.brand_lc] = (devByBrand[d.brand_lc] || 0) + 1;
+  for (const c of cycles) {
+    if (!vis(c.status)) continue;
+    if (c.brand_lc) cycByBrand[c.brand_lc] = (cycByBrand[c.brand_lc] || 0) + 1;
+    if (c.deviceId) cycByDevice[c.deviceId] = (cycByDevice[c.deviceId] || 0) + 1;
+    if (c.profileId) cycByProfile[c.profileId] = (cycByProfile[c.profileId] || 0) + 1;
+  }
+  for (const p of profiles) if (vis(p.status) && p.deviceId) profByDevice[p.deviceId] = (profByDevice[p.deviceId] || 0) + 1;
+
+  // Build update ops for every document
+  const ops = [
+    ...brands.map((b) => ({ ref: doc(_db, 'brands', b.id), data: { deviceCount: devByBrand[b.brand_lc] || 0, cycleCount: cycByBrand[b.brand_lc] || 0 } })),
+    ...devices.map((d) => ({ ref: doc(_db, 'devices', d.id), data: { profileCount: profByDevice[d.id] || 0, cycleCount: cycByDevice[d.id] || 0 } })),
+    ...profiles.map((p) => ({ ref: doc(_db, 'profiles', p.id), data: { cycleCount: cycByProfile[p.id] || 0 } })),
+  ];
+
+  const BATCH = 400;
+  for (let i = 0; i < ops.length; i += BATCH) {
+    const batch = writeBatch(_db);
+    for (const { ref, data } of ops.slice(i, i + BATCH)) batch.update(ref, data);
+    await batch.commit();
+  }
+  return { brands: brands.length, devices: devices.length, profiles: profiles.length, cycles: cycles.length, updated: ops.length };
+}
+
 export async function adminGetStats() {
   const c = (coll, s) => restCount(coll, [{ field: 'status', op: 'EQUAL', value: s }], { auth: true });
   const total = (coll) => restCount(coll, [], { auth: true });

@@ -21,7 +21,7 @@ import {
   adminListCycles, adminSetCycleStatus,
   adminListDevices, adminSetDeviceStatus, adminSetProfileStatus, adminSetBrandStatus, adminMergeDevices, adminMergeProfiles,
   adminListBrands, adminListProfiles,
-  adminListUsers, adminBanUser, adminUnbanUser, adminGetStats,
+  adminListUsers, adminBanUser, adminUnbanUser, adminGetStats, adminRecount,
   getSiteConfig, setMaintenance, setConfirmThreshold,
   adminSetDeviceOwner, adminSetProfileOwner,
   adminDeleteDevice, adminDeleteBrand, adminDeleteProfile, adminDeleteUser,
@@ -1247,5 +1247,26 @@ async function loadStatistics() {
   });
 });
 $('analytics-refresh-btn').addEventListener('click', () => { _statsLoaded = false; _statsCache = null; loadStatistics(); });
+
+// Backfill / recompute all denormalized count fields (deviceCount, profileCount, cycleCount)
+// on existing brand/device/profile docs. Safe to run multiple times.
+const recountBtn = $('recount-btn');
+if (recountBtn) {
+  recountBtn.addEventListener('click', async () => {
+    recountBtn.disabled = true;
+    recountBtn.textContent = 'Recounting…';
+    try {
+      const r = await adminRecount();
+      toast(`Recounted: ${r.updated} docs updated (${r.brands} brands, ${r.devices} devices, ${r.profiles} profiles, ${r.cycles} cycles)`);
+      _statsLoaded = false; _statsCache = null;
+      loadStatistics();
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      recountBtn.disabled = false;
+      recountBtn.textContent = 'Recalculate counts';
+    }
+  });
+}
 
 bindEditorCloseHandlers();
