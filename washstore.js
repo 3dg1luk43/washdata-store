@@ -226,6 +226,45 @@ function _estimateDocSize(data) {
 }
 
 // ------------------------------------------------------------------
+// Catalog read cache (sessionStorage)
+// ------------------------------------------------------------------
+// The brand/device catalog is public and slow-changing, but the browse grid re-queries
+// it on every page load, reload, and back-navigation, and the contribute datalist queries
+// it again. On the store's free-tier read budget that made the brand + device list queries
+// a top read source. Cache the unfiltered listings in sessionStorage (survives reloads and
+// same-tab navigation between the browse and contribute pages) for a short TTL. Only the
+// brand/device CARDS consume these, and they render no timestamp fields, so JSON round-trip
+// (which drops decoded-timestamp methods) is safe here. A contribution invalidates the cache.
+const _CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;  // 5 min
+
+function _catalogCacheGet(key) {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return null;
+    const { exp, val } = JSON.parse(raw);
+    if (!exp || Date.now() >= exp) { sessionStorage.removeItem(key); return null; }
+    return val;
+  } catch (_) { return null; }
+}
+
+function _catalogCachePut(key, val) {
+  try {
+    sessionStorage.setItem(key, JSON.stringify({ exp: Date.now() + _CATALOG_CACHE_TTL_MS, val }));
+  } catch (_) { /* private mode / quota: caching is best-effort */ }
+}
+
+// Drop every cached catalog listing (call after a create so a freshly-contributed brand
+// or device appears immediately instead of after the TTL).
+export function invalidateCatalogCache() {
+  try {
+    for (let i = sessionStorage.length - 1; i >= 0; i--) {
+      const k = sessionStorage.key(i);
+      if (k && k.startsWith('wdcat:')) sessionStorage.removeItem(k);
+    }
+  } catch (_) { /* best-effort */ }
+}
+
+// ------------------------------------------------------------------
 // Devices / profiles
 // ------------------------------------------------------------------
 
@@ -244,6 +283,7 @@ export async function ensureBrand({ brand, createdByName = null }) {
       createdByName: createdByName || null,
       createdAt: serverTimestamp(),
     });
+    invalidateCatalogCache();  // a new brand must appear in the cached listing immediately
   }
   return id;
 }
@@ -271,6 +311,7 @@ export async function ensureDevice({ applianceType, brand, model, manualUrl = nu
     });
     // Increment brand's stored device counter (best-effort; rules allow exactly +1).
     try { await updateDoc(doc(_db, 'brands', brand.toLowerCase()), { deviceCount: increment(1) }); } catch (_) {}
+    invalidateCatalogCache();  // a new device must appear in the cached listing immediately
   }
   return id;
 }
@@ -389,9 +430,20 @@ export async function rateDevice(deviceId, rating) {
   if (!user) throw new Error('Not signed in');
   if (![1, 2, 3, 4, 5].includes(rating)) throw new Error('Rating must be 1-5');
   _rateGuard();
-  await setDoc(doc(_db, 'devices', deviceId, 'ratings', user.uid), {
-    uid: user.uid, rating, updatedAt: serverTimestamp(),
-  }, { merge: true });
+  const ratingRef = doc(_db, 'devices', deviceId, 'ratings', user.uid);
+  // Maintain the denormalized ratingSum/ratingCount on the device doc in the same batch
+  // (see submitRating for the rationale). Prior rating needed to shift the sum on an edit.
+  let prev = null;
+  try { const s = await getDoc(ratingRef); if (s.exists()) prev = s.data().rating; } catch (_) {}
+  const batch = writeBatch(_db);
+  batch.set(ratingRef, { uid: user.uid, rating, updatedAt: serverTimestamp() }, { merge: true });
+  const devRef = doc(_db, 'devices', deviceId);
+  if (prev == null) {
+    batch.update(devRef, { ratingCount: increment(1), ratingSum: increment(rating) });
+  } else if (prev !== rating) {
+    batch.update(devRef, { ratingSum: increment(rating - prev) });
+  }
+  await batch.commit();
 }
 
 export async function getUserDeviceRating(deviceId) {
@@ -447,6 +499,15 @@ function _brandFilters(status, search) {
 // List brands, optional case-insensitive prefix search on brand_lc. REST read.
 // includePending merges approved + pending (the catalog is community-visible-with-a-tag).
 export async function listBrands({ search = null, pageSize = 60, cursor = null, includePending = false } = {}) {
+  // Cache only the unfiltered first page (landing grid + contribute datalist); searched or
+  // paginated queries pass through so search-as-you-type and load-more stay live.
+  const cacheable = !search && !cursor;
+  const cacheKey = `wdcat:brands:${includePending ? 1 : 0}:${pageSize}`;
+  if (cacheable) {
+    const hit = _catalogCacheGet(cacheKey);
+    if (hit) return hit;
+  }
+  let result;
   if (includePending) {
     const [a, p] = await Promise.all([
       restQuery('brands', { filters: _brandFilters('approved', search), orderBy: [{ field: 'brand_lc', dir: 'ASCENDING' }], limit: pageSize }),
@@ -455,16 +516,19 @@ export async function listBrands({ search = null, pageSize = 60, cursor = null, 
     const byId = new Map();
     for (const b of [...a, ...p]) byId.set(b.id, b);
     const items = [...byId.values()].sort((x, y) => (x.brand_lc || '').localeCompare(y.brand_lc || '')).slice(0, pageSize);
-    return { items, cursor: null };
+    result = { items, cursor: null };
+  } else {
+    const items = await restQuery('brands', {
+      filters: _brandFilters('approved', search),
+      orderBy: [{ field: 'brand_lc', dir: 'ASCENDING' }],
+      limit: pageSize,
+      startAfter: cursor ? [cursor] : null,
+    });
+    const next = items.length === pageSize ? items[items.length - 1].brand_lc : null;
+    result = { items, cursor: next };
   }
-  const items = await restQuery('brands', {
-    filters: _brandFilters('approved', search),
-    orderBy: [{ field: 'brand_lc', dir: 'ASCENDING' }],
-    limit: pageSize,
-    startAfter: cursor ? [cursor] : null,
-  });
-  const next = items.length === pageSize ? items[items.length - 1].brand_lc : null;
-  return { items, cursor: next };
+  if (cacheable) _catalogCachePut(cacheKey, result);
+  return result;
 }
 
 // Devices for a brand (used by brand -> devices browse and by upload autocomplete).
@@ -487,21 +551,28 @@ export async function searchDevices({ applianceType = null, brand = null, favori
       const rec = await restGet(`devices/${id}`);
       if (rec) items.push(rec);
     }
-    return { items, cursor: null };
+    return { items, cursor: null };  // favorites depend on the signed-in user; not cached
   }
+  const cacheKey = `wdcat:devices:${(brand || '').toLowerCase()}:${applianceType || ''}:${includePending ? 1 : 0}:${pageSize}`;
+  const hit = _catalogCacheGet(cacheKey);
+  if (hit) return hit;
   const q = (status) => restQuery('devices', {
     filters: _deviceFilters(status, applianceType, brand),
     orderBy: [{ field: 'favoriteCount', dir: 'DESCENDING' }],
     limit: pageSize,
   });
+  let result;
   if (includePending) {
     const [a, p] = await Promise.all([q('approved'), q('pending')]);
     const byId = new Map();
     // Approved first, then pending, so approved wins on id collisions.
     for (const d of [...a, ...p]) if (!byId.has(d.id)) byId.set(d.id, d);
-    return { items: [...byId.values()].slice(0, pageSize), cursor: null };
+    result = { items: [...byId.values()].slice(0, pageSize), cursor: null };
+  } else {
+    result = { items: await q('approved'), cursor: null };
   }
-  return { items: await q('approved'), cursor: null };
+  _catalogCachePut(cacheKey, result);
+  return result;
 }
 
 // Profiles for a device. includePending merges approved + pending (shown with a tag),
@@ -561,13 +632,25 @@ export async function getFavorites() {
 // Site config (maintenance flag)
 // ------------------------------------------------------------------
 
-// Public read via REST. Returns {} when unset/unavailable. Never cached, so the
-// maintenance flag is always current (a stale cache must not keep the site hidden/open).
+// Public read via REST. Returns {} when unset/unavailable. Not time-cached, so the
+// maintenance flag is always current (a stale cache must not keep the site hidden/open) --
+// but concurrent callers are coalesced into ONE network read. On page load the maintenance
+// flag and the confirm threshold are both read in the same tick; without this that was two
+// identical config/site reads per load.
+let _siteConfigInflight = null;
 export async function getSiteConfig() {
+  if (_siteConfigInflight) return _siteConfigInflight;
+  _siteConfigInflight = (async () => {
+    try {
+      return (await restGet('config/site', { noStore: true })) || {};
+    } catch (_) {
+      return {};
+    }
+  })();
   try {
-    return (await restGet('config/site', { noStore: true })) || {};
-  } catch (_) {
-    return {};
+    return await _siteConfigInflight;
+  } finally {
+    _siteConfigInflight = null;  // next (non-concurrent) call reads fresh
   }
 }
 
@@ -676,6 +759,17 @@ function _counterDelta(oldStatus, newStatus) {
 // collection -- users rate cycles, and a profile inherits the aggregate of its cycles.
 // Bounded fan-out (approved + pending cycle ids via two status-scoped queries -- rules
 // require the status filter -- then one rating aggregation per cycle). Never throws.
+// Read the denormalized rating aggregate off a cycle or device doc. Returns {avg, count}
+// when the doc carries `ratingCount` (populated on rating writes + the recount backfill),
+// else null so the caller can fall back to the live aggregation query. Zero extra reads:
+// the fields ride on docs the browse/list queries already fetched.
+export function ratingSummaryFromDoc(docData) {
+  if (!docData || docData.ratingCount == null) return null;
+  const count = Number(docData.ratingCount) || 0;
+  const sum = Number(docData.ratingSum) || 0;
+  return { avg: count > 0 ? sum / count : null, count };
+}
+
 export async function getProfileRating(profileId, { includePending = true } = {}) {
   let docs = [];
   try {
@@ -690,11 +784,24 @@ export async function getProfileRating(profileId, { includePending = true } = {}
     docs = groups.flat();
   } catch (_) { return { avg: null, count: 0 }; }
   if (!docs.length) return { avg: null, count: 0 };
-  const summaries = await Promise.all(
-    docs.map((c) => restRatingSummary(c.id).catch(() => ({ avg: null, count: 0 }))),
-  );
   let total = 0; let n = 0;
-  for (const s of summaries) { if (s.count > 0 && s.avg != null) { total += s.avg * s.count; n += s.count; } }
+  const needAgg = [];
+  for (const c of docs) {
+    // Prefer the denormalized aggregate carried on the cycle doc (0 extra reads); fall
+    // back to a live aggregation only for cycles that predate the backfill.
+    if (c.ratingCount != null) {
+      const cnt = Number(c.ratingCount) || 0;
+      if (cnt > 0) { total += Number(c.ratingSum) || 0; n += cnt; }
+    } else {
+      needAgg.push(c);
+    }
+  }
+  if (needAgg.length) {
+    const summaries = await Promise.all(
+      needAgg.map((c) => restRatingSummary(c.id).catch(() => ({ avg: null, count: 0 }))),
+    );
+    for (const s of summaries) { if (s.count > 0 && s.avg != null) { total += s.avg * s.count; n += s.count; } }
+  }
   return { avg: n > 0 ? total / n : null, count: n };
 }
 
@@ -881,11 +988,20 @@ export async function submitRating(cycleId, rating) {
   _rateGuard();
 
   const ratingRef = doc(_db, 'cycles', cycleId, 'ratings', user.uid);
-  await setDoc(ratingRef, {
-    uid: user.uid,
-    rating,
-    updatedAt: serverTimestamp(),
-  }, { merge: true });
+  // Read the user's prior rating so the denormalized ratingSum/ratingCount on the cycle doc
+  // can be maintained in the SAME batch (rules require the batch tie-in). A first rating
+  // bumps count +1 and sum += rating; an edit only shifts sum by (new - old).
+  let prev = null;
+  try { const s = await getDoc(ratingRef); if (s.exists()) prev = s.data().rating; } catch (_) {}
+  const batch = writeBatch(_db);
+  batch.set(ratingRef, { uid: user.uid, rating, updatedAt: serverTimestamp() }, { merge: true });
+  const cycleRef = doc(_db, 'cycles', cycleId);
+  if (prev == null) {
+    batch.update(cycleRef, { ratingCount: increment(1), ratingSum: increment(rating) });
+  } else if (prev !== rating) {
+    batch.update(cycleRef, { ratingSum: increment(rating - prev) });
+  }
+  await batch.commit();
 }
 
 export async function getUserRating(cycleId) {
@@ -1188,6 +1304,26 @@ export async function adminDeleteUser(uid) {
 // profileCount, and cycleCount fields on every brand, device, and profile doc. Run this
 // once after deploying the stored-counter feature to populate existing documents. Safe to
 // run multiple times (idempotent: always overwrites with the correct value).
+// Bounded-concurrency map: run `fn` over `items` with at most `limit` in flight, so a full
+// recount doesn't fire thousands of parallel aggregation fetches.
+async function _mapLimited(items, limit, fn) {
+  const out = new Array(items.length);
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length || 0) }, async () => {
+    while (idx < items.length) { const i = idx++; out[i] = await fn(items[i], i); }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+// ratingSum is stored as an INTEGER (round of avg*count) so subsequent rating writes can
+// maintain it with integer increment(); avg is derived on read as sum/count.
+function _ratingFields(r) {
+  const count = (r && r.count) || 0;
+  const sum = (r && r.avg != null && count > 0) ? Math.round(r.avg * count) : 0;
+  return { ratingCount: count, ratingSum: sum };
+}
+
 export async function adminRecount() {
   const LIMIT = 5000;
   const [brands, devices, profiles, cycles] = await Promise.all([
@@ -1210,11 +1346,18 @@ export async function adminRecount() {
   }
   for (const p of profiles) if (vis(p.status) && p.deviceId) profByDevice[p.deviceId] = (profByDevice[p.deviceId] || 0) + 1;
 
+  // Backfill the denormalized rating aggregate onto every cycle + device from its ratings
+  // subcollection (bounded fan-out). After this, cycle/device cards and the derived profile
+  // rating read the aggregate straight off the doc instead of one aggregation query per card.
+  const cycleRatings = await _mapLimited(cycles, 8, (c) => restRatingSummary(c.id).catch(() => ({ avg: null, count: 0 })));
+  const deviceRatings = await _mapLimited(devices, 8, (d) => restDeviceRating(d.id).catch(() => ({ avg: null, count: 0 })));
+
   // Build update ops for every document
   const ops = [
     ...brands.map((b) => ({ ref: doc(_db, 'brands', b.id), data: { deviceCount: devByBrand[b.brand_lc] || 0, cycleCount: cycByBrand[b.brand_lc] || 0 } })),
-    ...devices.map((d) => ({ ref: doc(_db, 'devices', d.id), data: { profileCount: profByDevice[d.id] || 0, cycleCount: cycByDevice[d.id] || 0 } })),
+    ...devices.map((d, i) => ({ ref: doc(_db, 'devices', d.id), data: { profileCount: profByDevice[d.id] || 0, cycleCount: cycByDevice[d.id] || 0, ..._ratingFields(deviceRatings[i]) } })),
     ...profiles.map((p) => ({ ref: doc(_db, 'profiles', p.id), data: { cycleCount: cycByProfile[p.id] || 0 } })),
+    ...cycles.map((c, i) => ({ ref: doc(_db, 'cycles', c.id), data: _ratingFields(cycleRatings[i]) })),
   ];
 
   const BATCH = 400;

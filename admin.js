@@ -43,6 +43,10 @@ let _cyCursor = null;
 let _userCursor = null;
 let _cyFilters = { status: '', applianceType: '' };
 const _cyRatingCache = new Map(); // cycleId -> Promise<{avg,count}> (evict on error)
+// creatorUid -> user doc (or null), for the Reports queue. A spam wave has one creator
+// across many reported objects; without this each group re-reads the same user doc.
+// Cleared on every reports (re)load; a specific uid is invalidated after banning it.
+const _reportUserCache = new Map();
 let _reviewRecord = null;
 let _userItems = [];
 let _statsLoaded = false;
@@ -943,6 +947,7 @@ async function loadReports(reset = false) {
   if (reset) {
     _reportCursor = null;
     _renderedReportKeys.clear();
+    _reportUserCache.clear();
     $('reports-list').innerHTML = '<div class="loading-center" style="padding:2rem"><div class="loading-spinner"></div></div>';
     $('reports-load-more').setAttribute('hidden', '');
   }
@@ -1045,8 +1050,11 @@ function renderReportItems(container, reports) {
 async function renderReportCreator(container, creatorUid, card, g) {
   if (!creatorUid) { container.innerHTML = `<span class="text-muted" style="font-size:.75rem">Contributor: anonymous / unknown</span>`; return; }
   container.innerHTML = `<span class="text-muted" style="font-size:.75rem">Contributor&hellip;</span>`;
-  let u = null;
-  try { u = await getUserDoc(creatorUid); } catch (_) {}
+  let u = _reportUserCache.get(creatorUid);
+  if (u === undefined) {
+    try { u = await getUserDoc(creatorUid); } catch (_) { u = null; }
+    _reportUserCache.set(creatorUid, u);  // dedupe repeat creators across report groups
+  }
   const name = (u && (u.displayName || u.githubLogin)) || truncate(creatorUid, 12);
   const strikes = (u && u.removedContentCount) || 0;
   const banned = u && u.status === 'banned';
@@ -1064,6 +1072,7 @@ async function renderReportCreator(container, creatorUid, card, g) {
     try {
       await adminBanUser(creatorUid, reason || '');
       toast('Contributor banned');
+      _reportUserCache.delete(creatorUid);  // re-read so the refreshed row shows "Banned"
       await renderReportCreator(container, creatorUid, card, g);
     } catch (e) { banBtn.disabled = false; toast(e.message, 'error'); }
   });
@@ -1253,6 +1262,15 @@ $('analytics-refresh-btn').addEventListener('click', () => { _statsLoaded = fals
 const recountBtn = $('recount-btn');
 if (recountBtn) {
   recountBtn.addEventListener('click', async () => {
+    // adminRecount() reads EVERY brand, device, profile, and cycle document (up to 5000
+    // each) in one pass -- easily thousands of Firestore reads against the daily free-tier
+    // budget. The denormalized counters are maintained incrementally at every mutation, so
+    // this is a rare repair, not a routine action. Gate it so it is never clicked casually.
+    if (!window.confirm(
+      'Recalculate counts?\n\nThis reads every brand, device, profile, and cycle in the '
+      + 'store in one pass and can use thousands of daily Firestore reads. The counters are '
+      + 'normally kept correct automatically -- only run this to repair drift. Continue?'
+    )) return;
     recountBtn.disabled = true;
     recountBtn.textContent = 'Recounting…';
     try {

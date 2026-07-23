@@ -11,6 +11,55 @@ to share and adopt appliance power-cycle reference recordings so nobody has to t
 washing-machine program from scratch. It is a static site hosted on GitHub Pages, backed by
 Firebase Firestore, with no ads, no tracking, and no paid tier.
 
+## 1.2.0 (2026-07-23)
+
+Read-budget optimization. The store runs on Firebase's free tier (a fixed number of
+document reads per day), and ordinary browsing was reading far more than it needed to. This
+release cuts reads across the board with no change to what visitors see.
+
+### Performance
+
+- **The brand and device catalog is cached in the browser**: The browse grid re-queried the
+  full brand and device listings on every page load, reload, and back-navigation, and the
+  contribute page queried the brand list again. These public, slow-changing listings are now
+  cached in `sessionStorage` for 5 minutes (shared between the browse and contribute pages,
+  and surviving reloads), so repeat views cost no reads. Contributing a brand or device
+  clears the cache immediately so the new entry shows up right away.
+- **Ratings are read from a denormalized aggregate instead of a per-item query**: A cycle's
+  and a device's star rating (average + count) used to be computed with one aggregation query
+  *per card*, and a program's rating read its entire cycle list plus one query per cycle. The
+  running total (`ratingSum` + `ratingCount`) is now stored on the cycle and device documents
+  and maintained, un-gameably, in the same write that saves a rating (mirroring the confirm
+  counter) — so browse cards and the derived program rating read it straight off documents
+  already fetched, for zero extra reads. Cards fall back to the live query only for items that
+  predate the backfill.
+- **The site-config document is read once per page load**: The maintenance flag and the
+  confirm threshold were each read separately at startup (two identical reads). Concurrent
+  readers now share a single fetch. The value is still never cached across loads, so the
+  maintenance flag stays current.
+- **"Recalculate counts" is gated behind a confirmation**: The admin recount reads every
+  brand, device, profile, and cycle in one pass (thousands of reads) — it now asks for
+  confirmation and explains the cost, since the counters are normally kept correct
+  automatically and it is only needed to repair drift. It also backfills the new rating
+  aggregate.
+- **The moderation queue dedupes contributor lookups**: A spam wave (one contributor, many
+  reported objects) re-read the same user document once per report card; the Reports tab now
+  caches contributor lookups per queue load.
+
+### Changed
+
+- **Security rules**: cycle and device documents now allow a signed-in user to maintain the
+  `ratingSum`/`ratingCount` aggregate, but only in the same batch that writes that user's own
+  rating document and only by the exact amount implied by their rating (a first rating adds
+  one to the count and their value to the sum; an edit shifts only the sum). This mirrors the
+  existing honest confirm-counter rule, so the aggregate cannot be forged. Covered by new
+  emulator rules tests.
+
+> **Deploying this release:** after publishing the site, deploy the rules
+> (`firebase deploy --only firestore:rules`) and run **Recalculate counts** once in the admin
+> panel to backfill `ratingSum`/`ratingCount` on existing cycles and devices. Until then,
+> ratings fall back to the live aggregation query, so nothing breaks in the interim.
+
 ## 1.1.0 (2026-07-20)
 
 ### Added
