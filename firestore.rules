@@ -134,6 +134,25 @@ service cloud.firestore {
         && resource.data.status == 'pending'
         && request.resource.data.status == 'approved'
         && resource.data.confirmCount >= confirmThreshold();
+      // Denormalized quality-rating aggregate (ratingSum + ratingCount), maintained in the
+      // SAME batch that writes this user's rating doc (mirrors confirmCount, un-gameable).
+      // FIRST rating: count +1, sum += new value.
+      allow update: if isGithubUser()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ratingSum', 'ratingCount'])
+        && !exists(/databases/$(database)/documents/devices/$(deviceId)/ratings/$(request.auth.uid))
+        && existsAfter(/databases/$(database)/documents/devices/$(deviceId)/ratings/$(request.auth.uid))
+        && getAfter(/databases/$(database)/documents/devices/$(deviceId)/ratings/$(request.auth.uid)).data.rating in [1, 2, 3, 4, 5]
+        && request.resource.data.ratingCount == resource.data.get('ratingCount', 0) + 1
+        && request.resource.data.ratingSum == resource.data.get('ratingSum', 0)
+             + getAfter(/databases/$(database)/documents/devices/$(deviceId)/ratings/$(request.auth.uid)).data.rating;
+      // EDIT an existing rating: count unchanged, sum += (new - old).
+      allow update: if isGithubUser()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ratingSum'])
+        && exists(/databases/$(database)/documents/devices/$(deviceId)/ratings/$(request.auth.uid))
+        && getAfter(/databases/$(database)/documents/devices/$(deviceId)/ratings/$(request.auth.uid)).data.rating in [1, 2, 3, 4, 5]
+        && request.resource.data.ratingSum == resource.data.get('ratingSum', 0)
+             - get(/databases/$(database)/documents/devices/$(deviceId)/ratings/$(request.auth.uid)).data.rating
+             + getAfter(/databases/$(database)/documents/devices/$(deviceId)/ratings/$(request.auth.uid)).data.rating;
       allow update: if isAdmin();
       allow delete: if isAdmin();
 
@@ -254,6 +273,26 @@ service cloud.firestore {
         && resource.data.status == 'pending'
         && request.resource.data.status == 'approved'
         && resource.data.confirmCount >= confirmThreshold();
+      // Denormalized rating aggregate (ratingSum + ratingCount), maintained in the SAME
+      // batch that writes this user's rating doc so the aggregate is un-gameable (mirrors
+      // confirmCount). FIRST rating: count +1, sum += the new rating value. getAfter reads
+      // the rating doc's post-batch value; get('field', 0) tolerates docs predating this.
+      allow update: if isGithubUser()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ratingSum', 'ratingCount'])
+        && !exists(/databases/$(database)/documents/cycles/$(cycleId)/ratings/$(request.auth.uid))
+        && existsAfter(/databases/$(database)/documents/cycles/$(cycleId)/ratings/$(request.auth.uid))
+        && getAfter(/databases/$(database)/documents/cycles/$(cycleId)/ratings/$(request.auth.uid)).data.rating in [1, 2, 3, 4, 5]
+        && request.resource.data.ratingCount == resource.data.get('ratingCount', 0) + 1
+        && request.resource.data.ratingSum == resource.data.get('ratingSum', 0)
+             + getAfter(/databases/$(database)/documents/cycles/$(cycleId)/ratings/$(request.auth.uid)).data.rating;
+      // EDIT an existing rating: count unchanged (not in the write), sum += (new - old).
+      allow update: if isGithubUser()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ratingSum'])
+        && exists(/databases/$(database)/documents/cycles/$(cycleId)/ratings/$(request.auth.uid))
+        && getAfter(/databases/$(database)/documents/cycles/$(cycleId)/ratings/$(request.auth.uid)).data.rating in [1, 2, 3, 4, 5]
+        && request.resource.data.ratingSum == resource.data.get('ratingSum', 0)
+             - get(/databases/$(database)/documents/cycles/$(cycleId)/ratings/$(request.auth.uid)).data.rating
+             + getAfter(/databases/$(database)/documents/cycles/$(cycleId)/ratings/$(request.auth.uid)).data.rating;
       allow update: if isAdmin();
       allow delete: if (isSignedIn() && isOwner()) || isAdmin();
 

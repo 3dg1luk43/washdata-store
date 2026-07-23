@@ -186,6 +186,70 @@ test('device quality rating: own uid, 1-5 only', async () => {
   await assertFails(setDoc(doc(gh('r1').firestore(), 'devices/d_rate/ratings/r2'), { uid: 'r2', rating: 3, updatedAt: new Date() }));
 });
 
+test('cycle rating counter: honest ratingSum/ratingCount tied to the batch rating write', async () => {
+  await seedDoc('cycles/c_rate', { status: 'approved' });
+  const db = gh('rater1').firestore();
+  // Bare counter bump without writing my rating doc -> denied.
+  await assertFails(updateDoc(doc(db, 'cycles/c_rate'), { ratingCount: increment(1), ratingSum: increment(5) }));
+  // First rating: batch (my rating doc = 5) + count +1 + sum +5 -> allowed.
+  const b1 = writeBatch(db);
+  b1.set(doc(db, 'cycles/c_rate/ratings/rater1'), { uid: 'rater1', rating: 5, updatedAt: new Date() });
+  b1.update(doc(db, 'cycles/c_rate'), { ratingCount: increment(1), ratingSum: increment(5) });
+  await assertSucceeds(b1.commit());
+  // A sum that does not match the rated value (rated 5, claims +3) -> denied.
+  const db2 = gh('rater2').firestore();
+  const bBad = writeBatch(db2);
+  bBad.set(doc(db2, 'cycles/c_rate/ratings/rater2'), { uid: 'rater2', rating: 5, updatedAt: new Date() });
+  bBad.update(doc(db2, 'cycles/c_rate'), { ratingCount: increment(1), ratingSum: increment(3) });
+  await assertFails(bBad.commit());
+  // Count bumped by more than 1 -> denied.
+  const bBad2 = writeBatch(db2);
+  bBad2.set(doc(db2, 'cycles/c_rate/ratings/rater2'), { uid: 'rater2', rating: 5, updatedAt: new Date() });
+  bBad2.update(doc(db2, 'cycles/c_rate'), { ratingCount: increment(2), ratingSum: increment(5) });
+  await assertFails(bBad2.commit());
+  // Edit my own rating (5 -> 2): count unchanged, sum shifts by (2 - 5) = -3 -> allowed.
+  const bEdit = writeBatch(db);
+  bEdit.set(doc(db, 'cycles/c_rate/ratings/rater1'), { uid: 'rater1', rating: 2, updatedAt: new Date() }, { merge: true });
+  bEdit.update(doc(db, 'cycles/c_rate'), { ratingSum: increment(-3) });
+  await assertSucceeds(bEdit.commit());
+  // An edit whose sum shift does not match the new value -> denied.
+  const bEditBad = writeBatch(db);
+  bEditBad.set(doc(db, 'cycles/c_rate/ratings/rater1'), { uid: 'rater1', rating: 4, updatedAt: new Date() }, { merge: true });
+  bEditBad.update(doc(db, 'cycles/c_rate'), { ratingSum: increment(5) });  // should be +2
+  await assertFails(bEditBad.commit());
+});
+
+test('device rating counter: honest ratingSum/ratingCount tied to the batch rating write', async () => {
+  await seedDoc('devices/d_ratec', { status: 'approved' });
+  const db = gh('dr1').firestore();
+  await assertFails(updateDoc(doc(db, 'devices/d_ratec'), { ratingCount: increment(1), ratingSum: increment(4) }));
+  const b1 = writeBatch(db);
+  b1.set(doc(db, 'devices/d_ratec/ratings/dr1'), { uid: 'dr1', rating: 4, updatedAt: new Date() });
+  b1.update(doc(db, 'devices/d_ratec'), { ratingCount: increment(1), ratingSum: increment(4) });
+  await assertSucceeds(b1.commit());
+  // A sum that does not match the rated value (rated 4, claims +2) -> denied.
+  const db2 = gh('dr2').firestore();
+  const bBad = writeBatch(db2);
+  bBad.set(doc(db2, 'devices/d_ratec/ratings/dr2'), { uid: 'dr2', rating: 4, updatedAt: new Date() });
+  bBad.update(doc(db2, 'devices/d_ratec'), { ratingCount: increment(1), ratingSum: increment(2) });
+  await assertFails(bBad.commit());
+  // Count bumped by more than 1 -> denied.
+  const bBad2 = writeBatch(db2);
+  bBad2.set(doc(db2, 'devices/d_ratec/ratings/dr2'), { uid: 'dr2', rating: 4, updatedAt: new Date() });
+  bBad2.update(doc(db2, 'devices/d_ratec'), { ratingCount: increment(2), ratingSum: increment(4) });
+  await assertFails(bBad2.commit());
+  // Edit 4 -> 1: count unchanged, sum shifts by -3 -> allowed.
+  const bEdit = writeBatch(db);
+  bEdit.set(doc(db, 'devices/d_ratec/ratings/dr1'), { uid: 'dr1', rating: 1, updatedAt: new Date() }, { merge: true });
+  bEdit.update(doc(db, 'devices/d_ratec'), { ratingSum: increment(-3) });
+  await assertSucceeds(bEdit.commit());
+  // An edit whose sum shift does not match the new value -> denied.
+  const bEditBad = writeBatch(db);
+  bEditBad.set(doc(db, 'devices/d_ratec/ratings/dr1'), { uid: 'dr1', rating: 3, updatedAt: new Date() }, { merge: true });
+  bEditBad.update(doc(db, 'devices/d_ratec'), { ratingSum: increment(5) });  // should be +2
+  await assertFails(bEditBad.commit());
+});
+
 test('device owner can update settings only; cannot touch other fields', async () => {
   await env.withSecurityRulesDisabled(async (ctx) => {
     await setDoc(doc(ctx.firestore(), 'devices/d_owned'), validDevice('creator', { ownerId: 'owner1' }));

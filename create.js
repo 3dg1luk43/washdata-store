@@ -118,7 +118,9 @@ onAuth(async (user) => {
 let _brandsLoaded = false;
 async function loadBrandOptions() {
   try {
-    const { items } = await listBrands({ pageSize: 200, includePending: true });
+    // Default page size (shares the browse page's cached brand listing via sessionStorage);
+    // the catalog is far smaller than a page, so this returns every brand.
+    const { items } = await listBrands({ includePending: true });
     const dl = $('brand-list');
     dl.innerHTML = items.map((b) => `<option value="${esc(b.brand)}"></option>`).join('');
   } catch (_) { /* autocomplete is best-effort */ }

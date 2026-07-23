@@ -24,7 +24,7 @@ import {
   submitRating, getUserRating, getRatingSummary,
   confirmDevice, rateDevice, getDeviceQuality, getUserDeviceRating, hasConfirmedDevice,
   confirmCycle, hasConfirmedCycle,
-  getProfileRating,
+  getProfileRating, ratingSummaryFromDoc,
   applianceLabel, confirmThresholdValue,
   getSiteConfig,
   getUserDoc, subscribeUserStatus,
@@ -223,6 +223,17 @@ function fetchProfileRating(id) {
     _profileRatingCache.set(id, getProfileRating(id).catch((e) => { _profileRatingCache.delete(id); throw e; }));
   }
   return _profileRatingCache.get(id);
+}
+// Card renderers: prefer the denormalized aggregate carried on the doc the list query
+// already fetched (0 reads); fall back to the live aggregation only for docs predating the
+// backfill. The details modal + post-rating refreshes keep using the live fetch for freshness.
+function resolveCycleRating(cycleDoc) {
+  const denorm = ratingSummaryFromDoc(cycleDoc);
+  return denorm ? Promise.resolve(denorm) : fetchRatingSummary(cycleDoc.id);
+}
+function resolveDeviceQuality(deviceDoc) {
+  const denorm = ratingSummaryFromDoc(deviceDoc);
+  return denorm ? Promise.resolve(denorm) : fetchDeviceQuality(deviceDoc.id);
 }
 
 // Compact "★ 4.2 (12)" label, or '' when there are no ratings.
@@ -534,7 +545,7 @@ function buildDeviceCard(d) {
   if (rbD) el.querySelector('.card-actions').appendChild(rbD);
   renderDeviceCommunity(el.querySelector('[data-community]'), d);
   // Device quality rating: show in the meta row + honor the Min-rating filter.
-  fetchDeviceQuality(d.id).then((s) => {
+  resolveDeviceQuality(d).then((s) => {
     const rl = ratingLabel(s);
     const el2 = el.querySelector('[data-devrating]');
     if (el2 && rl) { el2.textContent = rl; el2.hidden = false; }
@@ -552,7 +563,7 @@ function renderDeviceCommunity(box, d) {
   if (!_user) {
     box.innerHTML = `<span class="rating-info text-muted" data-agg style="font-size:.75rem">Loading rating&hellip;</span>
       <span class="text-muted" style="font-size:.75rem">&middot; Sign in to confirm or rate.</span>`;
-    fetchDeviceQuality(d.id).then((s) => {
+    resolveDeviceQuality(d).then((s) => {
       const el = box.querySelector('[data-agg]');
       if (el) el.textContent = s.count > 0 ? `Quality: ★ ${s.avg.toFixed(1)} (${s.count})` : 'No ratings yet';
     }).catch(() => {});
@@ -572,7 +583,7 @@ function renderDeviceCommunity(box, d) {
   wrap.innerHTML = '<span class="text-muted" style="font-size:.75rem">Loading rating&hellip;</span>';
   Promise.all([
     getUserDeviceRating(d.id).catch(() => 0),
-    fetchDeviceQuality(d.id).catch(() => ({ avg: null, count: 0 })),
+    resolveDeviceQuality(d).catch(() => ({ avg: null, count: 0 })),
   ]).then(([current, summary]) => renderDeviceStars(wrap, d, current || 0, summary));
 }
 
@@ -791,8 +802,9 @@ function buildCycleCard(c) {
   if (rbC) el.querySelector('.card-actions').appendChild(rbC);
   renderCycleCommunity(el.querySelector('[data-community]'), c);
   el._ratingSummary = { avg: null, count: 0 }; // gated once the summary resolves
-  // Lazy-load aggregate rating — shares the session Promise cache with the detail modal.
-  fetchRatingSummary(c.id).then((s) => {
+  // Prefer the denormalized aggregate on the cycle doc (0 reads); fall back to the live
+  // aggregation (shared with the detail modal) only for cycles predating the backfill.
+  resolveCycleRating(c).then((s) => {
     if (s.avg != null && s.count > 0) {
       const badge2 = el.querySelector('[data-crating]');
       if (badge2) { badge2.querySelector('span').textContent = `${s.avg.toFixed(1)} (${s.count})`; badge2.hidden = false; }
