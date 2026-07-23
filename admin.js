@@ -43,9 +43,10 @@ let _cyCursor = null;
 let _userCursor = null;
 let _cyFilters = { status: '', applianceType: '' };
 const _cyRatingCache = new Map(); // cycleId -> Promise<{avg,count}> (evict on error)
-// creatorUid -> user doc (or null), for the Reports queue. A spam wave has one creator
-// across many reported objects; without this each group re-reads the same user doc.
-// Cleared on every reports (re)load; a specific uid is invalidated after banning it.
+// creatorUid -> Promise<user doc | null>, for the Reports queue. A spam wave has one
+// creator across many reported objects; caching the in-flight promise means concurrent
+// cards share one getUserDoc read. Cleared on every reports (re)load; reseeded to a banned
+// doc after a ban (which also re-renders every mounted card for that uid).
 const _reportUserCache = new Map();
 let _reviewRecord = null;
 let _userItems = [];
@@ -1049,12 +1050,19 @@ function renderReportItems(container, reports) {
 
 async function renderReportCreator(container, creatorUid, card, g) {
   if (!creatorUid) { container.innerHTML = `<span class="text-muted" style="font-size:.75rem">Contributor: anonymous / unknown</span>`; return; }
+  // Tag the container so a ban can refresh every mounted card for this creator.
+  container.dataset.creatorUid = creatorUid;
   container.innerHTML = `<span class="text-muted" style="font-size:.75rem">Contributor&hellip;</span>`;
-  let u = _reportUserCache.get(creatorUid);
-  if (u === undefined) {
-    try { u = await getUserDoc(creatorUid); } catch (_) { u = null; }
-    _reportUserCache.set(creatorUid, u);  // dedupe repeat creators across report groups
+  // Cache the in-flight promise (not just the resolved value) so concurrent report cards
+  // for the same creator share ONE getUserDoc read; evict on rejection so a transient
+  // failure is retried next render instead of being cached as null forever.
+  let lookup = _reportUserCache.get(creatorUid);
+  if (lookup === undefined) {
+    lookup = getUserDoc(creatorUid);
+    _reportUserCache.set(creatorUid, lookup);
   }
+  let u = null;
+  try { u = await lookup; } catch (_) { _reportUserCache.delete(creatorUid); u = null; }
   const name = (u && (u.displayName || u.githubLogin)) || truncate(creatorUid, 12);
   const strikes = (u && u.removedContentCount) || 0;
   const banned = u && u.status === 'banned';
@@ -1072,8 +1080,12 @@ async function renderReportCreator(container, creatorUid, card, g) {
     try {
       await adminBanUser(creatorUid, reason || '');
       toast('Contributor banned');
-      _reportUserCache.delete(creatorUid);  // re-read so the refreshed row shows "Banned"
-      await renderReportCreator(container, creatorUid, card, g);
+      // Reflect the ban on EVERY mounted card for this creator (a spam wave produces many),
+      // not just this one, and with no extra reads: seed the cache with the banned doc and
+      // re-render each tagged container from it.
+      _reportUserCache.set(creatorUid, Promise.resolve({ ...(u || { uid: creatorUid }), status: 'banned' }));
+      const sel = `[data-creator-uid="${(window.CSS && CSS.escape) ? CSS.escape(creatorUid) : creatorUid}"]`;
+      document.querySelectorAll(sel).forEach((el) => { renderReportCreator(el, creatorUid, card, g); });
     } catch (e) { banBtn.disabled = false; toast(e.message, 'error'); }
   });
 }

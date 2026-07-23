@@ -30,7 +30,7 @@ release cuts reads across the board with no change to what visitors see.
   *per card*, and a program's rating read its entire cycle list plus one query per cycle. The
   running total (`ratingSum` + `ratingCount`) is now stored on the cycle and device documents
   and maintained, un-gameably, in the same write that saves a rating (mirroring the confirm
-  counter) — so browse cards and the derived program rating read it straight off documents
+  counter), so browse cards and the derived program rating read it straight off documents
   already fetched, for zero extra reads. Cards fall back to the live query only for items that
   predate the backfill.
 - **The site-config document is read once per page load**: The maintenance flag and the
@@ -38,7 +38,7 @@ release cuts reads across the board with no change to what visitors see.
   readers now share a single fetch. The value is still never cached across loads, so the
   maintenance flag stays current.
 - **"Recalculate counts" is gated behind a confirmation**: The admin recount reads every
-  brand, device, profile, and cycle in one pass (thousands of reads) — it now asks for
+  brand, device, profile, and cycle in one pass (thousands of reads), so it now asks for
   confirmation and explains the cost, since the counters are normally kept correct
   automatically and it is only needed to repair drift. It also backfills the new rating
   aggregate.
@@ -55,10 +55,16 @@ release cuts reads across the board with no change to what visitors see.
   existing honest confirm-counter rule, so the aggregate cannot be forged. Covered by new
   emulator rules tests.
 
-> **Deploying this release:** after publishing the site, deploy the rules
-> (`firebase deploy --only firestore:rules`) and run **Recalculate counts** once in the admin
-> panel to backfill `ratingSum`/`ratingCount` on existing cycles and devices. Until then,
-> ratings fall back to the live aggregation query, so nothing breaks in the interim.
+> **Deploying this release (order matters):** deploy the security rules **first**
+> (`firebase deploy --only firestore:rules`), **then** publish the site, **then** run
+> **Recalculate counts** once in the admin panel to backfill `ratingSum`/`ratingCount` on
+> existing cycles and devices. The rules must go first because the new client writes the
+> rating aggregate in the same batch as the rating itself, so a site published before the
+> rules would have every rating submission rejected until the rules land (the read-side
+> fallback covers reads, not writes). The rules change is purely additive, so the
+> previously released client keeps working the moment the rules are deployed. Note the
+> recount reads one rating aggregation per cycle and per device (on top of the four bulk
+> catalog reads), so it is an occasional, explicitly confirmed repair, not a routine action.
 
 ## 1.1.0 (2026-07-20)
 

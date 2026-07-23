@@ -227,11 +227,27 @@ test('device rating counter: honest ratingSum/ratingCount tied to the batch rati
   b1.set(doc(db, 'devices/d_ratec/ratings/dr1'), { uid: 'dr1', rating: 4, updatedAt: new Date() });
   b1.update(doc(db, 'devices/d_ratec'), { ratingCount: increment(1), ratingSum: increment(4) });
   await assertSucceeds(b1.commit());
-  // Edit 4 -> 1: sum shifts by -3.
+  // A sum that does not match the rated value (rated 4, claims +2) -> denied.
+  const db2 = gh('dr2').firestore();
+  const bBad = writeBatch(db2);
+  bBad.set(doc(db2, 'devices/d_ratec/ratings/dr2'), { uid: 'dr2', rating: 4, updatedAt: new Date() });
+  bBad.update(doc(db2, 'devices/d_ratec'), { ratingCount: increment(1), ratingSum: increment(2) });
+  await assertFails(bBad.commit());
+  // Count bumped by more than 1 -> denied.
+  const bBad2 = writeBatch(db2);
+  bBad2.set(doc(db2, 'devices/d_ratec/ratings/dr2'), { uid: 'dr2', rating: 4, updatedAt: new Date() });
+  bBad2.update(doc(db2, 'devices/d_ratec'), { ratingCount: increment(2), ratingSum: increment(4) });
+  await assertFails(bBad2.commit());
+  // Edit 4 -> 1: count unchanged, sum shifts by -3 -> allowed.
   const bEdit = writeBatch(db);
   bEdit.set(doc(db, 'devices/d_ratec/ratings/dr1'), { uid: 'dr1', rating: 1, updatedAt: new Date() }, { merge: true });
   bEdit.update(doc(db, 'devices/d_ratec'), { ratingSum: increment(-3) });
   await assertSucceeds(bEdit.commit());
+  // An edit whose sum shift does not match the new value -> denied.
+  const bEditBad = writeBatch(db);
+  bEditBad.set(doc(db, 'devices/d_ratec/ratings/dr1'), { uid: 'dr1', rating: 3, updatedAt: new Date() }, { merge: true });
+  bEditBad.update(doc(db, 'devices/d_ratec'), { ratingSum: increment(5) });  // should be +2
+  await assertFails(bEditBad.commit());
 });
 
 test('device owner can update settings only; cannot touch other fields', async () => {
