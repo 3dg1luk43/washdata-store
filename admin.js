@@ -20,13 +20,14 @@ import {
   deleteCycle, qcLabel,
   adminListCycles, adminSetCycleStatus,
   adminListDevices, adminSetDeviceStatus, adminSetProfileStatus, adminSetBrandStatus, adminMergeDevices, adminMergeProfiles,
+  adminRenameBrand, adminMergeBrands, adminRenameDevice, adminRenameProfile, adminMoveCycle,
   adminListBrands, adminListProfiles,
-  adminListUsers, adminBanUser, adminUnbanUser, adminGetStats, adminRecount,
+  adminListUsers, adminBanUser, adminUnbanUser, adminGetStats, adminRecount, adminCountOpenReports,
   getSiteConfig, setMaintenance, setConfirmThreshold,
   adminSetDeviceOwner, adminSetProfileOwner,
   adminDeleteDevice, adminDeleteBrand, adminDeleteProfile, adminDeleteUser,
   adminDeleteComment,
-  getReferenceCycles,
+  getReferenceCycles, getCycle,
   adminGetAnalytics,
   getRatingSummary, getDeviceQuality,
   getUserDoc,
@@ -60,6 +61,7 @@ let _catLevel = 'brands'; // 'brands' | 'devices' | 'profiles' | 'cycles'
 let _catBrand = null;
 let _catDevice = null;
 let _catProfile = null;
+let _moveCycleId = null;
 let _catCycles = [];
 let _catCycleCursor = null;
 let _catalogLoaded = false;
@@ -224,7 +226,10 @@ function switchTab(name) {
 }
 TABS.forEach((name) => $(`${name}-btn`).addEventListener('click', () => {
   switchTab(name);
-  if (name === 'reports' && !_reportsLoaded) loadReports(true);
+  // Overview persists once loaded; a moderation action invalidates _statsCache, so refresh the
+  // whole dashboard when returning to it after one (keeps every tile, not just reports, current).
+  if (name === 'overview' && !_statsCache) loadOverview();
+  if (name === 'reports') { refreshOpenReports(); if (!_reportsLoaded) loadReports(true); }
   if (name === 'catalog' && !_catalogLoaded) loadCatalogData();
   if (name === 'cycles' && !$('cycles-tbody').hasChildNodes()) loadCycles(true);
   if (name === 'users' && !$('users-tbody').hasChildNodes()) loadUsers(true);
@@ -245,6 +250,17 @@ function renderReportsTabCount(n) {
   badge.textContent = n;
   badge.toggleAttribute('hidden', !n);
 }
+// Keep the moderation tab badge AND the Overview "Open Reports" dashboard card in sync. The
+// dashboard card was previously only set when Overview (re)loaded, so resolving reports from
+// the queue left it showing a stale count; every moderation action now refreshes both here.
+function setOpenReports(n) {
+  renderReportsTabCount(n);
+  const v = $('ov-reports-card') && $('ov-reports-card').querySelector('.stat-value');
+  if (v) { v.textContent = n; v.className = `stat-value ${n ? 'c-rejected' : 'c-approved'}`; }
+}
+// One lightweight collection-group count (not the whole stats bundle) to refresh the badge +
+// dashboard card after a moderation action or when the Reports tab is opened.
+function refreshOpenReports() { adminCountOpenReports().then(setOpenReports).catch(() => {}); }
 // Compact per-object-type breakdown line for a stat card (only non-zero types shown).
 function statBreakdown(by) {
   if (!by) return '';
@@ -256,7 +272,6 @@ async function loadOverview() {
   $('stats-grid').innerHTML = '<div class="loading-center" style="grid-column:1/-1"><div class="loading-spinner"></div></div>';
   try {
     const s = await ensureStats(true);
-    renderReportsTabCount(s.openReports);
     $('stats-grid').innerHTML = `
       <div class="stat-card stat-card-link" id="ov-reports-card"><div class="stat-label">Open Reports</div><div class="stat-value ${s.openReports ? 'c-rejected' : 'c-approved'}">${s.openReports}</div></div>
       <div class="stat-card"><div class="stat-label">Pending Review</div><div class="stat-value c-pending">${s.pending}</div>${statBreakdown(s.pendingByType)}</div>
@@ -264,6 +279,7 @@ async function loadOverview() {
       <div class="stat-card"><div class="stat-label">Rejected</div><div class="stat-value c-rejected">${s.rejected}</div></div>
       <div class="stat-card"><div class="stat-label">Removed</div><div class="stat-value c-removed">${s.removed}</div>${statBreakdown(s.removedByType)}</div>
       <div class="stat-card"><div class="stat-label">Banned Users</div><div class="stat-value c-ban">${s.bannedUsers}</div></div>`;
+    setOpenReports(s.openReports);
     const rc = $('ov-reports-card');
     if (rc) rc.addEventListener('click', () => { switchTab('reports'); if (!_reportsLoaded) loadReports(true); });
   } catch (e) {
@@ -626,9 +642,85 @@ function catSearchFilter(items, getSearchStr) {
   return q ? items.filter((i) => getSearchStr(i).toLowerCase().includes(q)) : items;
 }
 
+// Reload the catalog data, then restore the drill position. A rename/merge changes the
+// renamed object's own doc id, but the ancestors we drilled through are stable, so we
+// re-navigate to them by id (loadCatalogData resets to the brands root).
+async function reloadCatalog() {
+  const lvl = _catLevel;
+  const bId = _catBrand && _catBrand.id, dId = _catDevice && _catDevice.id, pId = _catProfile && _catProfile.id;
+  _catalogLoaded = false;
+  await loadCatalogData();
+  const b = bId ? _brandItems.find((x) => x.id === bId) : null;
+  const d = dId ? _deviceItems.find((x) => x.id === dId) : null;
+  const p = pId ? _profileItems.find((x) => x.id === pId) : null;
+  if (lvl === 'devices' && b) catNavigate('devices', b);
+  else if (lvl === 'profiles' && b && d) catNavigate('profiles', b, d);
+  else if (lvl === 'cycles' && b && d && p) catNavigate('cycles', b, d, p);
+}
+
+// Shared "Rename" action for a catalog card. `doRename(newName)` runs the ID migration
+// (brand/device/profile) in washstore; the catalog reloads afterward. Renaming to a name
+// that already exists is a merge (washstore reports it via the returned `merged` flag).
+function catRenameButton(cell, label, currentName, doRename) {
+  const b = document.createElement('button');
+  b.className = 'btn btn-ghost btn-sm';
+  b.textContent = 'Rename';
+  b.addEventListener('click', async () => {
+    const next = prompt(`Rename ${label} "${currentName || ''}" to:`, currentName || '');
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === (currentName || '')) return;
+    b.disabled = true;
+    try {
+      const res = await doRename(trimmed);
+      toast(res && res.merged ? `${label} merged into "${trimmed}"` : `${label} renamed to "${trimmed}"`);
+      await reloadCatalog();
+    } catch (e) { b.disabled = false; toast(e.message, 'error'); }
+  });
+  cell.appendChild(b);
+}
+
+// Move a reference cycle to a sibling profile (different program) of the same device.
+function openMoveCycleModal(cycle) {
+  _moveCycleId = cycle.id;
+  const siblings = _profileItems.filter(
+    (p) => p.deviceId === (_catDevice && _catDevice.id) && p.id !== cycle.profileId);
+  const sel = $('move-cycle-select');
+  sel.innerHTML = siblings.map(
+    (p) => `<option value="${esc(p.id)}">${esc(p.program || p.id)} (${esc(p.status)})</option>`).join('');
+  const none = siblings.length === 0;
+  sel.toggleAttribute('hidden', none);
+  $('move-cycle-empty').toggleAttribute('hidden', !none);
+  $('move-cycle-save').disabled = none;
+  $('mc-modal-subtitle').textContent = `${deviceLabel(cycle)} · ${truncate(cycle.id, 10)}`;
+  $('move-cycle-modal').removeAttribute('hidden');
+}
+function closeMoveCycleModal() { $('move-cycle-modal').setAttribute('hidden', ''); _moveCycleId = null; }
+$('move-cycle-close').addEventListener('click', closeMoveCycleModal);
+$('move-cycle-cancel').addEventListener('click', closeMoveCycleModal);
+$('move-cycle-modal').addEventListener('click', (e) => { if (e.target === $('move-cycle-modal')) closeMoveCycleModal(); });
+$('move-cycle-save').addEventListener('click', async () => {
+  const to = $('move-cycle-select').value;
+  if (!to || !_moveCycleId) return;
+  $('move-cycle-save').disabled = true;
+  try {
+    await adminMoveCycle(_moveCycleId, to);
+    toast('Cycle moved');
+    closeMoveCycleModal();
+    await reloadCatalog();
+  } catch (e) { $('move-cycle-save').disabled = false; toast(e.message, 'error'); }
+});
+
 // Level 1 — Brands
 function renderCatBrands() {
-  $('cat-merge-bar').style.display = 'none';
+  // Merge/rename brands (e.g. fold "bosh" into "Bosch"). The target select carries the brand
+  // lowercase id; adminMergeBrands wants the canonical display name, so resolve it here.
+  catMergebar(_brandItems, 'brand', (b) => `${b.brand || b.id} (${b.status})`,
+    (fromLc, toLc) => {
+      const tgt = _brandItems.find((x) => x.id === toLc);
+      return adminMergeBrands(fromLc, tgt ? tgt.brand : toLc);
+    },
+    () => catNavigate('brands'));
   const sorted = [..._brandItems].sort((a, b) =>
     (a.status === 'pending' ? -1 : 0) - (b.status === 'pending' ? -1 : 0) || (a.brand || '').localeCompare(b.brand || ''));
   const items = catSearchFilter(sorted, (b) => `${b.brand || ''} ${b.status || ''} ${b.createdByName || ''}`);
@@ -640,6 +732,7 @@ function renderCatBrands() {
     const meta = `${devCount} device${devCount !== 1 ? 's' : ''}${brand.createdByName ? ` · by ${esc(brand.createdByName)}` : ''}`;
     const card = catMakeCard(brand, brand.brand, meta);
     buildStatusActions(card, brand, adminSetBrandStatus, 'Brand', (cell) => {
+      catRenameButton(cell, 'brand', brand.brand, (name) => adminRenameBrand(brand.id, name));
       const drill = document.createElement('button'); drill.className = 'btn-drill'; drill.textContent = 'Devices →';
       drill.addEventListener('click', () => catNavigate('devices', brand));
       cell.appendChild(drill);
@@ -669,6 +762,7 @@ function renderCatDevices() {
     ].filter(Boolean).join(' · ');
     const card = catMakeCard(device, device.model || device.id, metaParts);
     buildStatusActions(card, device, adminSetDeviceStatus, 'Device', (cell) => {
+      catRenameButton(cell, 'model', device.model, (name) => adminRenameDevice(device.id, name));
       const settBtn = document.createElement('button'); settBtn.className = 'btn btn-ghost btn-sm'; settBtn.textContent = 'Settings';
       settBtn.addEventListener('click', () => openSettingsEditor(device));
       cell.appendChild(settBtn);
@@ -708,6 +802,7 @@ function renderCatProfiles() {
     ].filter(Boolean).join(' · ');
     const card = catMakeCard(profile, profile.program || profile.id, metaParts);
     buildStatusActions(card, profile, adminSetProfileStatus, 'Profile', (cell) => {
+      catRenameButton(cell, 'program', profile.program, (name) => adminRenameProfile(profile.id, name));
       const phaseBtn = document.createElement('button'); phaseBtn.className = 'btn btn-ghost btn-sm'; phaseBtn.textContent = 'Edit phases';
       phaseBtn.addEventListener('click', () => openPhaseEditor(profile));
       cell.appendChild(phaseBtn);
@@ -748,6 +843,11 @@ async function renderCatCyclesLevel() {
         <td class="text-muted" data-rating style="white-space:nowrap;font-size:.72rem">&hellip;</td>
         <td><div class="action-cell"></div></td>`;
       buildCycleActions(tr.querySelector('.action-cell'), c, tr);
+      const moveBtn = document.createElement('button');
+      moveBtn.className = 'btn btn-ghost btn-sm'; moveBtn.textContent = 'Move';
+      moveBtn.title = 'Move this cycle to another program of the same device';
+      moveBtn.addEventListener('click', () => openMoveCycleModal(c));
+      tr.querySelector('.action-cell').appendChild(moveBtn);
       cyRating(c.id).then((s) => {
         const cell = tr.querySelector('[data-rating]');
         if (cell) cell.textContent = (s && s.count > 0) ? `★ ${s.avg.toFixed(1)} (${s.count})` : '-';
@@ -988,6 +1088,7 @@ function buildReportGroupCard(g) {
       </div>
       <div class="report-creator" data-creator></div>
     </div>
+    <div class="report-identity" data-identity></div>
     <div class="report-path mono">${esc(g.targetPath || '')}</div>
     <div class="report-items" data-items>
       <div class="loading-center" style="padding:.75rem"><div class="loading-spinner"></div></div>
@@ -1023,12 +1124,69 @@ async function hydrateReportGroupCard(card, g) {
     statusEl.textContent = st;
     statusEl.className = `badge report-live-status ${known ? 'badge-' + st : 'badge-removed'}`;
   }
+  // Human-readable identity of the reported object (brand/model/program/uploader) so an admin
+  // can tell what is being reported without decoding the raw doc path.
+  renderReportIdentity(card, g, live).catch(() => {});
   // Creator identity comes ONLY from the trusted live object -- never the reporter-supplied
   // targetCreatedByUid field (which could name a victim). If the object is gone, creatorUid
   // stays null so neither a ban nor a strike can be aimed at an unverified uid.
   const creatorUid = creatorUidOf(live, g.targetType) || null;
   await renderReportCreator(card.querySelector('[data-creator]'), creatorUid, card, g);
   renderReportGroupActions(card.querySelector('[data-actions]'), g, live, creatorUid);
+}
+
+// Fill in a human-readable identity line for a reported object so an admin can identify
+// exactly what is referenced (brand / model / program / uploader / date) without decoding the
+// raw Firestore path. `live` is the trusted live object (from adminGetByPath); null == gone.
+// Profiles and cycles fetch their parent device (one read) to show brand + model.
+async function renderReportIdentity(card, g, live) {
+  const el = card.querySelector('[data-identity]');
+  if (!el) return;
+  if (!live) { el.innerHTML = '<span class="text-muted">Object no longer exists.</span>'; return; }
+  const parts = [];
+  const main = (s) => `<span class="ri-main">${esc(s)}</span>`;
+  const typeChip = (t) => `<span class="ri-type">${esc(typeLabel(t))}</span>`;
+  let isCycle = false;
+  if (g.targetType === 'brand') {
+    parts.push(main(live.brand || g.targetId));
+    if (live.deviceCount != null) parts.push(`${live.deviceCount} device${live.deviceCount === 1 ? '' : 's'}`);
+    if (live.cycleCount != null) parts.push(`${live.cycleCount} cycle${live.cycleCount === 1 ? '' : 's'}`);
+  } else if (g.targetType === 'device') {
+    parts.push(main(`${live.brand || ''} ${live.model || g.targetId}`.trim()));
+    if (live.applianceType) parts.push(typeChip(live.applianceType));
+    if (live.createdByName) parts.push(`by ${esc(live.createdByName)}`);
+  } else if (g.targetType === 'profile' || g.targetType === 'cycle') {
+    isCycle = g.targetType === 'cycle';
+    const dev = live.deviceId ? await adminGetByPath(`devices/${live.deviceId}`).catch(() => null) : null;
+    const devLabel = dev ? `${dev.brand || ''} ${dev.model || ''}`.trim() : (live.brand_lc || live.deviceId || '');
+    const program = live.program || live.program_lc || '';
+    parts.push(main(`${devLabel} › ${program}`));
+    if (live.applianceType) parts.push(typeChip(live.applianceType));
+    const who = isCycle ? live.uploaderName : live.createdByName;
+    if (who) parts.push(`by ${esc(who)}`);
+    if (isCycle && live.createdAt) parts.push(formatDate(live.createdAt));
+    if (isCycle && live.downloads != null) parts.push(`${live.downloads} DL`);
+  } else if (g.targetType === 'comment') {
+    parts.push(main(`"${truncate(live.text || '', 80)}"`));
+    if (live.authorName) parts.push(`by ${esc(live.authorName)}`);
+    if (g.parentCycleId) parts.push(`on cycle ${esc(truncate(g.parentCycleId, 10))}`);
+  }
+  el.innerHTML = parts.join(' <span class="ri-sep">&middot;</span> ');
+  if (isCycle) {
+    const b = document.createElement('button');
+    b.className = 'btn btn-ghost btn-sm ri-view';
+    b.textContent = 'View cycle';
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        const full = await getCycle(g.targetId);
+        if (full) openReviewModal(full); else toast('Cycle not found', 'error');
+      } catch (e) { toast(e.message, 'error'); }
+      b.disabled = false;
+    });
+    el.appendChild(document.createTextNode(' '));
+    el.appendChild(b);
+  }
 }
 
 function renderReportItems(container, reports) {
@@ -1104,7 +1262,11 @@ function renderReportGroupActions(container, g, live, creatorUid) {
     if (creatorUid && resolution !== 'dismissed') await adminRecordRemoval(creatorUid);
     container.closest('.report-group').remove();
     toast(`Reports ${verb}`);
-    ensureStats(true).then((s) => renderReportsTabCount(s.openReports)).catch(() => {});
+    // The soft-remove/delete paths also change the pending/removed dashboard tiles, so drop
+    // the cached stats bundle (Overview recomputes on its next view) and refresh the live
+    // open-reports badge + dashboard card from a single fresh count.
+    _statsCache = null;
+    refreshOpenReports();
   };
   const mk = (label, cls, handler) => {
     const b = document.createElement('button');

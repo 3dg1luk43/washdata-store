@@ -336,6 +336,30 @@
     </div>
   </div>
 
+  <!-- Move-cycle modal: reassign a reference cycle to a sibling program of the same device -->
+  <div class="modal-overlay" id="move-cycle-modal" hidden aria-modal="true" role="dialog">
+    <div class="modal" style="max-width:440px">
+      <div class="modal-header">
+        <div>
+          <h2 class="modal-title">Move cycle to another program</h2>
+          <div class="modal-subtitle" id="mc-modal-subtitle"></div>
+        </div>
+        <button class="modal-close" id="move-cycle-close" aria-label="Close">&#215;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="move-cycle-select">Target program (same device)</label>
+          <select id="move-cycle-select"></select>
+          <div class="form-hint" id="move-cycle-empty" hidden>This device has no other program to move the cycle into. Rename the program instead, or add another program first.</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost btn-sm" id="move-cycle-cancel">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="move-cycle-save">Move cycle</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast-container" id="toasts" aria-live="assertive" aria-atomic="true"></div>
   <script type="module" src="admin.js"></script>
 </body>

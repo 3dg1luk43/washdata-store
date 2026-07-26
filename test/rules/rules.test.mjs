@@ -428,3 +428,61 @@ test('strike counter: admin may bump removedContentCount; the user may not', asy
   await assertFails(updateDoc(doc(gh('rc').firestore(), 'users/rc'), { removedContentCount: increment(1) }));
   await assertSucceeds(updateDoc(doc(gh('adminU').firestore(), 'users/rc'), { removedContentCount: increment(1) }));
 });
+
+// ------------------------------------------------------------------
+// Admin direct create (faithful ID migration for rename / merge / move)
+// ------------------------------------------------------------------
+// Renaming a brand/model/program changes the derived doc id, so the doc must be RE-CREATED
+// under the new id with its original fields (status/owner/createdAt/counters). The
+// contributor-create branch forbids that (status must be 'pending', createdByUid == self,
+// createdAt == now, counters zeroed), so the migration relies on an admin-only create rule.
+test('admin may create brand/device/profile/cycle docs directly with preserved fields', async () => {
+  await seedDoc('admins/adminU', { uid: 'adminU' });
+  const adb = gh('adminU').firestore();
+  await assertSucceeds(setDoc(doc(adb, 'brands/migrated'), {
+    brand: 'Bosch', brand_lc: 'bosch', status: 'approved', createdByUid: 'someoneElse',
+    deviceCount: 3, cycleCount: 12, createdAt: serverTimestamp(),
+  }));
+  await assertSucceeds(setDoc(doc(adb, 'devices/washer__bosch__wat-new'), {
+    applianceType: 'washer', brand: 'Bosch', brand_lc: 'bosch', model: 'WAT-new', model_lc: 'wat-new',
+    status: 'approved', createdByUid: 'someoneElse', favoriteCount: 7, confirmCount: 4,
+    profileCount: 2, cycleCount: 9, createdAt: serverTimestamp(),
+  }));
+  await assertSucceeds(setDoc(doc(adb, 'profiles/washer__bosch__wat-new__eco'), {
+    deviceId: 'washer__bosch__wat-new', program: 'Eco', program_lc: 'eco',
+    status: 'approved', createdByUid: 'someoneElse', cycleCount: 5, createdAt: serverTimestamp(),
+  }));
+  await assertSucceeds(setDoc(doc(adb, 'cycles/migrated-cycle'), {
+    ...validCycle('someoneElse'), status: 'approved',
+    profileId: 'washer__bosch__wat-new__eco', deviceId: 'washer__bosch__wat-new',
+    downloads: 42, confirmCount: 3,
+  }));
+});
+
+test('admin-create allowance does not weaken the contributor branch', async () => {
+  // A regular github user still cannot forge status/owner on a new catalog doc.
+  const u = gh('u1').firestore();
+  await assertFails(setDoc(doc(u, 'brands/forge'), {
+    brand: 'Bosch', brand_lc: 'bosch', status: 'approved', createdByUid: 'someoneElse', createdAt: serverTimestamp(),
+  }));
+  await assertFails(setDoc(doc(u, 'devices/washer__bosch__forge'), validDevice('u1', { status: 'approved' })));
+  await assertFails(setDoc(doc(u, 'cycles/forge'), { ...validCycle('u1'), status: 'approved', downloads: 5 }));
+});
+
+test('admin rename cascade: re-create child under new id + delete old in one batch', async () => {
+  // The core of _reidDevice / adminRenameProfile: an approved profile is re-created under a
+  // new profileId (all fields preserved) and the old doc removed, atomically.
+  await seedDoc('admins/adminU', { uid: 'adminU' });
+  await seedDoc('profiles/washer__bosch__wat__old', {
+    deviceId: 'washer__bosch__wat', program: 'Old', program_lc: 'old',
+    status: 'approved', createdByUid: 'contribX', cycleCount: 4, createdAt: serverTimestamp(),
+  });
+  const adb = gh('adminU').firestore();
+  const b = writeBatch(adb);
+  b.set(doc(adb, 'profiles/washer__bosch__wat__renamed'), {
+    deviceId: 'washer__bosch__wat', program: 'Renamed', program_lc: 'renamed',
+    status: 'approved', createdByUid: 'contribX', cycleCount: 4, createdAt: serverTimestamp(),
+  });
+  b.delete(doc(adb, 'profiles/washer__bosch__wat__old'));
+  await assertSucceeds(b.commit());
+});

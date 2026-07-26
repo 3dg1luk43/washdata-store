@@ -70,6 +70,9 @@ service cloud.firestore {
       allow update: if canContribute()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cycleCount'])
         && request.resource.data.cycleCount == resource.data.get('cycleCount', 0) + 1;
+      // Admin may create a brand doc directly (faithful ID migration for rename/merge --
+      // preserves status/owner/createdAt/counters, which the contributor-create branch cannot).
+      allow create: if isAdmin();
       allow update: if isAdmin();
       allow delete: if isAdmin();
 
@@ -153,6 +156,9 @@ service cloud.firestore {
         && request.resource.data.ratingSum == resource.data.get('ratingSum', 0)
              - get(/databases/$(database)/documents/devices/$(deviceId)/ratings/$(request.auth.uid)).data.rating
              + getAfter(/databases/$(database)/documents/devices/$(deviceId)/ratings/$(request.auth.uid)).data.rating;
+      // Admin may create a device doc directly (faithful ID migration for rename/merge --
+      // preserves status/owner/createdAt/counters, which the contributor-create branch cannot).
+      allow create: if isAdmin();
       allow update: if isAdmin();
       allow delete: if isAdmin();
 
@@ -212,6 +218,9 @@ service cloud.firestore {
         && exists(/databases/$(database)/documents/devices/$(resource.data.deviceId))
         && get(/databases/$(database)/documents/devices/$(resource.data.deviceId)).data.get('ownerId', null) == request.auth.uid
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phases']);
+      // Admin may create a profile doc directly (faithful ID migration for rename/merge --
+      // preserves status/owner/createdAt/counters, which the contributor-create branch cannot).
+      allow create: if isAdmin();
       allow update: if isAdmin();
       allow delete: if isAdmin();
 
@@ -293,6 +302,9 @@ service cloud.firestore {
         && request.resource.data.ratingSum == resource.data.get('ratingSum', 0)
              - get(/databases/$(database)/documents/cycles/$(cycleId)/ratings/$(request.auth.uid)).data.rating
              + getAfter(/databases/$(database)/documents/cycles/$(cycleId)/ratings/$(request.auth.uid)).data.rating;
+      // Admin may create a cycle doc directly (faithful ID migration for move/merge --
+      // preserves status/owner/createdAt/counters, which the contributor-create branch cannot).
+      allow create: if isAdmin();
       allow update: if isAdmin();
       allow delete: if (isSignedIn() && isOwner()) || isAdmin();
 

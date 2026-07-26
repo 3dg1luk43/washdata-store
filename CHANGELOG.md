@@ -11,6 +11,23 @@ to share and adopt appliance power-cycle reference recordings so nobody has to t
 washing-machine program from scratch. It is a static site hosted on GitHub Pages, backed by
 Firebase Firestore, with no ads, no tracking, and no paid tier.
 
+## Unreleased
+
+### Added
+
+- **Rename anything from the admin catalog**: Brands, device models, and programs now have a **Rename** button in the Catalog drill-down. Because a catalog object's Firestore id is derived from its name (`device = type__brand__model`, `program = device__program`), renaming migrates the document (and all its children) to the new id while preserving status, contributor, upload date, and counters. Renaming to a name that already exists merges into it. A capitalisation-only fix (same lowercase key) is applied in place without an id change.
+- **Merge brands**: The Brands level of the admin catalog gains the merge bar (previously only Devices/Programs had it), so duplicate spellings can be folded together (e.g. **bosh** into **Bosch**) - every device under the source brand is moved into the target brand's namespace and the empty source brand is removed. Rename and merge share one path: renaming a brand to a different spelling is a merge into that spelling.
+- **Move a cycle to another program**: A reference cycle recorded under the wrong program can be reassigned to a sibling program of the same device from the Catalog cycles view, via a new **Move** action, without re-uploading it.
+
+### Changed
+
+- **Reports are easier to identify**: Each report card now shows a plain-language identity line for the reported object - brand, model, and program (looked up from the live document, not the reporter-supplied label), plus appliance type, uploader, date, and download count for cycles - and a **View cycle** button that opens the trace preview. The raw document path stays as a secondary technical reference.
+
+### Fixed
+
+- **Open-reports count on the admin dashboard stayed stale**: Resolving or dismissing reports from the queue refreshed the Reports tab badge but not the "Open Reports" card on the Overview dashboard, so the dashboard kept showing the pre-action number until a manual refresh. Both now update together after every moderation action (and the badge also refreshes when the Reports tab is opened).
+- **Device merge could silently fail**: Merging two devices aborted whenever the source had a program the target did not, because re-creating that program under the target device was blocked by the security rules (admin had update/delete but no create permission). Admins may now create catalog documents directly, which fixes the merge and enables the faithful rename/move migrations above. The contributor create path is unchanged - regular users still cannot forge status, ownership, or counters (covered by new rules tests). **Requires `firebase deploy --only firestore:rules`.**
+
 ## 1.2.0 (2026-07-23)
 
 Read-budget optimization. The store runs on Firebase's free tier (a fixed number of

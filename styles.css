@@ -1800,7 +1800,28 @@ input[type="url"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
 .report-type-badge { background: var(--accent-dim); color: var(--accent); border-color: rgba(124, 156, 255, 0.25); }
 .report-target-title { font-weight: 600; font-size: .95rem; }
 .report-live-status { text-transform: uppercase; }
-.report-path { font-size: .7rem; color: var(--text-muted); margin: .35rem 0 .6rem; word-break: break-all; }
+.report-identity {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .35rem;
+  font-size: .8125rem;
+  color: var(--text);
+  margin: .4rem 0 .15rem;
+}
+.report-identity .ri-main { font-weight: 600; }
+.report-identity .ri-type {
+  font-size: .7rem;
+  text-transform: uppercase;
+  letter-spacing: .02em;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-radius: var(--radius-sm);
+  padding: .05rem .35rem;
+}
+.report-identity .ri-sep { color: var(--text-muted); }
+.report-identity .ri-view { margin-left: .25rem; }
+.report-path { font-size: .7rem; color: var(--text-muted); margin: .15rem 0 .6rem; word-break: break-all; }
 .report-creator { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
 .report-creator-name { font-size: .8125rem; font-weight: 600; }
 

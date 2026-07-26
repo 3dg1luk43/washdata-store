@@ -43,7 +43,7 @@ import {
   writeBatch,
   onSnapshot,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
-import { deviceId as mkDeviceId, profileId as mkProfileId } from './lib/ids.js';
+import { deviceId as mkDeviceId, profileId as mkProfileId, lc } from './lib/ids.js';
 import { downsampleCycle, parseCycle, cycleStats, packPoints, unpackPoints } from './lib/trace.js';
 import { restQuery, restGet, restRatingSummary, restDeviceRating, restCount, setTokenProvider } from './firestore-rest.js';
 
@@ -1188,6 +1188,234 @@ export async function adminMergeProfiles(fromId, toId) {
   if (visibleCycles > 0) batch.update(doc(_db, 'profiles', toId), { cycleCount: increment(visibleCycles) });
   // device.cycleCount and brand.cycleCount are unchanged (same number of cycles, same device).
   await batch.commit();
+}
+
+// ------------------------------------------------------------------
+// Admin rename / merge (ID migration)
+//
+// IDs are derived from names (deviceId = type__brand__model, profileId = deviceId__program),
+// so renaming a brand/model/program changes the doc id: the doc must be RE-CREATED under the
+// new id with its fields preserved (status, createdByUid, createdAt, counters), its children
+// re-pointed, and the old doc deleted. Faithful field preservation relies on the admin
+// `allow create` rule. Reads use the SDK (getDoc/getDocs) so Firestore Timestamps round-trip
+// intact when written back. Kept within a single batch (500-op limit -- fine for the small
+// per-device clusters this catalog produces; a huge device would need chunking).
+// ------------------------------------------------------------------
+
+// Re-create a device (and cascade its profiles + cycles) under `newId`, applying `patch`
+// (model/model_lc and/or brand/brand_lc changes) to the device and propagating the derived
+// brand_lc + new profile ids to children. Caller guarantees `newId` does not already exist
+// (collisions route through adminMergeDevices instead). Parent brand counters are only
+// adjusted on a cross-brand move; same-brand re-id leaves every count unchanged.
+async function _reidDevice(oldId, newId, dev, patch) {
+  const [profSnap, cycSnap] = await Promise.all([
+    getDocs(query(collection(_db, 'profiles'), where('deviceId', '==', oldId))),
+    getDocs(query(collection(_db, 'cycles'), where('deviceId', '==', oldId))),
+  ]);
+  const brandLcNew = patch.brand_lc || dev.brand_lc;
+  const brandChanged = !!patch.brand_lc && patch.brand_lc !== dev.brand_lc;
+  const batch = writeBatch(_db);
+  batch.set(doc(_db, 'devices', newId), { ...dev, ...patch });
+  batch.delete(doc(_db, 'devices', oldId));
+  const remap = {};
+  for (const p of profSnap.docs) {
+    const pd = p.data();
+    const newPid = mkProfileId(newId, pd.program || pd.program_lc || '');
+    remap[p.id] = newPid;
+    batch.set(doc(_db, 'profiles', newPid), { ...pd, deviceId: newId });
+    batch.delete(doc(_db, 'profiles', p.id));
+  }
+  for (const c of cycSnap.docs) {
+    const cd = c.data();
+    const upd = { deviceId: newId, profileId: remap[cd.profileId] || mkProfileId(newId, cd.program_lc || '') };
+    if (brandChanged) upd.brand_lc = brandLcNew;
+    batch.update(doc(_db, 'cycles', c.id), upd);
+  }
+  // Cross-brand: rebalance brand-level denormalized counters (best-effort, like the merge
+  // helpers). Same-brand model rename touches no brand, so counts stay exact untouched.
+  if (brandChanged) {
+    const visibleCycles = cycSnap.docs.filter((c) => _isVisible(c.data().status)).length;
+    if (_isVisible(dev.status)) batch.update(doc(_db, 'brands', dev.brand_lc), { deviceCount: increment(-1) });
+    if (visibleCycles > 0) batch.update(doc(_db, 'brands', dev.brand_lc), { cycleCount: increment(-visibleCycles) });
+    // Target brand gains are applied by the caller (it knows the target brand doc exists).
+  }
+  await batch.commit();
+  return { profiles: profSnap.docs.length, cycles: cycSnap.docs.length,
+    visibleCycles: cycSnap.docs.filter((c) => _isVisible(c.data().status)).length };
+}
+
+// Rename a device's model. New deviceId = type__brand__newModel. If the renamed model
+// already exists it is really a merge, so we delegate to adminMergeDevices. Returns
+// { id, merged }.
+export async function adminRenameDevice(deviceId, newModel) {
+  const model = String(newModel || '').trim();
+  if (!model) throw new Error('Model name is required');
+  const snap = await getDoc(doc(_db, 'devices', deviceId));
+  if (!snap.exists()) throw new Error('Device not found');
+  const dev = snap.data();
+  const newId = mkDeviceId(dev.applianceType, dev.brand, model);
+  if (newId === deviceId) {
+    await updateDoc(doc(_db, 'devices', deviceId), { model, model_lc: lc(model) });
+    return { id: deviceId, merged: false };
+  }
+  if ((await getDoc(doc(_db, 'devices', newId))).exists()) {
+    await adminMergeDevices(deviceId, newId);
+    return { id: newId, merged: true };
+  }
+  await _reidDevice(deviceId, newId, dev, { model, model_lc: lc(model) });
+  return { id: newId, merged: false };
+}
+
+// Rename a profile's program. New profileId = deviceId__newProgram. If a profile already
+// exists at the new id, its cycles are absorbed and it is relabelled to the new program.
+export async function adminRenameProfile(profileId, newProgram) {
+  const program = String(newProgram || '').trim();
+  if (!program) throw new Error('Program name is required');
+  const snap = await getDoc(doc(_db, 'profiles', profileId));
+  if (!snap.exists()) throw new Error('Profile not found');
+  const prof = snap.data();
+  const newId = mkProfileId(prof.deviceId, program);
+  const patch = { program, program_lc: lc(program) };
+  if (newId === profileId) {
+    await updateDoc(doc(_db, 'profiles', profileId), patch);
+    return { id: profileId, merged: false };
+  }
+  const targetExists = (await getDoc(doc(_db, 'profiles', newId))).exists();
+  const cycSnap = await getDocs(query(collection(_db, 'cycles'), where('profileId', '==', profileId)));
+  const batch = writeBatch(_db);
+  for (const c of cycSnap.docs) batch.update(doc(_db, 'cycles', c.id), { profileId: newId, program_lc: lc(program) });
+  batch.delete(doc(_db, 'profiles', profileId));
+  if (targetExists) {
+    batch.update(doc(_db, 'profiles', newId), patch); // relabel the surviving profile
+    if (_isVisible(prof.status)) batch.update(doc(_db, 'devices', prof.deviceId), { profileCount: increment(-1) });
+    const vis = cycSnap.docs.filter((c) => _isVisible(c.data().status)).length;
+    if (vis > 0) batch.update(doc(_db, 'profiles', newId), { cycleCount: increment(vis) });
+  } else {
+    batch.set(doc(_db, 'profiles', newId), { ...prof, ...patch }); // faithful re-id; counts carry over
+  }
+  await batch.commit();
+  return { id: newId, merged: targetExists };
+}
+
+// Rename a brand's display name WITHOUT changing its lowercase key (e.g. a capitalisation
+// or trailing-space fix). IDs are stable, so this is a pure field patch on the brand doc and
+// every device's denormalized `brand` display field.
+async function _renameBrandDisplay(brandLc, brand) {
+  const devSnap = await getDocs(query(collection(_db, 'devices'), where('brand_lc', '==', brandLc)));
+  const ops = [
+    { ref: doc(_db, 'brands', brandLc), data: { brand } },
+    ...devSnap.docs.map((d) => ({ ref: doc(_db, 'devices', d.id), data: { brand } })),
+  ];
+  const BATCH = 400;
+  for (let i = 0; i < ops.length; i += BATCH) {
+    const batch = writeBatch(_db);
+    for (const { ref, data } of ops.slice(i, i + BATCH)) batch.update(ref, data);
+    await batch.commit();
+  }
+  return { id: brandLc, merged: false, renamed: true };
+}
+
+// Merge every device under `fromLc` into the `toBrandName` namespace (also used for a
+// cross-lowercase brand rename, where the target brand may not exist yet -- e.g. "bosh" ->
+// "Bosch"). Each device is migrated to its new brand-derived id (merged if that id already
+// exists, else re-id'd), the target brand doc is created if missing, and the source brand doc
+// is removed. Brand-level counters are best-effort; run "Recalculate counts" for exact totals.
+export async function adminMergeBrands(fromLc, toBrandName) {
+  const brand = String(toBrandName || '').trim();
+  if (!brand) throw new Error('Brand name is required');
+  const toLc = lc(brand);
+  if (toLc === fromLc) return _renameBrandDisplay(fromLc, brand);
+
+  const devSnap = await getDocs(query(collection(_db, 'devices'), where('brand_lc', '==', fromLc)));
+  let merged = 0;
+  let moved = 0;
+  for (const d of devSnap.docs) {
+    const dev = d.data();
+    const newDevId = mkDeviceId(dev.applianceType, brand, dev.model);
+    if (newDevId === d.id) {
+      await updateDoc(doc(_db, 'devices', d.id), { brand, brand_lc: toLc });
+      moved += 1;
+      continue;
+    }
+    if ((await getDoc(doc(_db, 'devices', newDevId))).exists()) {
+      await adminMergeDevices(d.id, newDevId);
+      // adminMergeDevices keeps the target's brand; relabel any moved cycles' brand_lc + the
+      // target device fields so nothing keeps the old brand key.
+      await updateDoc(doc(_db, 'devices', newDevId), { brand, brand_lc: toLc });
+      merged += 1;
+    } else {
+      const res = await _reidDevice(d.id, newDevId, dev, { brand, brand_lc: toLc });
+      // Target brand gains this device + its visible cycles (source loss applied in _reidDevice).
+      const gains = {};
+      if (_isVisible(dev.status)) gains.deviceCount = increment(1);
+      if (res.visibleCycles > 0) gains.cycleCount = increment(res.visibleCycles);
+      if (Object.keys(gains).length) {
+        try { await updateDoc(doc(_db, 'brands', toLc), gains); } catch (_) { /* target brand created below */ }
+      }
+      moved += 1;
+    }
+  }
+
+  // Ensure the target brand doc exists (create from the source's fields when this is a pure
+  // rename into a new key), then remove the now-empty source brand.
+  const [srcSnap, tgtSnap] = await Promise.all([
+    getDoc(doc(_db, 'brands', fromLc)),
+    getDoc(doc(_db, 'brands', toLc)),
+  ]);
+  if (!tgtSnap.exists()) {
+    const src = srcSnap.exists() ? srcSnap.data() : {};
+    await setDoc(doc(_db, 'brands', toLc), { ...src, brand, brand_lc: toLc });
+  }
+  if (srcSnap.exists()) await deleteDoc(doc(_db, 'brands', fromLc));
+  return { id: toLc, moved, merged };
+}
+
+// Rename a brand. A capitalisation-only change (same lowercase) is a pure display patch;
+// changing the lowercase key routes through adminMergeBrands (which creates the new brand or
+// merges into an existing one, e.g. "bosh" -> "Bosch").
+export async function adminRenameBrand(brandLc, newName) {
+  const brand = String(newName || '').trim();
+  if (!brand) throw new Error('Brand name is required');
+  if (lc(brand) === brandLc) return _renameBrandDisplay(brandLc, brand);
+  return adminMergeBrands(brandLc, brand);
+}
+
+// Move a reference cycle to a different profile of the SAME device (fix a mislabelled
+// program). Re-points the cycle's profileId + program_lc and rebalances both profiles'
+// cycleCount; the device/brand cycle totals are unchanged (same device).
+export async function adminMoveCycle(cycleId, toProfileId) {
+  const [cycSnap, profSnap] = await Promise.all([
+    getDoc(doc(_db, 'cycles', cycleId)),
+    getDoc(doc(_db, 'profiles', toProfileId)),
+  ]);
+  if (!cycSnap.exists()) throw new Error('Cycle not found');
+  if (!profSnap.exists()) throw new Error('Target profile not found');
+  const cyc = cycSnap.data();
+  const prof = profSnap.data();
+  if (cyc.profileId === toProfileId) return { id: cycleId, moved: false };
+  const batch = writeBatch(_db);
+  batch.update(doc(_db, 'cycles', cycleId), {
+    profileId: toProfileId,
+    deviceId: prof.deviceId || cyc.deviceId,
+    program_lc: prof.program_lc || lc(prof.program || ''),
+  });
+  if (_isVisible(cyc.status)) {
+    if (cyc.profileId) batch.update(doc(_db, 'profiles', cyc.profileId), { cycleCount: increment(-1) });
+    batch.update(doc(_db, 'profiles', toProfileId), { cycleCount: increment(1) });
+  }
+  await batch.commit();
+  return { id: cycleId, moved: true };
+}
+
+// Fresh count of open report documents across every `reports` subcollection (collection
+// group). Used to keep the moderation badge + dashboard card current without re-reading the
+// whole stats bundle. Returns 0 on any failure (never throws).
+export async function adminCountOpenReports() {
+  try {
+    return await restCount('reports', [{ field: 'status', op: 'EQUAL', value: 'open' }], { auth: true, allDescendants: true });
+  } catch (_) {
+    return 0;
+  }
 }
 
 export async function adminListUsers({ pageSize = 50, cursor = null, status = null } = {}) {
