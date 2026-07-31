@@ -1135,37 +1135,54 @@ export async function adminSetBrandStatus(brandLc, status) {
 // the small clusters near-duplicate devices produce).
 export async function adminMergeDevices(fromId, toId) {
   if (fromId === toId) throw new Error('Cannot merge a device into itself');
-  const [fromDev, profSnap, cycSnap] = await Promise.all([
+  const [fromDev, toDev, profSnap, cycSnap] = await Promise.all([
     restGet(`devices/${fromId}`, { auth: true, noStore: true }),
+    restGet(`devices/${toId}`, { auth: true, noStore: true }),
     getDocs(query(collection(_db, 'profiles'), where('deviceId', '==', fromId))),
     getDocs(query(collection(_db, 'cycles'), where('deviceId', '==', fromId))),
   ]);
+  // Pre-check which source profiles collide with an already-existing target profile.
+  const profileMaps = profSnap.docs.map((p) => ({
+    p, data: p.data(), newPid: mkProfileId(toId, p.data().program || ''),
+  }));
+  const existsChecks = await Promise.all(
+    profileMaps.map(({ newPid }) => getDoc(doc(_db, 'profiles', newPid)).then((s) => s.exists()))
+  );
+  // For cross-brand merges also migrate the cycles' brand_lc field.
+  const crossBrand = !!(fromDev?.brand_lc && toDev?.brand_lc && fromDev.brand_lc !== toDev.brand_lc);
   const batch = writeBatch(_db);
   const remap = {};
-  for (const p of profSnap.docs) {
-    const data = p.data();
-    const newPid = mkProfileId(toId, data.program || '');
+  let newProfileCount = 0;
+  for (let i = 0; i < profileMaps.length; i++) {
+    const { p, data, newPid } = profileMaps[i];
     remap[p.id] = newPid;
-    batch.set(doc(_db, 'profiles', newPid), { ...data, deviceId: toId }, { merge: true });
     batch.delete(doc(_db, 'profiles', p.id));
+    if (existsChecks[i]) {
+      // Collision: target profile already exists; absorb this profile's visible cycles into it.
+      const visCyc = cycSnap.docs.filter((c) => c.data().profileId === p.id && _isVisible(c.data().status)).length;
+      if (visCyc > 0) batch.update(doc(_db, 'profiles', newPid), { cycleCount: increment(visCyc) });
+    } else {
+      batch.set(doc(_db, 'profiles', newPid), { ...data, deviceId: toId });
+      if (_isVisible(data.status)) newProfileCount++;
+    }
   }
   for (const c of cycSnap.docs) {
     const data = c.data();
     const newPid = remap[data.profileId] || mkProfileId(toId, (data.program_lc || '').replace(/-/g, ' '));
-    batch.update(doc(_db, 'cycles', c.id), { deviceId: toId, profileId: newPid });
+    const upd = { deviceId: toId, profileId: newPid };
+    if (crossBrand) upd.brand_lc = toDev.brand_lc;
+    batch.update(doc(_db, 'cycles', c.id), upd);
   }
   batch.delete(doc(_db, 'devices', fromId));
   // fromId device removed from brand count; toId gains its profiles and cycles.
   if (fromDev?.brand_lc && _isVisible(fromDev.status)) {
     batch.update(doc(_db, 'brands', fromDev.brand_lc), { deviceCount: increment(-1) });
   }
-  const visibleProfiles = profSnap.docs.filter((p) => _isVisible(p.data().status)).length;
   const visibleCycles = cycSnap.docs.filter((c) => _isVisible(c.data().status)).length;
   const toUpdate = {};
-  if (visibleProfiles > 0) toUpdate.profileCount = increment(visibleProfiles);
+  if (newProfileCount > 0) toUpdate.profileCount = increment(newProfileCount);
   if (visibleCycles > 0) toUpdate.cycleCount = increment(visibleCycles);
   if (Object.keys(toUpdate).length > 0) batch.update(doc(_db, 'devices', toId), toUpdate);
-  // Brand cycle balance skipped for cross-brand merges (rare; admin can recount manually).
   await batch.commit();
 }
 
@@ -1235,8 +1252,11 @@ async function _reidDevice(oldId, newId, dev, patch) {
   // helpers). Same-brand model rename touches no brand, so counts stay exact untouched.
   if (brandChanged) {
     const visibleCycles = cycSnap.docs.filter((c) => _isVisible(c.data().status)).length;
-    if (_isVisible(dev.status)) batch.update(doc(_db, 'brands', dev.brand_lc), { deviceCount: increment(-1) });
-    if (visibleCycles > 0) batch.update(doc(_db, 'brands', dev.brand_lc), { cycleCount: increment(-visibleCycles) });
+    // Combine into a single batch.update — Firestore batches must not write the same doc twice.
+    const brandLoss = {};
+    if (_isVisible(dev.status)) brandLoss.deviceCount = increment(-1);
+    if (visibleCycles > 0) brandLoss.cycleCount = increment(-visibleCycles);
+    if (Object.keys(brandLoss).length) batch.update(doc(_db, 'brands', dev.brand_lc), brandLoss);
     // Target brand gains are applied by the caller (it knows the target brand doc exists).
   }
   await batch.commit();
@@ -1286,10 +1306,10 @@ export async function adminRenameProfile(profileId, newProgram) {
   for (const c of cycSnap.docs) batch.update(doc(_db, 'cycles', c.id), { profileId: newId, program_lc: lc(program) });
   batch.delete(doc(_db, 'profiles', profileId));
   if (targetExists) {
-    batch.update(doc(_db, 'profiles', newId), patch); // relabel the surviving profile
-    if (_isVisible(prof.status)) batch.update(doc(_db, 'devices', prof.deviceId), { profileCount: increment(-1) });
+    // Combine relabel + cycleCount into one update — Firestore batches must not write the same doc twice.
     const vis = cycSnap.docs.filter((c) => _isVisible(c.data().status)).length;
-    if (vis > 0) batch.update(doc(_db, 'profiles', newId), { cycleCount: increment(vis) });
+    batch.update(doc(_db, 'profiles', newId), { ...patch, ...(vis > 0 ? { cycleCount: increment(vis) } : {}) });
+    if (_isVisible(prof.status)) batch.update(doc(_db, 'devices', prof.deviceId), { profileCount: increment(-1) });
   } else {
     batch.set(doc(_db, 'profiles', newId), { ...prof, ...patch }); // faithful re-id; counts carry over
   }
@@ -1333,7 +1353,16 @@ export async function adminMergeBrands(fromLc, toBrandName) {
     const dev = d.data();
     const newDevId = mkDeviceId(dev.applianceType, brand, dev.model);
     if (newDevId === d.id) {
+      // Device ID is unchanged (normalizeToken of old/new brand resolves the same slug).
+      // Still need to update cycles' brand_lc, which lags behind the lowercased key.
       await updateDoc(doc(_db, 'devices', d.id), { brand, brand_lc: toLc });
+      const devCycSnap = await getDocs(query(collection(_db, 'cycles'), where('deviceId', '==', d.id)));
+      const CBATCH = 450;
+      for (let i = 0; i < devCycSnap.docs.length; i += CBATCH) {
+        const cyBatch = writeBatch(_db);
+        for (const c of devCycSnap.docs.slice(i, i + CBATCH)) cyBatch.update(doc(_db, 'cycles', c.id), { brand_lc: toLc });
+        await cyBatch.commit();
+      }
       moved += 1;
       continue;
     }
@@ -1393,10 +1422,10 @@ export async function adminMoveCycle(cycleId, toProfileId) {
   const cyc = cycSnap.data();
   const prof = profSnap.data();
   if (cyc.profileId === toProfileId) return { id: cycleId, moved: false };
+  if (prof.deviceId !== cyc.deviceId) throw new Error('Target profile must belong to the same device');
   const batch = writeBatch(_db);
   batch.update(doc(_db, 'cycles', cycleId), {
     profileId: toProfileId,
-    deviceId: prof.deviceId || cyc.deviceId,
     program_lc: prof.program_lc || lc(prof.program || ''),
   });
   if (_isVisible(cyc.status)) {

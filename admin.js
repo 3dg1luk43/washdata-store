@@ -745,8 +745,10 @@ function renderCatBrands() {
 // Level 2 — Devices for selected brand
 function renderCatDevices() {
   const all = _deviceItems.filter((d) => d.brand_lc === _catBrand.id);
+  // Capture now: loadCatalogData() inside catMergebar resets the module-level vars to null.
+  const savedBrand = _catBrand;
   catMergebar(all, 'device', (d) => `${d.model || d.id} (${d.status})`, adminMergeDevices,
-    () => catNavigate('devices', _catBrand));
+    () => catNavigate('devices', savedBrand));
   const sorted = [...all].sort((a, b) => (a.status === 'pending' ? -1 : 0) - (b.status === 'pending' ? -1 : 0));
   const items = catSearchFilter(sorted, (d) => `${d.model || ''} ${d.applianceType || ''} ${d.status || ''}`);
   const content = $('cat-content'); content.innerHTML = '';
@@ -788,8 +790,10 @@ function renderCatDevices() {
 // Level 3 — Profiles for selected device
 function renderCatProfiles() {
   const all = _profileItems.filter((p) => p.deviceId === _catDevice.id);
+  // Capture now: loadCatalogData() inside catMergebar resets the module-level vars to null.
+  const savedBrand = _catBrand, savedDevice = _catDevice;
   catMergebar(all, 'profile', (p) => `${p.program || p.id} (${p.status})`, adminMergeProfiles,
-    () => catNavigate('profiles', _catBrand, _catDevice));
+    () => catNavigate('profiles', savedBrand, savedDevice));
   const sorted = [...all].sort((a, b) => (a.status === 'pending' ? -1 : 0) - (b.status === 'pending' ? -1 : 0));
   const items = catSearchFilter(sorted, (p) => `${p.program || ''} ${p.status || ''} ${p.createdByName || ''}`);
   const content = $('cat-content'); content.innerHTML = '';
