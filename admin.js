@@ -23,7 +23,7 @@ import {
   adminRenameBrand, adminMergeBrands, adminRenameDevice, adminRenameProfile, adminMoveCycle,
   adminListBrands, adminListProfiles,
   adminListUsers, adminBanUser, adminUnbanUser, adminGetStats, adminRecount, adminCountOpenReports,
-  getSiteConfig, setMaintenance, setConfirmThreshold,
+  getSiteConfig, setMaintenance, setConfirmThreshold, setBrandConfirmThreshold,
   adminSetDeviceOwner, adminSetProfileOwner,
   adminDeleteDevice, adminDeleteBrand, adminDeleteProfile, adminDeleteUser,
   adminDeleteComment,
@@ -305,7 +305,22 @@ async function loadMaintenance() {
   $('threshold-input').value = Number.isFinite(thr) && thr > 0 ? thr : 5;
   $('threshold-input').disabled = false;
   $('threshold-save-btn').disabled = false;
+  // Brands have their own bar. Left blank when unset, so the placeholder makes it visible
+  // that the device threshold is being reused rather than showing a value nobody chose.
+  const bthr = Number(cfg.brandConfirmThreshold);
+  $('brand-threshold-input').value = Number.isFinite(bthr) && bthr > 0 ? bthr : '';
+  $('brand-threshold-input').disabled = false;
+  $('brand-threshold-save-btn').disabled = false;
 }
+$('brand-threshold-save-btn').addEventListener('click', async () => {
+  const n = Math.min(1000, Math.max(1, Math.round(Number($('brand-threshold-input').value) || 0)));
+  $('brand-threshold-save-btn').disabled = true;
+  try {
+    const saved = await setBrandConfirmThreshold(n);
+    $('brand-threshold-input').value = saved;
+    toast(`Brand auto-approve threshold set to ${saved} approved model${saved === 1 ? '' : 's'}`);
+  } catch (e) { toast(e.message, 'error'); } finally { $('brand-threshold-save-btn').disabled = false; }
+});
 $('threshold-save-btn').addEventListener('click', async () => {
   const n = Math.min(1000, Math.max(1, Math.round(Number($('threshold-input').value) || 5)));
   $('threshold-save-btn').disabled = true;

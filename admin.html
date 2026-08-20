@@ -64,12 +64,22 @@
         </div>
         <div class="maint-card" style="margin-top:.75rem">
           <div>
-            <div class="maint-card-title">Community auto-approve threshold</div>
-            <div class="text-muted" style="font-size:.8125rem">Confirmations from distinct GitHub users needed before a pending device is auto-approved. Applies live (no redeploy).</div>
+            <div class="maint-card-title">Community auto-approve threshold &mdash; devices &amp; cycles</div>
+            <div class="text-muted" style="font-size:.8125rem">Confirmations from distinct GitHub users needed before a pending device or cycle is auto-approved. Applies live (no redeploy).</div>
           </div>
           <div class="merge-controls">
             <input type="number" id="threshold-input" min="1" max="1000" style="width:5rem" disabled>
             <button class="btn btn-primary btn-sm" id="threshold-save-btn" disabled>Save</button>
+          </div>
+        </div>
+        <div class="maint-card" style="margin-top:.75rem">
+          <div>
+            <div class="maint-card-title">Community auto-approve threshold &mdash; brands</div>
+            <div class="text-muted" style="font-size:.8125rem">Approved <strong>models</strong> a pending brand needs before the brand itself is auto-approved. Brands are not confirmed directly: they ride on their models, so a brand becomes approved as its appliances do. Usually lower than the device bar. Leave blank to reuse the device threshold.</div>
+          </div>
+          <div class="merge-controls">
+            <input type="number" id="brand-threshold-input" min="1" max="1000" style="width:5rem" placeholder="&mdash;" disabled>
+            <button class="btn btn-primary btn-sm" id="brand-threshold-save-btn" disabled>Save</button>
           </div>
         </div>
       </div>

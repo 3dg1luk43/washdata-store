@@ -25,7 +25,7 @@ import {
   confirmDevice, rateDevice, getDeviceQuality, getUserDeviceRating, hasConfirmedDevice,
   confirmCycle, hasConfirmedCycle,
   getProfileRating, ratingSummaryFromDoc,
-  applianceLabel, confirmThresholdValue,
+  applianceLabel, confirmThresholdValue, brandConfirmThresholdValue,
   getSiteConfig,
   subscribeUserStatus,
   logStoreEvent,
@@ -75,6 +75,7 @@ function _queryFilterKey(f) {
 let _lastQueryFilterKey = null;
 let _favorites = new Set();
 let _confirmThreshold = 5;
+let _brandThreshold = 5;
 let _openRecord = null;
 let _replyToId = null;
 let _browseLoaded = false;
@@ -485,14 +486,18 @@ async function loadBrands(reset = false) {
 }
 
 // Awaiting-approval badge with the live confirm progress (pending only).
-function statusBadge(rec) {
+function statusBadge(rec, kind) {
   if (!rec) return '';
   if (rec.status === 'pending') {
-    // Only devices auto-promote via confirmations, so only they show the N/threshold
-    // progress. Brands/profiles are admin-approved -> just "awaiting approval".
-    const label = (typeof rec.confirmCount === 'number')
-      ? `Pending &middot; ${rec.confirmCount}/${_confirmThreshold}`
-      : 'Pending';
+    // Devices and cycles auto-promote on their own confirmations; a BRAND rides on its models
+    // instead (approved models vs the brand threshold), so its progress reads off a different
+    // counter. Profiles have neither and stay a plain "awaiting approval".
+    let label = 'Pending';
+    if (kind === 'brand') {
+      label = `Pending &middot; ${rec.approvedDeviceCount || 0}/${_brandThreshold} models`;
+    } else if (typeof rec.confirmCount === 'number') {
+      label = `Pending &middot; ${rec.confirmCount}/${_confirmThreshold}`;
+    }
     return `<span class="badge badge-pending">${label}</span>`;
   }
   if (rec.status === 'approved') return `<span class="badge badge-approved">Approved</span>`;
@@ -510,7 +515,7 @@ function buildBrandCard(b) {
     <div class="card-body">
       <div class="card-top">
         <span class="eyebrow">Brand</span>
-        <span class="card-status-pill" data-status>${statusBadge(b)}</span>
+        <span class="card-status-pill" data-status>${statusBadge(b, 'brand')}</span>
       </div>
       <div class="card-title">${esc(b.brand)}</div>
       <div class="card-counts"><span>${_pluralize(b.deviceCount || 0, 'model')}</span> <span class="dot">&middot;</span> <span>${_pluralize(b.cycleCount || 0, 'cycle')}</span></div>
@@ -662,7 +667,14 @@ async function doConfirmDevice(box, d, btn) {
       if (res.status === 'approved') { if (b) b.remove(); }
       else if (b) b.innerHTML = `Pending &middot; ${res.confirmCount}/${_confirmThreshold}`;
     }
-    toast('Thanks for confirming');
+    // Confirming the Nth model can carry its BRAND over the line too. Say so, otherwise the
+    // brand silently changes status somewhere the user is not looking.
+    if (res.brand && res.brand.status === 'approved' && res.status === 'approved') {
+      _brand = _brand && _brand.id === res.brand.id ? { ..._brand, status: 'approved' } : _brand;
+      toast(`Thanks for confirming - ${d.brand} is now approved too`);
+    } else {
+      toast('Thanks for confirming');
+    }
   } catch (e) { btn.disabled = false; toast(e.message, 'error'); }
 }
 
@@ -1202,6 +1214,7 @@ $('report-submit').addEventListener('click', async () => {
 // the viewer is an admin). Never paints the homepage or maintenance screen prematurely.
 reconcile();
 confirmThresholdValue().then((v) => { _confirmThreshold = v; }).catch(() => {});
+brandConfirmThresholdValue().then((v) => { _brandThreshold = v; }).catch(() => {});
 getSiteConfig().then((cfg) => {
   _maintenance = ('maintenance' in cfg) ? !!cfg.maintenance : MAINTENANCE;
 }).catch(() => {}).finally(() => {

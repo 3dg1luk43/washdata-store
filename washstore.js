@@ -293,6 +293,9 @@ export async function ensureBrand({ brand, createdByName = null }) {
       createdByUid: user.uid,
       createdByName: createdByName || null,
       createdAt: serverTimestamp(),
+      deviceCount: 0,
+      cycleCount: 0,
+      approvedDeviceCount: 0,
     });
     invalidateCatalogCache();  // a new brand must appear in the cached listing immediately
   }
@@ -341,6 +344,20 @@ export async function confirmThresholdValue() {
   const v = Number(cfg.confirmThreshold);
   _confirmThresholdCache = Number.isFinite(v) && v > 0 ? v : 5;
   return _confirmThresholdCache;
+}
+
+// Brands auto-approve on their own bar: how many of a brand's DEVICES must be approved before
+// the brand itself is. Falls back to the shared device/cycle threshold when unset, matching
+// the `brandConfirmThreshold()` rules helper exactly -- if the two ever disagree the rule
+// wins and the promotion write is simply denied.
+let _brandThresholdCache = null;
+export async function brandConfirmThresholdValue() {
+  if (_brandThresholdCache != null) return _brandThresholdCache;
+  const cfg = await getSiteConfig();
+  const v = Number(cfg.brandConfirmThreshold);
+  if (Number.isFinite(v) && v > 0) _brandThresholdCache = v;
+  else _brandThresholdCache = await confirmThresholdValue();
+  return _brandThresholdCache;
 }
 
 // Create a pending brand entry with optional public attribution.
@@ -396,11 +413,51 @@ export async function confirmDevice(deviceId) {
   const count = (dev && dev.confirmCount) || 0;
   let status = dev ? dev.status : (dev0 && dev0.status);
   const threshold = await confirmThresholdValue();
+  let brand = null;
   if (status === 'pending' && count >= threshold) {
-    try { await updateDoc(doc(_db, 'devices', deviceId), { status: 'approved' }); status = 'approved'; }
-    catch (_) { /* race or rule mismatch: leave pending, ignore */ }
+    try {
+      // The device flip and its parent brand's approved-device credit go in ONE batch: the
+      // brand rule verifies the credit with getAfter() on this very device, so it only
+      // authorizes the bump while the same commit turns that device approved.
+      const batch = writeBatch(_db);
+      batch.update(doc(_db, 'devices', deviceId), { status: 'approved' });
+      if (dev && dev.brand_lc) {
+        batch.update(doc(_db, 'brands', dev.brand_lc), {
+          approvedDeviceCount: increment(1),
+          lastApprovedDeviceId: deviceId,
+        });
+      }
+      await batch.commit();
+      status = 'approved';
+    } catch (_) {
+      // The brand doc may be missing (device namespaces and brand ids derive differently), in
+      // which case the combined batch fails as a whole. Fall back to the device flip alone so
+      // a bookkeeping problem never blocks the approval the community actually earned.
+      try { await updateDoc(doc(_db, 'devices', deviceId), { status: 'approved' }); status = 'approved'; }
+      catch (_) { /* race or rule mismatch: leave pending, ignore */ }
+    }
+    if (status === 'approved' && dev && dev.brand_lc) brand = await _maybePromoteBrand(dev.brand_lc);
   }
-  return { confirmed: true, confirmCount: count, status };
+  return { confirmed: true, confirmCount: count, status, brand };
+}
+
+// A brand is approved once enough of its DEVICES are. Called after a device is promoted;
+// best-effort, exactly like the device promotion itself -- the rule is the real guard, so a
+// denied write just leaves the brand pending. Returns { status, approvedDeviceCount,
+// threshold } for the caller's UI, or null when there is nothing to report.
+async function _maybePromoteBrand(brandLc) {
+  try {
+    const b = await restGet(`brands/${brandLc}`);
+    if (!b) return null;
+    const approved = Number(b.approvedDeviceCount) || 0;
+    const threshold = await brandConfirmThresholdValue();
+    let status = b.status;
+    if (status === 'pending' && approved >= threshold) {
+      try { await updateDoc(doc(_db, 'brands', brandLc), { status: 'approved' }); status = 'approved'; }
+      catch (_) { /* race or rule mismatch: leave pending */ }
+    }
+    return { id: brandLc, status, approvedDeviceCount: approved, threshold };
+  } catch (_) { return null; }
 }
 
 export async function hasConfirmedCycle(cycleId) {
@@ -678,6 +735,16 @@ export async function setConfirmThreshold(n) {
   return v;
 }
 
+// Approved devices needed before a pending BRAND is auto-approved. Stored separately from
+// confirmThreshold so brands can sit on a lower bar; clearing it (0/blank) falls back to the
+// shared threshold, matching the rules helper.
+export async function setBrandConfirmThreshold(n) {
+  const v = Math.max(1, Math.min(1000, Math.round(Number(n) || 0)));
+  await setDoc(doc(_db, 'config', 'site'), { brandConfirmThreshold: v, updatedAt: serverTimestamp() }, { merge: true });
+  _brandThresholdCache = v;
+  return v;
+}
+
 // ------------------------------------------------------------------
 // Reference cycles
 // ------------------------------------------------------------------
@@ -756,6 +823,9 @@ export async function uploadReferenceCycle(meta, tracePoints, stats, qc = 3) {
 // is pending or approved (not removed/rejected); counters track visible items only.
 
 function _isVisible(status) { return status === 'pending' || status === 'approved'; }
+// brands.approvedDeviceCount tracks APPROVED devices only (not merely visible ones), because
+// it is the basis of brand auto-approval: a pending device must not vouch for a brand.
+function _isApproved(status) { return status === 'approved'; }
 
 // Returns +1 when a status transition makes an item appear, -1 when it disappears, 0 otherwise.
 function _counterDelta(oldStatus, newStatus) {
@@ -1095,10 +1165,20 @@ export async function adminSetDeviceStatus(id, status) {
   const dev = await restGet(`devices/${id}`, { auth: true, noStore: true });
   await updateDoc(doc(_db, 'devices', id), { status });
   if (dev?.brand_lc) {
-    const delta = _counterDelta(dev.status, status);
-    if (delta !== 0) {
-      try { await updateDoc(doc(_db, 'brands', dev.brand_lc), { deviceCount: increment(delta) }); } catch (_) {}
+    // Two independent tallies on the parent brand: visible devices, and APPROVED devices
+    // (which gate brand auto-approval). Combined into one update -- a doc must not be
+    // written twice in a batch, and one round trip is cheaper anyway.
+    const upd = {};
+    const visDelta = _counterDelta(dev.status, status);
+    if (visDelta !== 0) upd.deviceCount = increment(visDelta);
+    const apprDelta = (_isApproved(status) ? 1 : 0) - (_isApproved(dev.status) ? 1 : 0);
+    if (apprDelta !== 0) upd.approvedDeviceCount = increment(apprDelta);
+    if (Object.keys(upd).length) {
+      try { await updateDoc(doc(_db, 'brands', dev.brand_lc), upd); } catch (_) {}
     }
+    // An admin approving the Nth device should promote the brand just as a community
+    // confirmation would; no silent divergence between the two paths.
+    if (apprDelta > 0) await _maybePromoteBrand(dev.brand_lc);
   }
 }
 
@@ -1382,6 +1462,7 @@ export async function adminMergeDevices(fromId, toId) {
   // update: a batch must not write the same doc twice.
   const fromBrandUpd = {};
   if (fromDev.brand_lc && _isVisible(fromDev.status)) fromBrandUpd.deviceCount = increment(-1);
+  if (fromDev.brand_lc && _isApproved(fromDev.status)) fromBrandUpd.approvedDeviceCount = increment(-1);
   if (crossBrand && visibleCycles > 0) fromBrandUpd.cycleCount = increment(-visibleCycles);
   if (fromDev.brand_lc && Object.keys(fromBrandUpd).length > 0) {
     structural.push({ op: 'update', ref: doc(_db, 'brands', fromDev.brand_lc), data: fromBrandUpd });
@@ -1539,6 +1620,7 @@ async function _reidDevice(oldId, newId, dev, patch) {
     // Combine into a single batch.update — Firestore batches must not write the same doc twice.
     const brandLoss = {};
     if (_isVisible(dev.status)) brandLoss.deviceCount = increment(-1);
+    if (_isApproved(dev.status)) brandLoss.approvedDeviceCount = increment(-1);
     if (visibleCycles > 0) brandLoss.cycleCount = increment(-visibleCycles);
     if (Object.keys(brandLoss).length) batch.update(doc(_db, 'brands', dev.brand_lc), brandLoss);
     // Target brand gains are applied by the caller (it knows the target brand doc exists).
@@ -1655,7 +1737,10 @@ export async function adminMergeBrands(fromLc, toBrandName) {
     // A pure rename into a new key inherits the source's identity but starts its counters at
     // the source's values; the per-device credits below then apply on top, so zero them.
     await setDoc(doc(_db, 'brands', toLc), {
-      ...src, brand, brand_lc: toLc, deviceCount: 0, cycleCount: 0,
+      ...src, brand, brand_lc: toLc, deviceCount: 0, cycleCount: 0, approvedDeviceCount: 0,
+      // Provenance for the approved-device rule check; it refers to a device under the old
+      // brand namespace, so it does not carry over to a freshly keyed brand.
+      lastApprovedDeviceId: null,
     });
   }
 
@@ -1678,6 +1763,7 @@ export async function adminMergeBrands(fromLc, toBrandName) {
         // (the source brand doc is deleted below, so its stale totals go with it).
         const gains = {};
         if (_isVisible(dev.status)) gains.deviceCount = increment(1);
+        if (_isApproved(dev.status)) gains.approvedDeviceCount = increment(1);
         const visible = devCycSnap.docs.filter((c) => _isVisible(c.data().status)).length;
         if (visible > 0) gains.cycleCount = increment(visible);
         if (Object.keys(gains).length) await updateDoc(doc(_db, 'brands', toLc), gains);
@@ -1696,6 +1782,7 @@ export async function adminMergeBrands(fromLc, toBrandName) {
         // Target brand gains this device + its visible cycles (source loss applied in _reidDevice).
         const gains = {};
         if (_isVisible(dev.status)) gains.deviceCount = increment(1);
+        if (_isApproved(dev.status)) gains.approvedDeviceCount = increment(1);
         if (res.visibleCycles > 0) gains.cycleCount = increment(res.visibleCycles);
         if (Object.keys(gains).length) await updateDoc(doc(_db, 'brands', toLc), gains);
         moved += 1;
@@ -1840,6 +1927,7 @@ export async function adminDeleteDevice(deviceId) {
   if (dev?.brand_lc) {
     const brandUpdate = {};
     if (_isVisible(dev.status)) brandUpdate.deviceCount = increment(-1);
+    if (_isApproved(dev.status)) brandUpdate.approvedDeviceCount = increment(-1);
     const visibleCycles = cycSnap.docs.filter((c) => _isVisible(c.data().status)).length;
     if (visibleCycles > 0) brandUpdate.cycleCount = increment(-visibleCycles);
     if (Object.keys(brandUpdate).length > 0) batch.update(doc(_db, 'brands', dev.brand_lc), brandUpdate);
@@ -1933,8 +2021,13 @@ export async function adminRecount() {
   const vis = (s) => s === 'pending' || s === 'approved';
 
   // Tally counts grouped by parent key
-  const devByBrand = {}, cycByBrand = {}, cycByDevice = {}, cycByProfile = {}, profByDevice = {};
-  for (const d of devices) if (vis(d.status) && d.brand_lc) devByBrand[d.brand_lc] = (devByBrand[d.brand_lc] || 0) + 1;
+  const devByBrand = {}, apprDevByBrand = {}, cycByBrand = {}, cycByDevice = {}, cycByProfile = {}, profByDevice = {};
+  for (const d of devices) {
+    if (!d.brand_lc) continue;
+    if (vis(d.status)) devByBrand[d.brand_lc] = (devByBrand[d.brand_lc] || 0) + 1;
+    // Approved-only tally: this is what gates brand auto-approval, so it must be exact.
+    if (d.status === 'approved') apprDevByBrand[d.brand_lc] = (apprDevByBrand[d.brand_lc] || 0) + 1;
+  }
   for (const c of cycles) {
     if (!vis(c.status)) continue;
     if (c.brand_lc) cycByBrand[c.brand_lc] = (cycByBrand[c.brand_lc] || 0) + 1;
@@ -1951,7 +2044,7 @@ export async function adminRecount() {
 
   // Build update ops for every document
   const ops = [
-    ...brands.map((b) => ({ ref: doc(_db, 'brands', b.id), data: { deviceCount: devByBrand[b.brand_lc] || 0, cycleCount: cycByBrand[b.brand_lc] || 0 } })),
+    ...brands.map((b) => ({ ref: doc(_db, 'brands', b.id), data: { deviceCount: devByBrand[b.brand_lc] || 0, cycleCount: cycByBrand[b.brand_lc] || 0, approvedDeviceCount: apprDevByBrand[b.brand_lc] || 0 } })),
     ...devices.map((d, i) => ({ ref: doc(_db, 'devices', d.id), data: { profileCount: profByDevice[d.id] || 0, cycleCount: cycByDevice[d.id] || 0, ..._ratingFields(deviceRatings[i]) } })),
     ...profiles.map((p) => ({ ref: doc(_db, 'profiles', p.id), data: { cycleCount: cycByProfile[p.id] || 0 } })),
     ...cycles.map((c, i) => ({ ref: doc(_db, 'cycles', c.id), data: _ratingFields(cycleRatings[i]) })),

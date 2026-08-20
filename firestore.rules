@@ -23,6 +23,15 @@ service cloud.firestore {
         ? get(/databases/$(database)/documents/config/site).data.get('confirmThreshold', 5)
         : 5;
     }
+    // Brands get their own auto-approve bar (config/site.brandConfirmThreshold): a brand name
+    // is easier to verify than a specific model, so it is usually lower. Falls back to the
+    // shared device/cycle threshold when unset, so brands behave sensibly before it is set.
+    function brandConfirmThreshold() {
+      return exists(/databases/$(database)/documents/config/site)
+        ? get(/databases/$(database)/documents/config/site).data.get('brandConfirmThreshold',
+            get(/databases/$(database)/documents/config/site).data.get('confirmThreshold', 5))
+        : 5;
+    }
     // Shape/identity validation for a content report. Target existence + the target*/path
     // binding are checked in each per-parent create rule (which knows the concrete path),
     // so a reporter can neither file on a non-existent object nor point a report at an
@@ -61,6 +70,12 @@ service cloud.firestore {
         && strLen(request.resource.data.brand, 40)
         && request.resource.data.brand_lc == request.resource.data.brand.lower()
         && optName(request.resource.data.get('createdByName', null))
+        // Counters must start at zero. approvedDeviceCount especially: it gates brand
+        // auto-approval, so a contributor who could seed it non-zero could create a brand and
+        // immediately promote it to approved.
+        && request.resource.data.get('deviceCount', 0) == 0
+        && request.resource.data.get('cycleCount', 0) == 0
+        && request.resource.data.get('approvedDeviceCount', 0) == 0
         && request.resource.data.createdAt == request.time;
       // Denormalized counters: contributors may increment deviceCount or cycleCount by
       // exactly +1 when they add a new device or upload a cycle. Decrement is admin-only.
@@ -70,6 +85,35 @@ service cloud.firestore {
       allow update: if canContribute()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cycleCount'])
         && request.resource.data.cycleCount == resource.data.get('cycleCount', 0) + 1;
+      // Honest approved-device counter, the basis of brand auto-approval.
+      //
+      // Rules cannot run a query, so they cannot count this brand's approved devices. Instead
+      // the bump must NAME the device claiming the credit, which the rule then verifies three
+      // ways: the device belongs to THIS brand, it was pending before this write, and it is
+      // approved after it (getAfter sees the whole batch). A device can make the
+      // pending -> approved transition only once through community action -- the device rule
+      // requires `resource.data.status == 'pending'` -- so the same device cannot be counted
+      // twice, and a device of another brand cannot be counted at all. That makes the counter
+      // as un-gameable as the uid-keyed confirmation docs, without a subcollection.
+      allow update: if isGithubUser()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['approvedDeviceCount', 'lastApprovedDeviceId'])
+        && request.resource.data.approvedDeviceCount == resource.data.get('approvedDeviceCount', 0) + 1
+        && request.resource.data.lastApprovedDeviceId is string
+        && request.resource.data.lastApprovedDeviceId.size() > 0
+        && request.resource.data.lastApprovedDeviceId.size() <= 200
+        // No path separator: the id is interpolated into a document path below.
+        && !request.resource.data.lastApprovedDeviceId.matches('.*/.*')
+        && get(/databases/$(database)/documents/devices/$(request.resource.data.lastApprovedDeviceId)).data.status == 'pending'
+        && getAfter(/databases/$(database)/documents/devices/$(request.resource.data.lastApprovedDeviceId)).data.status == 'approved'
+        && getAfter(/databases/$(database)/documents/devices/$(request.resource.data.lastApprovedDeviceId)).data.brand_lc == brandId;
+      // Community auto-promotion: any github user may flip pending -> approved once enough of
+      // this brand's devices have been approved. status-only change, mirroring devices/cycles.
+      allow update: if isGithubUser()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+        && resource.data.status == 'pending'
+        && request.resource.data.status == 'approved'
+        && resource.data.get('approvedDeviceCount', 0) >= brandConfirmThreshold();
       // Admin may create a brand doc directly (faithful ID migration for rename/merge --
       // preserves status/owner/createdAt/counters, which the contributor-create branch cannot).
       allow create: if isAdmin();

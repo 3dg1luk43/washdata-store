@@ -39,7 +39,7 @@ const dev = (brand, model) => deviceId(WM, brand, model);
 function seedBrand(name, extra = {}) {
   fake.seed(`brands/${name.toLowerCase()}`, {
     brand: name, brand_lc: name.toLowerCase(), status: 'approved',
-    createdByUid: `u-${name}`, deviceCount: 0, cycleCount: 0, ...extra,
+    createdByUid: `u-${name}`, deviceCount: 0, cycleCount: 0, approvedDeviceCount: 0, ...extra,
   });
 }
 function seedDevice(brand, model, extra = {}) {
@@ -50,7 +50,14 @@ function seedDevice(brand, model, extra = {}) {
     favoriteCount: 0, confirmCount: 0, ...extra,
   });
   const b = fake.raw(`brands/${brand.toLowerCase()}`);
-  if (b) fake.seed(`brands/${brand.toLowerCase()}`, { ...b, deviceCount: (b.deviceCount || 0) + 1 });
+  if (b) {
+    const approved = (extra.status || 'approved') === 'approved';
+    fake.seed(`brands/${brand.toLowerCase()}`, {
+      ...b,
+      deviceCount: (b.deviceCount || 0) + 1,
+      approvedDeviceCount: (b.approvedDeviceCount || 0) + (approved ? 1 : 0),
+    });
+  }
   return id;
 }
 function seedProfile(devId, program, extra = {}) {
@@ -90,10 +97,14 @@ function expectedCounts() {
   const profiles = all('profiles').filter((p) => vis(p.status));
   const devices = all('devices').filter((d) => vis(d.status));
   const out = { brands: {}, devices: {}, profiles: {} };
-  for (const b of all('brands')) out.brands[b.id] = { deviceCount: 0, cycleCount: 0 };
+  for (const b of all('brands')) out.brands[b.id] = { deviceCount: 0, cycleCount: 0, approvedDeviceCount: 0 };
   for (const d of all('devices')) out.devices[d.id] = { profileCount: 0, cycleCount: 0 };
   for (const p of all('profiles')) out.profiles[p.id] = { cycleCount: 0 };
   for (const d of devices) if (out.brands[d.brand_lc]) out.brands[d.brand_lc].deviceCount += 1;
+  // approvedDeviceCount tracks APPROVED devices only -- it gates brand auto-approval.
+  for (const d of all('devices')) {
+    if (d.status === 'approved' && out.brands[d.brand_lc]) out.brands[d.brand_lc].approvedDeviceCount += 1;
+  }
   for (const p of profiles) if (out.devices[p.deviceId]) out.devices[p.deviceId].profileCount += 1;
   for (const c of cycles) {
     if (out.brands[c.brand_lc]) out.brands[c.brand_lc].cycleCount += 1;
@@ -109,6 +120,7 @@ function assertCountersExact() {
     const doc = fake.raw(`brands/${id}`);
     assert.equal(doc.deviceCount, c.deviceCount, `brands/${id}.deviceCount`);
     assert.equal(doc.cycleCount, c.cycleCount, `brands/${id}.cycleCount`);
+    assert.equal(doc.approvedDeviceCount || 0, c.approvedDeviceCount, `brands/${id}.approvedDeviceCount`);
   }
   for (const [id, c] of Object.entries(exp.devices)) {
     const doc = fake.raw(`devices/${id}`);

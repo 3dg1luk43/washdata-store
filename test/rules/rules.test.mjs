@@ -486,3 +486,175 @@ test('admin rename cascade: re-create child under new id + delete old in one bat
   b.delete(doc(adb, 'profiles/washer__bosch__wat__old'));
   await assertSucceeds(b.commit());
 });
+
+// ---------------------------------------------------------------------------
+// Brand auto-approval (approved-device counter)
+//
+// Rules cannot run a query, so they cannot count a brand's approved devices. The counter bump
+// therefore has to NAME the device claiming credit, and the rule verifies that device three
+// ways: it belongs to this brand, it was pending before the write, and it is approved after
+// it. These tests are the proof that the naming cannot be abused -- they are the whole reason
+// the counter is trustworthy enough to gate a status change.
+// ---------------------------------------------------------------------------
+
+const brandDoc = (uid, over = {}) => ({
+  brand: 'Bosch', brand_lc: 'bosch', status: 'pending', createdByUid: uid, createdByName: null,
+  createdAt: serverTimestamp(), deviceCount: 0, cycleCount: 0, approvedDeviceCount: 0, ...over,
+});
+
+test('brand create must start every counter at zero', async () => {
+  await assertSucceeds(setDoc(doc(gh('u1').firestore(), 'brands/bosch'), brandDoc('u1')));
+  // approvedDeviceCount gates auto-approval, so seeding it would be self-promotion.
+  await assertFails(setDoc(doc(gh('u1').firestore(), 'brands/b_seed'),
+    brandDoc('u1', { brand: 'Seed', brand_lc: 'b_seed', approvedDeviceCount: 99 })));
+  await assertFails(setDoc(doc(gh('u1').firestore(), 'brands/b_seed2'),
+    brandDoc('u1', { brand: 'Seed2', brand_lc: 'b_seed2', deviceCount: 5 })));
+  await assertFails(setDoc(doc(gh('u1').firestore(), 'brands/b_seed3'),
+    brandDoc('u1', { brand: 'Seed3', brand_lc: 'b_seed3', cycleCount: 5 })));
+});
+
+// Seed a brand + one of its devices at a chosen status, bypassing rules.
+async function seedBrandAndDevice(brandId, devId, devStatus, confirmCount = 99) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), `brands/${brandId}`), {
+      brand: brandId, brand_lc: brandId, status: 'pending',
+      deviceCount: 1, cycleCount: 0, approvedDeviceCount: 0,
+    });
+    await setDoc(doc(ctx.firestore(), `devices/${devId}`), {
+      applianceType: 'washer', brand: brandId, brand_lc: brandId, model: 'm', model_lc: 'm',
+      status: devStatus, confirmCount, profileCount: 0, cycleCount: 0, favoriteCount: 0,
+    });
+  });
+}
+
+test('brand approved-device credit is allowed only alongside that device pending -> approved', async () => {
+  await seedBrandAndDevice('bcredit', 'washer__bcredit__m', 'pending');
+  const db = gh('u1').firestore();
+  // The honest path: device flip + brand credit in ONE batch.
+  const ok = writeBatch(db);
+  ok.update(doc(db, 'devices/washer__bcredit__m'), { status: 'approved' });
+  ok.update(doc(db, 'brands/bcredit'),
+    { approvedDeviceCount: increment(1), lastApprovedDeviceId: 'washer__bcredit__m' });
+  await assertSucceeds(ok.commit());
+  const after = await getDoc(doc(db, 'brands/bcredit'));
+  assert.equal(after.data().approvedDeviceCount, 1);
+});
+
+test('brand credit is denied without the device flip in the same batch', async () => {
+  await seedBrandAndDevice('bnoflip', 'washer__bnoflip__m', 'pending');
+  const db = gh('u1').firestore();
+  // Naming a device that stays pending: the getAfter() check fails.
+  await assertFails(updateDoc(doc(db, 'brands/bnoflip'),
+    { approvedDeviceCount: increment(1), lastApprovedDeviceId: 'washer__bnoflip__m' }));
+});
+
+test('brand credit cannot be claimed twice for the same device', async () => {
+  // Device already approved => the get() "was pending" check fails, so no second credit.
+  await seedBrandAndDevice('bdouble', 'washer__bdouble__m', 'approved');
+  const db = gh('u1').firestore();
+  await assertFails(updateDoc(doc(db, 'brands/bdouble'),
+    { approvedDeviceCount: increment(1), lastApprovedDeviceId: 'washer__bdouble__m' }));
+  // Even re-flipping it to approved in the same batch is a no-op transition and still fails.
+  const b = writeBatch(db);
+  b.update(doc(db, 'devices/washer__bdouble__m'), { status: 'approved' });
+  b.update(doc(db, 'brands/bdouble'),
+    { approvedDeviceCount: increment(1), lastApprovedDeviceId: 'washer__bdouble__m' });
+  await assertFails(b.commit());
+});
+
+test('brand credit cannot be claimed using another brand device', async () => {
+  await seedBrandAndDevice('bmine', 'washer__bmine__m', 'pending');
+  await seedBrandAndDevice('bother', 'washer__bother__m', 'pending');
+  const db = gh('u1').firestore();
+  // Flip the OTHER brand's device but credit mine: the brand_lc check fails.
+  const b = writeBatch(db);
+  b.update(doc(db, 'devices/washer__bother__m'), { status: 'approved' });
+  b.update(doc(db, 'brands/bmine'),
+    { approvedDeviceCount: increment(1), lastApprovedDeviceId: 'washer__bother__m' });
+  await assertFails(b.commit());
+});
+
+test('brand credit must step by exactly +1 and touch nothing else', async () => {
+  await seedBrandAndDevice('bstep', 'washer__bstep__m', 'pending');
+  const db = gh('u1').firestore();
+  const attempt = (data) => {
+    const b = writeBatch(db);
+    b.update(doc(db, 'devices/washer__bstep__m'), { status: 'approved' });
+    b.update(doc(db, 'brands/bstep'), data);
+    return b.commit();
+  };
+  await assertFails(attempt({ approvedDeviceCount: increment(5), lastApprovedDeviceId: 'washer__bstep__m' }));
+  await assertFails(attempt({ approvedDeviceCount: increment(-1), lastApprovedDeviceId: 'washer__bstep__m' }));
+  // Riding a status change along with the credit is refused (that is a separate rule).
+  await assertFails(attempt({
+    approvedDeviceCount: increment(1), lastApprovedDeviceId: 'washer__bstep__m', status: 'approved',
+  }));
+  // A credit with no device named at all cannot be verified.
+  await assertFails(attempt({ approvedDeviceCount: increment(1) }));
+});
+
+test('brand credit rejects a device id that could escape the document path', async () => {
+  await seedBrandAndDevice('bpath', 'washer__bpath__m', 'pending');
+  const db = gh('u1').firestore();
+  const b = writeBatch(db);
+  b.update(doc(db, 'devices/washer__bpath__m'), { status: 'approved' });
+  b.update(doc(db, 'brands/bpath'),
+    { approvedDeviceCount: increment(1), lastApprovedDeviceId: 'washer__bpath__m/confirmations/u1' });
+  await assertFails(b.commit());
+});
+
+test('brand auto-promotes at the configured brand threshold, not below it', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'config/site'), { confirmThreshold: 5, brandConfirmThreshold: 2 });
+    await setDoc(doc(ctx.firestore(), 'brands/bthr'), {
+      brand: 'bthr', brand_lc: 'bthr', status: 'pending',
+      deviceCount: 3, cycleCount: 0, approvedDeviceCount: 1,
+    });
+  });
+  const db = gh('u1').firestore();
+  // 1 approved model, brand bar is 2 -> denied.
+  await assertFails(updateDoc(doc(db, 'brands/bthr'), { status: 'approved' }));
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), 'brands/bthr'), { approvedDeviceCount: 2 });
+  });
+  // 2 approved models -> the community may promote the brand.
+  await assertSucceeds(updateDoc(doc(db, 'brands/bthr'), { status: 'approved' }));
+});
+
+test('the brand threshold is independent of the device threshold', async () => {
+  // Device bar 5, brand bar 2: two approved models is enough for the BRAND even though no
+  // single device could be approved on two confirmations.
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'config/site'), { confirmThreshold: 5, brandConfirmThreshold: 2 });
+    await setDoc(doc(ctx.firestore(), 'brands/bindep'), {
+      brand: 'bindep', brand_lc: 'bindep', status: 'pending',
+      deviceCount: 2, cycleCount: 0, approvedDeviceCount: 2,
+    });
+    await setDoc(doc(ctx.firestore(), 'devices/washer__bindep__m'), {
+      applianceType: 'washer', brand: 'bindep', brand_lc: 'bindep', model: 'm', model_lc: 'm',
+      status: 'pending', confirmCount: 2, profileCount: 0, cycleCount: 0, favoriteCount: 0,
+    });
+  });
+  const db = gh('u1').firestore();
+  await assertSucceeds(updateDoc(doc(db, 'brands/bindep'), { status: 'approved' }));
+  // The device still needs 5 of its own confirmations.
+  await assertFails(updateDoc(doc(db, 'devices/washer__bindep__m'), { status: 'approved' }));
+});
+
+test('brand promotion is status-only, one-way, and denied to anon', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'config/site'), { confirmThreshold: 5, brandConfirmThreshold: 1 });
+    await setDoc(doc(ctx.firestore(), 'brands/bone'), {
+      brand: 'bone', brand_lc: 'bone', status: 'pending',
+      deviceCount: 1, cycleCount: 0, approvedDeviceCount: 4,
+    });
+  });
+  await assertFails(updateDoc(doc(anon().firestore(), 'brands/bone'), { status: 'approved' }));
+  // Cannot smuggle other fields through the status rule.
+  await assertFails(updateDoc(doc(gh('u1').firestore(), 'brands/bone'), { status: 'approved', brand: 'Hijack' }));
+  // Cannot jump to a status other than approved.
+  await assertFails(updateDoc(doc(gh('u1').firestore(), 'brands/bone'), { status: 'removed' }));
+  await assertSucceeds(updateDoc(doc(gh('u1').firestore(), 'brands/bone'), { status: 'approved' }));
+  // Already approved: the rule requires the previous status to be pending, so no re-flip.
+  await assertFails(updateDoc(doc(gh('u1').firestore(), 'brands/bone'), { status: 'pending' }));
+});
