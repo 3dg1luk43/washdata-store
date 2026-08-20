@@ -44,6 +44,9 @@ import {
   onSnapshot,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
 import { deviceId as mkDeviceId, profileId as mkProfileId, lc } from './lib/ids.js';
+import {
+  assertDeviceMergeOk, assertProfileMergeOk, assertCycleMoveOk, assertBrandMergeOk,
+} from './lib/merge_guard.js';
 import { downsampleCycle, parseCycle, cycleStats, packPoints, unpackPoints } from './lib/trace.js';
 import { restQuery, restGet, restRatingSummary, restDeviceRating, restCount, setTokenProvider } from './firestore-rest.js';
 
@@ -1148,81 +1151,338 @@ export async function adminSetBrandStatus(brandLc, status) {
   await updateDoc(doc(_db, 'brands', brandLc), { status });
 }
 
+// ------------------------------------------------------------------
+// Admin merge (fold a duplicate object into the canonical one)
+//
+// Every merge re-points the source's children onto the target and then DELETES the source,
+// so it is unrecoverable and must not half-apply in a way that double-counts. Two rules
+// hold everywhere below:
+//
+//   1. Pre-flight guards come from lib/merge_guard.js (pure + unit-tested): the target must
+//      EXIST and the appliance type must match. Cross-brand is allowed on purpose.
+//   2. Writes are ordered "idempotent first, structural last": the bulk child re-points go
+//      in repeatable chunks (re-writing the same deviceId/profileId is a no-op), and every
+//      counter increment plus the source deletion lands in ONE final atomic batch. A chunk
+//      that fails therefore leaves a re-runnable state and never a double increment.
+// ------------------------------------------------------------------
+
+// Firestore caps a batch at 500 writes. A popular device can exceed that, and the error it
+// raises is opaque, so bulk child re-points are chunked. Only safe for IDEMPOTENT ops --
+// see rule 2 above.
+const _MERGE_CHUNK = 450;
+
+async function _commitChunked(ops) {
+  for (let i = 0; i < ops.length; i += _MERGE_CHUNK) {
+    const batch = writeBatch(_db);
+    for (const { ref, data } of ops.slice(i, i + _MERGE_CHUNK)) batch.update(ref, data);
+    await batch.commit();
+  }
+}
+
+// Guard the final structural batch against the same 500-op cap. It must stay atomic (it
+// carries the counter increments), so overflow is a hard error rather than a silent split.
+function _assertAtomic(count, what) {
+  if (count > _MERGE_CHUNK) {
+    throw new Error(`${what} is too large to merge atomically (${count} writes). `
+      + 'Delete or split some of its programs first.');
+  }
+}
+
+// Firestore keeps subcollection documents when their parent doc is deleted, so a merged-away
+// object's `reports` outlive it. Left open they inflate the moderation badge forever with an
+// object no admin can act on, so stamp them resolved (keeping the audit trail) instead.
+// Best-effort: never fail a merge over its bookkeeping.
+async function _closeOrphanedReports(targetPath) {
+  try { await adminResolveReports(targetPath, 'merged'); } catch (_) { /* best-effort */ }
+}
+
+// `confirmations` + `ratings` under a deleted device are worse than noise: if the device is
+// re-contributed later it derives the SAME id and inherits them, so every previous confirmer
+// is locked out of bumping confirmCount (the rule requires their doc NOT to exist) and the
+// entry can never reach the auto-approve threshold, while stale ratings resurface. Delete
+// them with the parent. Scoped to the merged object only -- a per-cycle sweep would cost
+// thousands of reads against the daily budget.
+async function _purgeDeviceSubdocs(deviceId) {
+  try {
+    for (const sub of ['confirmations', 'ratings']) {
+      const snap = await getDocs(collection(_db, 'devices', deviceId, sub));
+      for (let i = 0; i < snap.docs.length; i += _MERGE_CHUNK) {
+        const batch = writeBatch(_db);
+        for (const d of snap.docs.slice(i, i + _MERGE_CHUNK)) batch.delete(d.ref);
+        await batch.commit();
+      }
+    }
+  } catch (_) { /* best-effort cleanup */ }
+}
+
+// A RE-ID (rename) keeps the same real appliance, just at a new derived id, so its
+// per-user subcollections must travel with it -- otherwise a plain model rename silently
+// discards every confirmation and rating (and the copied confirmCount/ratingSum on the doc
+// would then describe subdocs that live under a dead path). `newId` is guaranteed fresh by
+// the caller, so no de-duplication is needed. Reports move too: they are still about this
+// object. Best-effort; the rename itself has already committed.
+async function _migrateDeviceSubdocs(oldId, newId) {
+  try {
+    for (const sub of ['confirmations', 'ratings', 'reports']) {
+      const snap = await getDocs(collection(_db, 'devices', oldId, sub));
+      const ops = snap.docs.map((d) => ({ data: d.data(), id: d.id }));
+      for (let i = 0; i < ops.length; i += Math.floor(_MERGE_CHUNK / 2)) {
+        const batch = writeBatch(_db);
+        for (const o of ops.slice(i, i + Math.floor(_MERGE_CHUNK / 2))) {
+          batch.set(doc(_db, 'devices', newId, sub, o.id), o.data);
+          batch.delete(doc(_db, 'devices', oldId, sub, o.id));
+        }
+        await batch.commit();
+      }
+    }
+  } catch (_) { /* best-effort */ }
+}
+
+// Profile re-id twin of _migrateDeviceSubdocs: a profile's only subcollection is `reports`.
+async function _migrateProfileReports(oldId, newId) {
+  try {
+    const snap = await getDocs(collection(_db, 'profiles', oldId, 'reports'));
+    if (!snap.docs.length) return;
+    const batch = writeBatch(_db);
+    for (const d of snap.docs) {
+      batch.set(doc(_db, 'profiles', newId, 'reports', d.id), { ...d.data(), targetId: newId, targetPath: `profiles/${newId}` });
+      batch.delete(doc(_db, 'profiles', oldId, 'reports', d.id));
+    }
+    await batch.commit();
+  } catch (_) { /* best-effort */ }
+}
+
+// Users store favorites as an array of deviceIds on their own user doc, so a merged-away
+// device leaves a dangling id that silently disappears from their favorites page. Re-point
+// them at the target (de-duplicated) and hand back how many users gained the target, so the
+// caller can credit the target's favoriteCount. Best-effort: returns 0 on any failure.
+async function _repointFavorites(fromId, toId) {
+  try {
+    const snap = await getDocs(query(collection(_db, 'users'), where('favorites', 'array-contains', fromId)));
+    let gained = 0;
+    const ops = [];
+    for (const u of snap.docs) {
+      const favs = new Set(u.data().favorites || []);
+      favs.delete(fromId);
+      if (!favs.has(toId)) { favs.add(toId); gained += 1; }
+      ops.push({ ref: doc(_db, 'users', u.id), data: { favorites: [...favs] } });
+    }
+    await _commitChunked(ops);
+    return gained;
+  } catch (_) { return 0; }
+}
+
 // Reassign fromId's profiles + cycles to toId, then delete the empty source device.
-// Admin-only, rare; kept within a single batch (Firestore 500-op limit - fine for
-// the small clusters near-duplicate devices produce).
+// Admin-only, for folding a near-duplicate device (typo'd model, or the same model reached
+// through a misspelled brand) into the canonical one. Cross-brand merges also relabel the
+// moved cycles' brand_lc and rebalance both brands' cycle totals.
 export async function adminMergeDevices(fromId, toId) {
-  if (fromId === toId) throw new Error('Cannot merge a device into itself');
   const [fromDev, toDev, profSnap, cycSnap] = await Promise.all([
     restGet(`devices/${fromId}`, { auth: true, noStore: true }),
     restGet(`devices/${toId}`, { auth: true, noStore: true }),
     getDocs(query(collection(_db, 'profiles'), where('deviceId', '==', fromId))),
     getDocs(query(collection(_db, 'cycles'), where('deviceId', '==', fromId))),
   ]);
+  assertDeviceMergeOk(fromId, toId, fromDev, toDev);
   // Pre-check which source profiles collide with an already-existing target profile.
+  // Fall back to program_lc for legacy docs with no `program`, so two distinct programs
+  // cannot both normalize to the empty token and collapse into one target id.
   const profileMaps = profSnap.docs.map((p) => ({
-    p, data: p.data(), newPid: mkProfileId(toId, p.data().program || ''),
+    p, data: p.data(), newPid: mkProfileId(toId, p.data().program || p.data().program_lc || ''),
   }));
   const existsChecks = await Promise.all(
-    profileMaps.map(({ newPid }) => getDoc(doc(_db, 'profiles', newPid)).then((s) => s.exists()))
+    profileMaps.map(({ newPid }) => getDoc(doc(_db, 'profiles', newPid)))
   );
-  // For cross-brand merges also migrate the cycles' brand_lc field.
-  const crossBrand = !!(fromDev?.brand_lc && toDev?.brand_lc && fromDev.brand_lc !== toDev.brand_lc);
-  const batch = writeBatch(_db);
+  const crossBrand = !!(fromDev.brand_lc && toDev.brand_lc && fromDev.brand_lc !== toDev.brand_lc);
+  // A cross-brand merge credits the target brand, so that doc has to exist or the atomic
+  // batch would fail as a whole. Missing target brand => skip the credit (recoverable with
+  // "Recalculate counts") rather than block the merge.
+  const toBrandExists = crossBrand
+    ? (await getDoc(doc(_db, 'brands', toDev.brand_lc))).exists() : false;
+
+  // Plan the target-side profile set first, keyed by target id, so several source profiles
+  // that resolve to ONE target id are folded together. Without that key, the pre-computed
+  // existence checks (taken before any write) would both look free and the second `set`
+  // would overwrite the first -- and a batch may not write one document twice.
   const remap = {};
-  let newProfileCount = 0;
+  const targets = new Map();   // newPid -> { absorb, data, programLc, visCycles, countsAsNew }
   for (let i = 0; i < profileMaps.length; i++) {
     const { p, data, newPid } = profileMaps[i];
     remap[p.id] = newPid;
-    batch.delete(doc(_db, 'profiles', p.id));
-    if (existsChecks[i]) {
-      // Collision: target profile already exists; absorb this profile's visible cycles into it.
-      const visCyc = cycSnap.docs.filter((c) => c.data().profileId === p.id && _isVisible(c.data().status)).length;
-      if (visCyc > 0) batch.update(doc(_db, 'profiles', newPid), { cycleCount: increment(visCyc) });
+    const visCyc = cycSnap.docs.filter(
+      (c) => c.data().profileId === p.id && _isVisible(c.data().status)).length;
+    let t = targets.get(newPid);
+    if (!t) {
+      // Absorb into an existing target profile, or re-create the source under the new id.
+      // The absorbing target keeps its own name, so its program_lc is what the moved cycles
+      // must adopt: two spellings can normalize to one id ("Eco-50"/"Eco 50"), and the
+      // integration names an imported profile from the cycle's program_lc, so a stale value
+      // re-creates downstream the very duplicate this merge removes.
+      const exists = existsChecks[i].exists();
+      const tgt = exists ? existsChecks[i].data() : data;
+      t = {
+        absorb: exists,
+        data: exists ? null : { ...data, deviceId: toId },
+        programLc: tgt.program_lc || lc(tgt.program || ''),
+        visCycles: 0,
+        countsAsNew: !exists && _isVisible(data.status),
+      };
+      targets.set(newPid, t);
+    }
+    t.visCycles += visCyc;
+  }
+
+  let newProfileCount = 0;
+  const structural = [];
+  const relabel = {};   // newPid -> program_lc of the profile the cycles actually land on
+  for (const [newPid, t] of targets) {
+    relabel[newPid] = t.programLc;
+    if (t.absorb) {
+      if (t.visCycles > 0) {
+        structural.push({ op: 'update', ref: doc(_db, 'profiles', newPid), data: { cycleCount: increment(t.visCycles) } });
+      }
     } else {
-      batch.set(doc(_db, 'profiles', newPid), { ...data, deviceId: toId });
-      if (_isVisible(data.status)) newProfileCount++;
+      // A re-created profile's cycleCount is RECOMPUTED from the cycles that actually point
+      // at it (including any folded-in siblings') rather than carried over, so a merge also
+      // repairs a count that had drifted.
+      structural.push({ op: 'set', ref: doc(_db, 'profiles', newPid), data: { ...t.data, cycleCount: t.visCycles } });
+      if (t.countsAsNew) newProfileCount++;
     }
   }
+  // Every source profile doc goes away, whichever target absorbed it. Source ids are derived
+  // from fromId and targets from toId, so a delete can never hit a doc just written above.
+  for (const { p } of profileMaps) structural.push({ op: 'delete', ref: doc(_db, 'profiles', p.id) });
+
+  // Phase 1 (chunked, idempotent): re-point every cycle onto the target device.
+  const cycleOps = [];
   for (const c of cycSnap.docs) {
     const data = c.data();
     const newPid = remap[data.profileId] || mkProfileId(toId, (data.program_lc || '').replace(/-/g, ' '));
     const upd = { deviceId: toId, profileId: newPid };
     if (crossBrand) upd.brand_lc = toDev.brand_lc;
-    batch.update(doc(_db, 'cycles', c.id), upd);
+    if (relabel[newPid] && data.program_lc !== relabel[newPid]) upd.program_lc = relabel[newPid];
+    // Repair any legacy skew while we are here: a cycle must declare its device's type.
+    if (toDev.applianceType && data.applianceType !== toDev.applianceType) upd.applianceType = toDev.applianceType;
+    cycleOps.push({ ref: doc(_db, 'cycles', c.id), data: upd });
   }
-  batch.delete(doc(_db, 'devices', fromId));
-  // fromId device removed from brand count; toId gains its profiles and cycles.
-  if (fromDev?.brand_lc && _isVisible(fromDev.status)) {
-    batch.update(doc(_db, 'brands', fromDev.brand_lc), { deviceCount: increment(-1) });
-  }
+  await _commitChunked(cycleOps);
+
+  // Phase 2 (single atomic batch): counters + the source deletions.
   const visibleCycles = cycSnap.docs.filter((c) => _isVisible(c.data().status)).length;
   const toUpdate = {};
   if (newProfileCount > 0) toUpdate.profileCount = increment(newProfileCount);
   if (visibleCycles > 0) toUpdate.cycleCount = increment(visibleCycles);
-  if (Object.keys(toUpdate).length > 0) batch.update(doc(_db, 'devices', toId), toUpdate);
+  // Favorites of the dissolved device follow it, so the target's vanity counter follows too.
+  const favGained = await _repointFavorites(fromId, toId);
+  if (favGained > 0) toUpdate.favoriteCount = increment(favGained);
+  if (Object.keys(toUpdate).length > 0) {
+    structural.push({ op: 'update', ref: doc(_db, 'devices', toId), data: toUpdate });
+  }
+  // Source brand loses the device, and on a cross-brand merge its cycles too. One combined
+  // update: a batch must not write the same doc twice.
+  const fromBrandUpd = {};
+  if (fromDev.brand_lc && _isVisible(fromDev.status)) fromBrandUpd.deviceCount = increment(-1);
+  if (crossBrand && visibleCycles > 0) fromBrandUpd.cycleCount = increment(-visibleCycles);
+  if (fromDev.brand_lc && Object.keys(fromBrandUpd).length > 0) {
+    structural.push({ op: 'update', ref: doc(_db, 'brands', fromDev.brand_lc), data: fromBrandUpd });
+  }
+  // Target brand gains those cycles (its deviceCount is unchanged - the target device
+  // already existed and was already counted).
+  if (crossBrand && toBrandExists && visibleCycles > 0) {
+    structural.push({ op: 'update', ref: doc(_db, 'brands', toDev.brand_lc), data: { cycleCount: increment(visibleCycles) } });
+  }
+  structural.push({ op: 'delete', ref: doc(_db, 'devices', fromId) });
+
+  _assertAtomic(structural.length, 'This device');
+  const batch = writeBatch(_db);
+  for (const { op, ref, data } of structural) {
+    if (op === 'delete') batch.delete(ref);
+    else if (op === 'set') batch.set(ref, data);
+    else batch.update(ref, data);
+  }
   await batch.commit();
+
+  // Post-merge bookkeeping for the doc that no longer exists (best-effort, never throws).
+  await Promise.all([
+    _purgeDeviceSubdocs(fromId),
+    _closeOrphanedReports(`devices/${fromId}`),
+    ...profileMaps.map(({ p }) => _closeOrphanedReports(`profiles/${p.id}`)),
+  ]);
+  return { id: toId, profiles: profileMaps.length, cycles: cycSnap.docs.length };
 }
 
 // Reassign a profile's cycles to another profile, then delete the empty source.
-// Admin-only; for deduping near-duplicate profiles (e.g. "Eco 50" / "Eco 50C").
+// Admin-only; for deduping near-duplicate profiles (e.g. "Eco 50" / "Eco 50C"). The target
+// may live on ANOTHER device (a program filed under the wrong model), in which case the
+// cycles are relabelled onto that device and all three counter levels are rebalanced.
 export async function adminMergeProfiles(fromId, toId) {
-  if (fromId === toId) throw new Error('Cannot merge a profile into itself');
-  const [fromProf, cycSnap] = await Promise.all([
+  const [fromProf, toProf, cycSnap] = await Promise.all([
     restGet(`profiles/${fromId}`, { auth: true, noStore: true }),
+    restGet(`profiles/${toId}`, { auth: true, noStore: true }),
     getDocs(query(collection(_db, 'cycles'), where('profileId', '==', fromId))),
   ]);
-  const batch = writeBatch(_db);
-  for (const c of cycSnap.docs) batch.update(doc(_db, 'cycles', c.id), { profileId: toId });
-  batch.delete(doc(_db, 'profiles', fromId));
-  // fromId profile deleted → device loses one profile; cycles move to toId.
-  if (fromProf?.deviceId && _isVisible(fromProf.status)) {
-    batch.update(doc(_db, 'devices', fromProf.deviceId), { profileCount: increment(-1) });
-  }
+  // Both parent devices are read unconditionally (two admin-only reads): the cross-device
+  // path needs them to relabel the cycles, and the same-device path needs to know the parent
+  // still exists before writing a counter to it -- a profile orphaned by older data would
+  // otherwise fail the atomic batch with an opaque "no document to update".
+  const [fromDev, toDev] = await Promise.all([
+    fromProf?.deviceId ? restGet(`devices/${fromProf.deviceId}`, { auth: true, noStore: true }) : null,
+    toProf?.deviceId ? restGet(`devices/${toProf.deviceId}`, { auth: true, noStore: true }) : null,
+  ]);
+  // assertProfileMergeOk already requires the target DEVICE for a cross-device merge; a
+  // same-device merge whose shared parent is missing is left possible on purpose, so two
+  // profiles orphaned by older data can still be consolidated (the counter writes below are
+  // gated on the parent existing).
+  const { crossDevice } = assertProfileMergeOk(fromId, toId, fromProf, toProf, fromDev, toDev);
+  const crossBrand = !!(crossDevice && fromDev?.brand_lc && toDev?.brand_lc
+    && fromDev.brand_lc !== toDev.brand_lc);
+  const toBrandExists = crossBrand
+    ? (await getDoc(doc(_db, 'brands', toDev.brand_lc))).exists() : false;
+
+  // Phase 1 (chunked, idempotent): re-point the cycles. They adopt the target's program_lc
+  // (and device identity) so nothing downstream still names the merged-away program -- the
+  // integration derives an imported profile's name from the cycle's program_lc.
+  const programLc = toProf.program_lc || lc(toProf.program || '');
+  const cycleOps = cycSnap.docs.map((c) => {
+    const data = c.data();
+    const upd = { profileId: toId };
+    if (programLc && data.program_lc !== programLc) upd.program_lc = programLc;
+    if (crossDevice) {
+      upd.deviceId = toProf.deviceId;
+      if (crossBrand) upd.brand_lc = toDev.brand_lc;
+      if (toDev?.applianceType && data.applianceType !== toDev.applianceType) {
+        upd.applianceType = toDev.applianceType;
+      }
+    }
+    return { ref: doc(_db, 'cycles', c.id), data: upd };
+  });
+  await _commitChunked(cycleOps);
+
+  // Phase 2 (single atomic batch): counters + the source deletion.
   const visibleCycles = cycSnap.docs.filter((c) => _isVisible(c.data().status)).length;
+  const batch = writeBatch(_db);
+  batch.delete(doc(_db, 'profiles', fromId));
   if (visibleCycles > 0) batch.update(doc(_db, 'profiles', toId), { cycleCount: increment(visibleCycles) });
-  // device.cycleCount and brand.cycleCount are unchanged (same number of cycles, same device).
+  // Source device loses the profile, and on a cross-device merge its cycles too.
+  const fromDevUpd = {};
+  if (_isVisible(fromProf.status)) fromDevUpd.profileCount = increment(-1);
+  if (crossDevice && visibleCycles > 0) fromDevUpd.cycleCount = increment(-visibleCycles);
+  if (fromDev && Object.keys(fromDevUpd).length > 0) {
+    batch.update(doc(_db, 'devices', fromProf.deviceId), fromDevUpd);
+  }
+  if (crossDevice) {
+    // Target device gains the cycles (its profileCount is unchanged - the target profile
+    // already existed). Same-device merges move nothing, so device/brand totals hold.
+    if (visibleCycles > 0) batch.update(doc(_db, 'devices', toProf.deviceId), { cycleCount: increment(visibleCycles) });
+    if (crossBrand && visibleCycles > 0) {
+      batch.update(doc(_db, 'brands', fromDev.brand_lc), { cycleCount: increment(-visibleCycles) });
+      if (toBrandExists) batch.update(doc(_db, 'brands', toDev.brand_lc), { cycleCount: increment(visibleCycles) });
+    }
+  }
   await batch.commit();
+
+  await _closeOrphanedReports(`profiles/${fromId}`);
+  return { id: toId, crossDevice, cycles: cycSnap.docs.length };
 }
 
 // ------------------------------------------------------------------
@@ -1233,8 +1493,9 @@ export async function adminMergeProfiles(fromId, toId) {
 // new id with its fields preserved (status, createdByUid, createdAt, counters), its children
 // re-pointed, and the old doc deleted. Faithful field preservation relies on the admin
 // `allow create` rule. Reads use the SDK (getDoc/getDocs) so Firestore Timestamps round-trip
-// intact when written back. Kept within a single batch (500-op limit -- fine for the small
-// per-device clusters this catalog produces; a huge device would need chunking).
+// intact when written back. Writes follow the same "idempotent first, structural last"
+// split as the merge helpers above, so an oversized device re-ids in chunks instead of
+// failing the whole batch on Firestore's 500-write cap.
 // ------------------------------------------------------------------
 
 // Re-create a device (and cascade its profiles + cycles) under `newId`, applying `patch`
@@ -1249,22 +1510,27 @@ async function _reidDevice(oldId, newId, dev, patch) {
   ]);
   const brandLcNew = patch.brand_lc || dev.brand_lc;
   const brandChanged = !!patch.brand_lc && patch.brand_lc !== dev.brand_lc;
-  const batch = writeBatch(_db);
-  batch.set(doc(_db, 'devices', newId), { ...dev, ...patch });
-  batch.delete(doc(_db, 'devices', oldId));
   const remap = {};
   for (const p of profSnap.docs) {
     const pd = p.data();
-    const newPid = mkProfileId(newId, pd.program || pd.program_lc || '');
-    remap[p.id] = newPid;
-    batch.set(doc(_db, 'profiles', newPid), { ...pd, deviceId: newId });
-    batch.delete(doc(_db, 'profiles', p.id));
+    remap[p.id] = mkProfileId(newId, pd.program || pd.program_lc || '');
   }
-  for (const c of cycSnap.docs) {
+  // Phase 1 (chunked, idempotent): re-point every cycle at the new device + profile ids.
+  await _commitChunked(cycSnap.docs.map((c) => {
     const cd = c.data();
     const upd = { deviceId: newId, profileId: remap[cd.profileId] || mkProfileId(newId, cd.program_lc || '') };
     if (brandChanged) upd.brand_lc = brandLcNew;
-    batch.update(doc(_db, 'cycles', c.id), upd);
+    return { ref: doc(_db, 'cycles', c.id), data: upd };
+  }));
+  // Phase 2 (single atomic batch): re-create the device + profiles under the new ids,
+  // rebalance brand counters, delete the originals.
+  _assertAtomic(profSnap.docs.length * 2 + 3, 'This device');
+  const batch = writeBatch(_db);
+  batch.set(doc(_db, 'devices', newId), { ...dev, ...patch });
+  batch.delete(doc(_db, 'devices', oldId));
+  for (const p of profSnap.docs) {
+    batch.set(doc(_db, 'profiles', remap[p.id]), { ...p.data(), deviceId: newId });
+    batch.delete(doc(_db, 'profiles', p.id));
   }
   // Cross-brand: rebalance brand-level denormalized counters (best-effort, like the merge
   // helpers). Same-brand model rename touches no brand, so counts stay exact untouched.
@@ -1278,6 +1544,10 @@ async function _reidDevice(oldId, newId, dev, patch) {
     // Target brand gains are applied by the caller (it knows the target brand doc exists).
   }
   await batch.commit();
+  // The old device doc is gone: carry its confirmations / ratings / reports over to the new
+  // id so a rename does not silently drop them (and cannot be inherited by a future
+  // re-contribution at the old id).
+  await _migrateDeviceSubdocs(oldId, newId);
   return { profiles: profSnap.docs.length, cycles: cycSnap.docs.length,
     visibleCycles: cycSnap.docs.filter((c) => _isVisible(c.data().status)).length };
 }
@@ -1332,6 +1602,10 @@ export async function adminRenameProfile(profileId, newProgram) {
     batch.set(doc(_db, 'profiles', newId), { ...prof, ...patch }); // faithful re-id; counts carry over
   }
   await batch.commit();
+  // The old profile id is gone. On a merge its reports are about an object that no longer
+  // exists (close them); on a re-id the same object just moved, so carry them across.
+  if (targetExists) await _closeOrphanedReports(`profiles/${profileId}`);
+  else await _migrateProfileReports(profileId, newId);
   return { id: newId, merged: targetExists };
 }
 
@@ -1356,102 +1630,150 @@ async function _renameBrandDisplay(brandLc, brand) {
 // Merge every device under `fromLc` into the `toBrandName` namespace (also used for a
 // cross-lowercase brand rename, where the target brand may not exist yet -- e.g. "bosh" ->
 // "Bosch"). Each device is migrated to its new brand-derived id (merged if that id already
-// exists, else re-id'd), the target brand doc is created if missing, and the source brand doc
-// is removed. Brand-level counters are best-effort; run "Recalculate counts" for exact totals.
+// exists, else re-id'd), and the source brand doc is removed once it is empty.
+//
+// Unlike the device/profile merges this is NOT atomic -- it is a loop of per-device
+// operations, because each device may need a full cascade. A failure part-way leaves the
+// source brand in place with some devices already moved, so the operation is re-runnable;
+// what it can leave behind is brand-level counter drift, which "Recalculate counts" fixes
+// exactly. The returned `moved`/`merged`/`failed` tallies say what actually happened.
 export async function adminMergeBrands(fromLc, toBrandName) {
-  const brand = String(toBrandName || '').trim();
-  if (!brand) throw new Error('Brand name is required');
+  const brand = assertBrandMergeOk(fromLc, toBrandName);
   const toLc = lc(brand);
   if (toLc === fromLc) return _renameBrandDisplay(fromLc, brand);
+
+  // Create the target brand doc UP FRONT. Per-device work credits the target's counters, and
+  // those writes ride inside atomic batches that would fail as a whole against a missing doc
+  // (reachable in practice: brand ids are lc(name) while device ids use normalizeToken, so a
+  // device namespace can exist with no brand doc behind it).
+  const [srcSnap0, tgtSnap0] = await Promise.all([
+    getDoc(doc(_db, 'brands', fromLc)),
+    getDoc(doc(_db, 'brands', toLc)),
+  ]);
+  if (!tgtSnap0.exists()) {
+    const src = srcSnap0.exists() ? srcSnap0.data() : {};
+    // A pure rename into a new key inherits the source's identity but starts its counters at
+    // the source's values; the per-device credits below then apply on top, so zero them.
+    await setDoc(doc(_db, 'brands', toLc), {
+      ...src, brand, brand_lc: toLc, deviceCount: 0, cycleCount: 0,
+    });
+  }
 
   const devSnap = await getDocs(query(collection(_db, 'devices'), where('brand_lc', '==', fromLc)));
   let merged = 0;
   let moved = 0;
+  const failed = [];
   for (const d of devSnap.docs) {
     const dev = d.data();
-    const newDevId = mkDeviceId(dev.applianceType, brand, dev.model);
-    if (newDevId === d.id) {
-      // Device ID is unchanged (normalizeToken of old/new brand resolves the same slug).
-      // Still need to update cycles' brand_lc, which lags behind the lowercased key.
-      await updateDoc(doc(_db, 'devices', d.id), { brand, brand_lc: toLc });
-      const devCycSnap = await getDocs(query(collection(_db, 'cycles'), where('deviceId', '==', d.id)));
-      const CBATCH = 450;
-      for (let i = 0; i < devCycSnap.docs.length; i += CBATCH) {
-        const cyBatch = writeBatch(_db);
-        for (const c of devCycSnap.docs.slice(i, i + CBATCH)) cyBatch.update(doc(_db, 'cycles', c.id), { brand_lc: toLc });
-        await cyBatch.commit();
+    try {
+      const newDevId = mkDeviceId(dev.applianceType, brand, dev.model);
+      if (newDevId === d.id) {
+        // Device ID is unchanged (normalizeToken of old/new brand resolves the same slug).
+        // Still need to update cycles' brand_lc, which lags behind the lowercased key.
+        await updateDoc(doc(_db, 'devices', d.id), { brand, brand_lc: toLc });
+        const devCycSnap = await getDocs(query(collection(_db, 'cycles'), where('deviceId', '==', d.id)));
+        await _commitChunked(devCycSnap.docs.map(
+          (c) => ({ ref: doc(_db, 'cycles', c.id), data: { brand_lc: toLc } })));
+        // The device and its cycles changed brand key, so the target brand must gain them
+        // (the source brand doc is deleted below, so its stale totals go with it).
+        const gains = {};
+        if (_isVisible(dev.status)) gains.deviceCount = increment(1);
+        const visible = devCycSnap.docs.filter((c) => _isVisible(c.data().status)).length;
+        if (visible > 0) gains.cycleCount = increment(visible);
+        if (Object.keys(gains).length) await updateDoc(doc(_db, 'brands', toLc), gains);
+        moved += 1;
+        continue;
       }
-      moved += 1;
-      continue;
-    }
-    if ((await getDoc(doc(_db, 'devices', newDevId))).exists()) {
-      await adminMergeDevices(d.id, newDevId);
-      // adminMergeDevices keeps the target's brand; relabel any moved cycles' brand_lc + the
-      // target device fields so nothing keeps the old brand key.
-      await updateDoc(doc(_db, 'devices', newDevId), { brand, brand_lc: toLc });
-      merged += 1;
-    } else {
-      const res = await _reidDevice(d.id, newDevId, dev, { brand, brand_lc: toLc });
-      // Target brand gains this device + its visible cycles (source loss applied in _reidDevice).
-      const gains = {};
-      if (_isVisible(dev.status)) gains.deviceCount = increment(1);
-      if (res.visibleCycles > 0) gains.cycleCount = increment(res.visibleCycles);
-      if (Object.keys(gains).length) {
-        try { await updateDoc(doc(_db, 'brands', toLc), gains); } catch (_) { /* target brand created below */ }
+      if ((await getDoc(doc(_db, 'devices', newDevId))).exists()) {
+        // adminMergeDevices does the cross-brand cycle relabel + both brands' cycle totals.
+        await adminMergeDevices(d.id, newDevId);
+        // It keeps the TARGET device's brand fields, which already name toLc; re-assert them
+        // so a target that predates this rename cannot keep a stale display name.
+        await updateDoc(doc(_db, 'devices', newDevId), { brand, brand_lc: toLc });
+        merged += 1;
+      } else {
+        const res = await _reidDevice(d.id, newDevId, dev, { brand, brand_lc: toLc });
+        // Target brand gains this device + its visible cycles (source loss applied in _reidDevice).
+        const gains = {};
+        if (_isVisible(dev.status)) gains.deviceCount = increment(1);
+        if (res.visibleCycles > 0) gains.cycleCount = increment(res.visibleCycles);
+        if (Object.keys(gains).length) await updateDoc(doc(_db, 'brands', toLc), gains);
+        moved += 1;
       }
-      moved += 1;
+    } catch (e) {
+      // One unmovable device must not abandon the rest half-done. Collect and report it.
+      failed.push({ id: d.id, model: dev.model || d.id, error: e.message });
     }
   }
 
-  // Ensure the target brand doc exists (create from the source's fields when this is a pure
-  // rename into a new key), then remove the now-empty source brand.
-  const [srcSnap, tgtSnap] = await Promise.all([
-    getDoc(doc(_db, 'brands', fromLc)),
-    getDoc(doc(_db, 'brands', toLc)),
-  ]);
-  if (!tgtSnap.exists()) {
-    const src = srcSnap.exists() ? srcSnap.data() : {};
-    await setDoc(doc(_db, 'brands', toLc), { ...src, brand, brand_lc: toLc });
+  // Remove the now-empty source brand -- but only if every device really left, otherwise the
+  // survivors would be stranded under a brand that no longer exists.
+  if (!failed.length) {
+    if (srcSnap0.exists()) await deleteDoc(doc(_db, 'brands', fromLc));
+    await _closeOrphanedReports(`brands/${fromLc}`);
   }
-  if (srcSnap.exists()) await deleteDoc(doc(_db, 'brands', fromLc));
-  return { id: toLc, moved, merged };
+  return { id: toLc, moved, merged, failed };
 }
 
 // Rename a brand. A capitalisation-only change (same lowercase) is a pure display patch;
 // changing the lowercase key routes through adminMergeBrands (which creates the new brand or
 // merges into an existing one, e.g. "bosh" -> "Bosch").
 export async function adminRenameBrand(brandLc, newName) {
-  const brand = String(newName || '').trim();
-  if (!brand) throw new Error('Brand name is required');
+  const brand = assertBrandMergeOk(brandLc, newName);
   if (lc(brand) === brandLc) return _renameBrandDisplay(brandLc, brand);
   return adminMergeBrands(brandLc, brand);
 }
 
-// Move a reference cycle to a different profile of the SAME device (fix a mislabelled
-// program). Re-points the cycle's profileId + program_lc and rebalances both profiles'
-// cycleCount; the device/brand cycle totals are unchanged (same device).
+// Move a reference cycle to a different profile (fix a mislabelled program). Re-points the
+// cycle's profileId + program_lc and rebalances both profiles' cycleCount. Within one device
+// the device/brand cycle totals are unchanged; a cross-device move (same appliance type)
+// also re-points deviceId / brand_lc / applianceType and rebalances those totals.
 export async function adminMoveCycle(cycleId, toProfileId) {
   const [cycSnap, profSnap] = await Promise.all([
     getDoc(doc(_db, 'cycles', cycleId)),
     getDoc(doc(_db, 'profiles', toProfileId)),
   ]);
-  if (!cycSnap.exists()) throw new Error('Cycle not found');
-  if (!profSnap.exists()) throw new Error('Target profile not found');
-  const cyc = cycSnap.data();
-  const prof = profSnap.data();
-  if (cyc.profileId === toProfileId) return { id: cycleId, moved: false };
-  if (prof.deviceId !== cyc.deviceId) throw new Error('Target profile must belong to the same device');
-  const batch = writeBatch(_db);
-  batch.update(doc(_db, 'cycles', cycleId), {
+  const cyc = cycSnap.exists() ? cycSnap.data() : null;
+  const prof = profSnap.exists() ? profSnap.data() : null;
+  // A cycle filed under the wrong device (e.g. uploaded through a misspelled brand) may move
+  // to a profile on ANOTHER device, as long as the appliance type matches; then its device /
+  // brand / appliance-type labels and all three counter levels move with it.
+  const crossDevice = !!(cyc && prof && cyc.deviceId !== prof.deviceId);
+  const [fromDev, toDev] = crossDevice ? await Promise.all([
+    cyc.deviceId ? restGet(`devices/${cyc.deviceId}`, { auth: true, noStore: true }) : null,
+    prof.deviceId ? restGet(`devices/${prof.deviceId}`, { auth: true, noStore: true }) : null,
+  ]) : [null, null];
+  const check = assertCycleMoveOk(cycleId, toProfileId, cyc, prof, fromDev, toDev);
+  if (!check.moved) return { id: cycleId, moved: false };
+  const crossBrand = !!(check.crossDevice && fromDev?.brand_lc && toDev?.brand_lc
+    && fromDev.brand_lc !== toDev.brand_lc);
+  const toBrandExists = crossBrand
+    ? (await getDoc(doc(_db, 'brands', toDev.brand_lc))).exists() : false;
+  const upd = {
     profileId: toProfileId,
     program_lc: prof.program_lc || lc(prof.program || ''),
-  });
+  };
+  if (check.crossDevice) {
+    upd.deviceId = prof.deviceId;
+    if (crossBrand) upd.brand_lc = toDev.brand_lc;
+    if (toDev?.applianceType) upd.applianceType = toDev.applianceType;
+  }
+  const batch = writeBatch(_db);
+  batch.update(doc(_db, 'cycles', cycleId), upd);
   if (_isVisible(cyc.status)) {
     if (cyc.profileId) batch.update(doc(_db, 'profiles', cyc.profileId), { cycleCount: increment(-1) });
     batch.update(doc(_db, 'profiles', toProfileId), { cycleCount: increment(1) });
+    if (check.crossDevice) {
+      if (cyc.deviceId) batch.update(doc(_db, 'devices', cyc.deviceId), { cycleCount: increment(-1) });
+      batch.update(doc(_db, 'devices', prof.deviceId), { cycleCount: increment(1) });
+      if (crossBrand) {
+        batch.update(doc(_db, 'brands', fromDev.brand_lc), { cycleCount: increment(-1) });
+        if (toBrandExists) batch.update(doc(_db, 'brands', toDev.brand_lc), { cycleCount: increment(1) });
+      }
+    }
   }
   await batch.commit();
-  return { id: cycleId, moved: true };
+  return { id: cycleId, moved: true, crossDevice: check.crossDevice };
 }
 
 // Fresh count of open report documents across every `reports` subcollection (collection

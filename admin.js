@@ -62,6 +62,8 @@ let _catBrand = null;
 let _catDevice = null;
 let _catProfile = null;
 let _moveCycleId = null;
+// Active merge-target dialog: { kind, id, label, obj, options, onDone }.
+let _mergeCtx = null;
 let _catCycles = [];
 let _catCycleCursor = null;
 let _catalogLoaded = false;
@@ -537,19 +539,31 @@ function buildStatusActions(container, rec, setter, label, extra, deleter) {
 }
 
 // ============================================================ catalog
+// Load the brand/device/profile listings into the module-level caches WITHOUT touching the
+// drill position or rendering. The merge-target picker (reachable from the moderation queue,
+// which never opens the Catalog tab) needs the same three listings, and re-fetching them per
+// dialog would burn the daily read budget.
+async function fetchCatalogItems() {
+  const [brandRes, devRes, profRes] = await Promise.all([
+    adminListBrands({ pageSize: 500 }),
+    adminListDevices({ pageSize: 500 }),
+    adminListProfiles({ pageSize: 500 }),
+  ]);
+  _brandItems = brandRes.items || [];
+  _deviceItems = devRes.items || [];
+  _profileItems = profRes.items || [];
+  _catalogLoaded = true;
+}
+
+async function ensureCatalogItems() {
+  if (!_catalogLoaded) await fetchCatalogItems();
+}
+
 async function loadCatalogData() {
   $('cat-content').innerHTML = '<div class="loading-center" style="padding:3rem"><div class="loading-spinner"></div></div>';
   $('cat-merge-bar').style.display = 'none';
   try {
-    const [brandRes, devRes, profRes] = await Promise.all([
-      adminListBrands({ pageSize: 500 }),
-      adminListDevices({ pageSize: 500 }),
-      adminListProfiles({ pageSize: 500 }),
-    ]);
-    _brandItems = brandRes.items || [];
-    _deviceItems = devRes.items || [];
-    _profileItems = profRes.items || [];
-    _catalogLoaded = true;
+    await fetchCatalogItems();
     _catLevel = 'brands'; _catBrand = null; _catDevice = null; _catProfile = null;
     renderCatalog();
   } catch (e) {
@@ -720,6 +734,231 @@ $('move-cycle-save').addEventListener('click', async () => {
   } catch (e) { $('move-cycle-save').disabled = false; toast(e.message, 'error'); }
 });
 
+// ============================================================ merge-target picker
+//
+// One dialog for "fold this object into the correct one", shared by the moderation queue
+// (a report that says "boch is a misspelling of bosch") and the catalog cards. It resolves a
+// TARGET and calls the matching washstore merge, which re-points every child and deletes the
+// source. Cross-brand is the normal case here; the appliance type is what may never cross,
+// so device/profile/cycle target lists are filtered to the source's own type and the
+// washstore guards re-check it server-side of the UI.
+
+// Human labels for the objects a merge can target.
+function mtDeviceLabel(d) {
+  return `${d.brand || d.brand_lc || '?'} - ${d.model || d.id}`;
+}
+function mtProfileLabel(p) {
+  const dev = _deviceItems.find((d) => d.id === p.deviceId);
+  return `${dev ? mtDeviceLabel(dev) : (p.deviceId || '?')} > ${p.program || p.id}`;
+}
+
+// Build the candidate list for a merge source. Returns [{ value, label, sub }].
+// `sub` is the secondary line shown in the preview (status / appliance type).
+function mtCandidates(kind, id, obj) {
+  if (kind === 'brand') {
+    // adminMergeBrands takes the canonical display NAME (it derives the lowercase doc id
+    // itself), so that -- not the doc id -- is what the option has to carry. Names are
+    // unambiguous here: two brands with the same name would share one lc id.
+    return _brandItems
+      .filter((b) => b.id !== id)
+      .map((b) => ({ value: b.brand || b.id, label: b.brand || b.id, sub: b.status }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }
+  const type = obj && obj.applianceType;
+  // A device with no declared type can target anything (legacy docs must stay fixable).
+  const devOk = (d) => !type || !d.applianceType || d.applianceType === type;
+  if (kind === 'device') {
+    return _deviceItems
+      .filter((d) => d.id !== id && devOk(d))
+      .map((d) => ({ value: d.id, label: mtDeviceLabel(d), sub: `${typeLabel(d.applianceType)} - ${d.status}` }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }
+  // profile + cycle both target a PROFILE (a cycle is moved onto it).
+  const srcDev = _deviceItems.find((d) => d.id === (obj && obj.deviceId));
+  const srcType = (srcDev && srcDev.applianceType) || type;
+  return _profileItems
+    .filter((p) => p.id !== id)
+    .filter((p) => {
+      const dev = _deviceItems.find((d) => d.id === p.deviceId);
+      return !srcType || !dev || !dev.applianceType || dev.applianceType === srcType;
+    })
+    .map((p) => ({ value: p.id, label: mtProfileLabel(p), sub: p.status }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+const _MT_COPY = {
+  brand: {
+    title: 'Merge brand into another brand',
+    search: 'Search existing brands, or type the correct name',
+    select: 'Target brand',
+    hint: 'Every device under the source brand moves to the target (merged where the target '
+      + 'already has the same model), then the source brand is deleted. Leave the list '
+      + 'unselected and type a name to rename into a brand that does not exist yet.',
+    empty: 'No other brand exists yet - type the correct name above.',
+  },
+  device: {
+    title: 'Merge device into another device',
+    search: 'Search by brand or model',
+    select: 'Target device (same appliance type)',
+    hint: 'All programs and reference cycles move to the target, then the source device is '
+      + 'deleted. The target keeps its own name, owner, ratings and confirmations.',
+    empty: 'No other device of this appliance type exists to merge into.',
+  },
+  profile: {
+    title: 'Merge program into another program',
+    search: 'Search by device or program',
+    select: 'Target program',
+    hint: 'All reference cycles move to the target program (and, if it sits on another '
+      + 'device, onto that device), then the source program is deleted.',
+    empty: 'No other program exists to merge into.',
+  },
+  cycle: {
+    title: 'Move cycle to the correct program',
+    search: 'Search by device or program',
+    select: 'Target program',
+    hint: 'The cycle is re-filed under the target program. Nothing is deleted.',
+    empty: 'No other program exists to move this cycle into.',
+  },
+};
+
+// Resolve what the current dialog state would actually do. Returns
+// { ok, target, targetLabel, isNew, reason }.
+function mtResolve() {
+  if (!_mergeCtx) return { ok: false };
+  const sel = $('merge-target-select').value;
+  const typed = $('merge-target-search').value.trim();
+  if (sel) {
+    const opt = _mergeCtx.options.find((o) => o.value === sel);
+    return { ok: true, target: sel, targetLabel: opt ? opt.label : sel, isNew: false };
+  }
+  // Brands are addressed by name, so an admin may type one that does not exist yet (that is
+  // how "bosh" becomes "Bosch" when no Bosch brand has been contributed). Every other kind
+  // needs a real doc id, which cannot be typed.
+  if (_mergeCtx.kind === 'brand' && typed) {
+    const existing = _brandItems.find((b) => (b.brand || b.id).toLowerCase() === typed.toLowerCase());
+    if (existing && existing.id === _mergeCtx.id) {
+      return { ok: false, reason: 'That is the source brand - pick a different target.' };
+    }
+    return { ok: true, target: typed, targetLabel: typed, isNew: !existing };
+  }
+  return { ok: false, reason: _mergeCtx.kind === 'brand'
+    ? 'Pick a target brand or type the correct name.'
+    : 'Pick a target from the list.' };
+}
+
+function mtRenderPreview() {
+  const prev = $('merge-target-preview');
+  const res = mtResolve();
+  $('merge-target-save').disabled = !res.ok;
+  if (!res.ok) {
+    prev.className = 'mt-preview mt-blocked';
+    prev.innerHTML = esc(res.reason || '');
+    return;
+  }
+  prev.className = 'mt-preview';
+  const verb = _mergeCtx.kind === 'cycle' ? 'moves to' : 'merges into';
+  prev.innerHTML = `<span class="mt-from">${esc(_mergeCtx.label)}</span> ${esc(verb)} `
+    + `<span class="mt-to">${esc(res.targetLabel)}</span>`
+    + (res.isNew ? ' <span class="mt-new">(new brand - will be created)</span>' : '');
+}
+
+function mtFilterOptions() {
+  const q = $('merge-target-search').value.trim().toLowerCase();
+  const sel = $('merge-target-select');
+  const keep = _mergeCtx.options.filter(
+    (o) => !q || `${o.label} ${o.sub || ''}`.toLowerCase().includes(q));
+  const previous = sel.value;
+  sel.innerHTML = keep.map(
+    (o) => `<option value="${esc(o.value)}">${esc(o.label)}${o.sub ? ` (${esc(o.sub)})` : ''}</option>`).join('');
+  // Keep an already-chosen target selected while the admin keeps typing.
+  if (previous && keep.some((o) => o.value === previous)) sel.value = previous;
+  else sel.value = '';
+  $('merge-target-empty').toggleAttribute('hidden', keep.length > 0);
+  $('merge-target-empty').textContent = _mergeCtx.options.length
+    ? 'No match for this filter.' : _MT_COPY[_mergeCtx.kind].empty;
+  mtRenderPreview();
+}
+
+// `onDone(result)` runs after a successful merge (the caller decides whether to resolve
+// reports, reload the catalog, or both).
+async function openMergeTargetModal({ kind, id, label, obj, onDone }) {
+  const copy = _MT_COPY[kind];
+  if (!copy) { toast('This object type cannot be merged', 'error'); return; }
+  $('mt-modal-title').textContent = copy.title;
+  $('mt-modal-subtitle').textContent = 'Loading catalog...';
+  $('mt-search-label').textContent = copy.search;
+  $('mt-select-label').textContent = copy.select;
+  $('merge-target-hint').textContent = copy.hint;
+  $('merge-target-search').value = '';
+  $('merge-target-select').innerHTML = '';
+  $('merge-target-preview').textContent = '';
+  $('merge-target-save').textContent = kind === 'cycle' ? 'Move cycle' : 'Merge';
+  $('merge-target-save').disabled = true;
+  $('merge-target-modal').removeAttribute('hidden');
+  try {
+    await ensureCatalogItems();
+  } catch (e) { toast(e.message, 'error'); closeMergeTargetModal(); return; }
+  // A late-arriving fetch must not repopulate a dialog the admin already closed/reopened.
+  if ($('merge-target-modal').hasAttribute('hidden')) return;
+  // `label` may be a thunk: the moderation queue's label needs the device listing, which
+  // only exists after ensureCatalogItems() above.
+  const caption = (typeof label === 'function' ? label() : label) || id;
+  $('mt-modal-subtitle').textContent = caption;
+  _mergeCtx = { kind, id, label: caption, obj: obj || null, onDone, options: mtCandidates(kind, id, obj) };
+  mtFilterOptions();
+  $('merge-target-search').focus();
+}
+
+function closeMergeTargetModal() {
+  $('merge-target-modal').setAttribute('hidden', '');
+  _mergeCtx = null;
+}
+
+$('merge-target-close').addEventListener('click', closeMergeTargetModal);
+$('merge-target-cancel').addEventListener('click', closeMergeTargetModal);
+$('merge-target-modal').addEventListener('click', (e) => {
+  if (e.target === $('merge-target-modal')) closeMergeTargetModal();
+});
+$('merge-target-search').addEventListener('input', () => { if (_mergeCtx) mtFilterOptions(); });
+$('merge-target-select').addEventListener('change', () => { if (_mergeCtx) mtRenderPreview(); });
+$('merge-target-select').addEventListener('dblclick', () => {
+  if (_mergeCtx && !$('merge-target-save').disabled) $('merge-target-save').click();
+});
+
+// Run the merge for the resolved target. Deliberately NOT wrapped in reloadCatalog(): the
+// caller's onDone decides what to refresh, because the moderation queue and the catalog need
+// different follow-ups.
+$('merge-target-save').addEventListener('click', async () => {
+  if (!_mergeCtx) return;
+  const res = mtResolve();
+  if (!res.ok) return;
+  const { kind, id, label, onDone } = _mergeCtx;
+  const question = kind === 'cycle'
+    ? `Move "${label}" to "${res.targetLabel}"?`
+    : `Merge "${label}" into "${res.targetLabel}"? All of its data is reassigned and `
+      + 'the source entry is deleted. This cannot be undone.';
+  if (!confirm(question)) return;
+  const btn = $('merge-target-save');
+  btn.disabled = true;
+  try {
+    let out;
+    if (kind === 'brand') out = await adminMergeBrands(id, res.target);
+    else if (kind === 'device') out = await adminMergeDevices(id, res.target);
+    else if (kind === 'profile') out = await adminMergeProfiles(id, res.target);
+    else out = await adminMoveCycle(id, res.target);
+    // A brand merge is a per-device loop, so it can partly fail; say so instead of
+    // reporting a clean success.
+    if (out && Array.isArray(out.failed) && out.failed.length) {
+      toast(`${out.failed.length} device(s) could not be moved: ${out.failed[0].error}`, 'error');
+    } else {
+      toast(kind === 'cycle' ? 'Cycle moved' : 'Merged');
+    }
+    closeMergeTargetModal();
+    _catalogLoaded = false;   // the merge changed doc ids; the cached listings are stale
+    if (onDone) await onDone(out);
+  } catch (e) { btn.disabled = false; toast(e.message, 'error'); }
+});
+
 // Level 1 — Brands
 function renderCatBrands() {
   // Merge/rename brands (e.g. fold "bosh" into "Bosch"). The target select carries the brand
@@ -780,6 +1019,14 @@ function renderCatDevices() {
       const ownerBtn = document.createElement('button'); ownerBtn.className = 'btn btn-ghost btn-sm'; ownerBtn.textContent = 'Set owner';
       ownerBtn.addEventListener('click', () => openOwnerPicker(device, card));
       cell.appendChild(ownerBtn);
+      // The merge bar above only lists THIS brand's devices; the picker reaches any device
+      // of the same appliance type, which is what a duplicate under a misspelled brand needs.
+      const mergeBtn = document.createElement('button'); mergeBtn.className = 'btn btn-ghost btn-sm'; mergeBtn.textContent = 'Merge into...';
+      mergeBtn.addEventListener('click', () => openMergeTargetModal({
+        kind: 'device', id: device.id, label: mtDeviceLabel(device), obj: device,
+        onDone: reloadCatalog,
+      }));
+      cell.appendChild(mergeBtn);
       const drill = document.createElement('button'); drill.className = 'btn-drill'; drill.textContent = 'Profiles →';
       drill.addEventListener('click', () => catNavigate('profiles', _catBrand, device));
       cell.appendChild(drill);
@@ -822,6 +1069,14 @@ function renderCatProfiles() {
       const ownerBtn = document.createElement('button'); ownerBtn.className = 'btn btn-ghost btn-sm'; ownerBtn.textContent = 'Set owner';
       ownerBtn.addEventListener('click', () => openOwnerPicker(profile, card, true));
       cell.appendChild(ownerBtn);
+      // The merge bar above only lists THIS device's programs; the picker also reaches a
+      // program on another device (a cycle set filed under the wrong model).
+      const mergeBtn = document.createElement('button'); mergeBtn.className = 'btn btn-ghost btn-sm'; mergeBtn.textContent = 'Merge into...';
+      mergeBtn.addEventListener('click', () => openMergeTargetModal({
+        kind: 'profile', id: profile.id, label: mtProfileLabel(profile), obj: profile,
+        onDone: reloadCatalog,
+      }));
+      cell.appendChild(mergeBtn);
       const drill = document.createElement('button'); drill.className = 'btn-drill'; drill.textContent = 'Cycles →';
       drill.addEventListener('click', () => catNavigate('cycles', _catBrand, _catDevice, profile));
       cell.appendChild(drill);
@@ -1148,6 +1403,21 @@ async function hydrateReportGroupCard(card, g) {
   renderReportGroupActions(card.querySelector('[data-actions]'), g, live, creatorUid);
 }
 
+// Short label for the reported object, built from the TRUSTED live doc (never the
+// reporter-supplied targetLabel). Used as the merge dialog's "source" caption.
+function reportSourceLabel(g, live) {
+  if (!live) return g.targetId;
+  if (g.targetType === 'brand') return live.brand || g.targetId;
+  if (g.targetType === 'device') return `${live.brand || ''} ${live.model || ''}`.trim() || g.targetId;
+  if (g.targetType === 'profile' || g.targetType === 'cycle') {
+    const dev = _deviceItems.find((d) => d.id === live.deviceId);
+    const devLabel = dev ? `${dev.brand || ''} ${dev.model || ''}`.trim() : (live.deviceId || '');
+    const program = live.program || live.program_lc || '';
+    return [devLabel, program].filter(Boolean).join(' > ') || g.targetId;
+  }
+  return g.targetId;
+}
+
 // Fill in a human-readable identity line for a reported object so an admin can identify
 // exactly what is referenced (brand / model / program / uploader / date) without decoding the
 // raw Firestore path. `live` is the trusted live object (from adminGetByPath); null == gone.
@@ -1268,11 +1538,14 @@ function renderReportGroupActions(container, g, live, creatorUid) {
     container.innerHTML = `<span class="text-muted" style="font-size:.75rem">Resolved${r0.resolution ? ` (${esc(r0.resolution)})` : ''} ${r0.resolvedAt ? '&middot; ' + formatDate(r0.resolvedAt) : ''}</span>`;
     return;
   }
+  // A merge is a correction, not a takedown: the contributor's data survives under the
+  // canonical entry, so it must not count as removed content against them.
+  const NO_STRIKE = ['dismissed', 'merged'];
   const finish = (verb, resolution) => async () => {
     // Resolve reports first (the only step that can throw). The strike bump is best-effort
     // and never throws, and runs after, so a failed-then-retried action can't double-count.
     await adminResolveReports(g.targetPath, resolution);
-    if (creatorUid && resolution !== 'dismissed') await adminRecordRemoval(creatorUid);
+    if (creatorUid && !NO_STRIKE.includes(resolution)) await adminRecordRemoval(creatorUid);
     container.closest('.report-group').remove();
     toast(`Reports ${verb}`);
     // The soft-remove/delete paths also change the pending/removed dashboard tiles, so drop
@@ -1310,6 +1583,23 @@ function renderReportGroupActions(container, g, live, creatorUid) {
 
   if (!objGone && softRemove) {
     mk('Remove (hide)', 'btn-ghost', async () => { await softRemove(); await finish('cleared - object removed', 'removed')(); });
+  }
+  // Fold a duplicate/misspelled entry into the canonical one instead of deleting it -- the
+  // common outcome for a "duplicate" or "wrong data" report on a catalog object. The merge
+  // itself runs from the picker; only when it succeeds are the reports resolved (so a failed
+  // merge leaves the card in the queue). Comments have nothing to merge into.
+  if (!objGone && g.targetType !== 'comment') {
+    mk('Merge into...', 'btn-ghost', async () => {
+      await openMergeTargetModal({
+        kind: g.targetType,
+        id: g.targetId,
+        label: () => reportSourceLabel(g, live),
+        obj: live,
+        onDone: async () => {
+          await finish(g.targetType === 'cycle' ? 'resolved - cycle moved' : 'resolved - merged', 'merged')();
+        },
+      });
+    });
   }
   if (!objGone && hardDelete) {
     mk('Delete permanently', 'btn-danger', async () => {

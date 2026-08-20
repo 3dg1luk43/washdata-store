@@ -360,6 +360,35 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="merge-target-modal" hidden aria-modal="true" role="dialog">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-header">
+        <div>
+          <h2 class="modal-title" id="mt-modal-title">Merge into another entry</h2>
+          <div class="modal-subtitle" id="mt-modal-subtitle"></div>
+        </div>
+        <button class="modal-close" id="merge-target-close" aria-label="Close">&#215;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="merge-target-search" id="mt-search-label">Search</label>
+          <input type="text" id="merge-target-search" autocomplete="off" placeholder="Filter by name&hellip;">
+        </div>
+        <div class="form-group">
+          <label for="merge-target-select" id="mt-select-label">Target</label>
+          <select id="merge-target-select" size="8" style="width:100%"></select>
+          <div class="form-hint" id="merge-target-empty" hidden></div>
+        </div>
+        <div class="mt-preview" id="merge-target-preview"></div>
+        <div class="form-hint" id="merge-target-hint"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost btn-sm" id="merge-target-cancel">Cancel</button>
+        <button class="btn btn-danger btn-sm" id="merge-target-save">Merge</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast-container" id="toasts" aria-live="assertive" aria-atomic="true"></div>
   <script type="module" src="admin.js"></script>
 </body>

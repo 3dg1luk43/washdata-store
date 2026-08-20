@@ -1822,6 +1822,25 @@ input[type="url"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
 .report-identity .ri-sep { color: var(--text-muted); }
 .report-identity .ri-view { margin-left: .25rem; }
 .report-path { font-size: .7rem; color: var(--text-muted); margin: .15rem 0 .6rem; word-break: break-all; }
+
+/* Merge-target picker (moderation queue + catalog): the resolved "source -> target" line
+   under the picker, so an admin sees exactly what the button will do before pressing it. */
+.mt-preview {
+  font-size: .8125rem;
+  line-height: 1.5;
+  padding: .5rem .65rem;
+  border-radius: var(--radius-sm);
+  background: var(--accent-dim);
+  border: 1px solid var(--border);
+  margin-bottom: .6rem;
+  word-break: break-word;
+}
+.mt-preview:empty { display: none; }
+.mt-preview .mt-from { font-weight: 600; }
+.mt-preview .mt-to { font-weight: 600; color: var(--accent); }
+.mt-preview .mt-new { color: var(--warning); }
+.mt-preview.mt-blocked { background: var(--danger-dim, var(--accent-dim)); border-color: var(--danger); }
+.mt-preview.mt-blocked .mt-to { color: var(--danger); }
 .report-creator { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
 .report-creator-name { font-size: .8125rem; font-weight: 600; }
 
