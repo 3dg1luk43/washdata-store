@@ -27,7 +27,7 @@ import {
   getProfileRating, ratingSummaryFromDoc,
   applianceLabel, confirmThresholdValue,
   getSiteConfig,
-  getUserDoc, subscribeUserStatus,
+  subscribeUserStatus,
   logStoreEvent,
   submitReport, hasReported, REPORT_REASONS, reportTargetPath,
 } from './washstore.js';
@@ -66,6 +66,13 @@ let _device = null;
 let _profile = null;
 let _browseCursor = null;
 let _browseFilters = { search: '', favoritesOnly: false, approvedOnly: false, minRating: 0 };
+// Signature of the filters that actually reach Firestore, so an unchanged filter set does
+// not re-issue the query. minRating is excluded: it re-gates already-loaded cards
+// client-side and never triggers a read.
+function _queryFilterKey(f) {
+  return `${f.search.toLowerCase()}|${f.favoritesOnly ? 1 : 0}|${f.approvedOnly ? 1 : 0}`;
+}
+let _lastQueryFilterKey = null;
 let _favorites = new Set();
 let _confirmThreshold = 5;
 let _openRecord = null;
@@ -76,6 +83,43 @@ let _userStatusUnsub = null;
 const _ratingCache = new Map();        // cycleId  -> Promise<{avg,count}>
 const _deviceRatingCache = new Map();  // deviceId -> Promise<{avg,count}>
 const _profileRatingCache = new Map(); // profileId-> Promise<{avg,count}> (derived from cycles)
+// The signed-in user's own confirmation / rating for a device are point reads into
+// per-user subcollections, issued once per rendered card. They were uncached, so every
+// re-render of the same cards -- flipping the appliance-type filter, changing the min
+// rating, or signing in with cards already on screen -- re-read the same two documents
+// and learned nothing new (a 14-device brand cost 28 reads per flip). These answers only
+// change when THIS user acts, and both actions update the cache directly.
+const _myConfirmCache = new Map();     // deviceId -> Promise<confirmed doc id | null>
+const _myDeviceRating = new Map();     // deviceId -> Promise<rating 1-5 | 0>
+const _myCycleConfirm = new Map();     // cycleId  -> Promise<confirmed doc id | null>
+
+// Dropped on sign-in/sign-out: the cached answers belong to the previous account.
+function clearPerUserCaches() {
+  _myConfirmCache.clear();
+  _myDeviceRating.clear();
+  _myCycleConfirm.clear();
+}
+
+function myConfirmedDevice(deviceId) {
+  if (!_myConfirmCache.has(deviceId)) {
+    _myConfirmCache.set(deviceId, hasConfirmedDevice(deviceId).catch(() => null));
+  }
+  return _myConfirmCache.get(deviceId);
+}
+
+function myDeviceRating(deviceId) {
+  if (!_myDeviceRating.has(deviceId)) {
+    _myDeviceRating.set(deviceId, getUserDeviceRating(deviceId).catch(() => 0));
+  }
+  return _myDeviceRating.get(deviceId);
+}
+
+function myConfirmedCycle(cycleId) {
+  if (!_myCycleConfirm.has(cycleId)) {
+    _myCycleConfirm.set(cycleId, hasConfirmedCycle(cycleId).catch(() => null));
+  }
+  return _myCycleConfirm.get(cycleId);
+}
 
 // ============================================================ dom + toast
 function $(id) { return document.getElementById(id); }
@@ -113,7 +157,15 @@ function reconcile() {
 }
 
 function browseVisible() { return _maintenanceKnown && (!_maintenance || _adminFlag); }
-function maybeLoadBrowse() { if (browseVisible() && !_browseLoaded) { _browseLoaded = true; loadBrands(true); } }
+function maybeLoadBrowse() {
+  if (browseVisible() && !_browseLoaded) {
+    _browseLoaded = true;
+    // Seed the query-filter signature so pressing Apply with untouched filters recognises
+    // that the initial load already answered it (see _applyFilters).
+    _lastQueryFilterKey = _queryFilterKey(_browseFilters);
+    loadBrands(true);
+  }
+}
 
 // ============================================================ helpers
 function _pluralize(n, word) { return `${n} ${word}${n === 1 ? '' : 's'}`; }
@@ -319,20 +371,23 @@ onAuth(async (user) => {
   _user = user;
   _adminFlag = false;
   _favorites = new Set();
+  clearPerUserCaches();   // "did I confirm/rate this" is answered per account
   // Clean up any previous status listener
   if (_userStatusUnsub) { _userStatusUnsub(); _userStatusUnsub = null; }
   renderAuthArea(user);
   if (user) {
-    try { await ensureUserProfile(user); } catch (_) {}
-    // Check ban status on login; also grab githubLogin for the name chip.
+    // One read of users/{uid} serves the ban check, the name chip AND favorites.
+    // These were three separate getDoc calls on the same document (plus the realtime
+    // listener below), i.e. four reads of one document on every signed-in page load.
+    let profile = null;
+    try { profile = await ensureUserProfile(user); } catch (_) {}
     try {
-      const snap = await getUserDoc(user.uid);
-      if (snap && snap.status === 'banned') {
+      if (profile && profile.status === 'banned') {
         await signOutUser();
-        showBannedMessage(snap.banReason);
+        showBannedMessage(profile.banReason);
         return;
       }
-      if (snap && snap.githubLogin) renderAuthArea(user, snap.githubLogin);
+      if (profile && profile.githubLogin) renderAuthArea(user, profile.githubLogin);
     } catch (_) {}
     // Real-time listener: sign out immediately if banned by admin
     try {
@@ -344,7 +399,10 @@ onAuth(async (user) => {
       });
     } catch (_) {}
     try { _adminFlag = await isAdmin(); } catch (_) {}
-    try { _favorites = new Set(await getFavorites()); } catch (_) {}
+    // Favorites ride on the profile read above; only fall back to a dedicated read if
+    // that failed (e.g. a transient error), so the normal path costs nothing extra.
+    if (profile) _favorites = new Set(profile.favorites || []);
+    else { try { _favorites = new Set(await getFavorites()); } catch (_) {} }
   }
   $('admin-link').toggleAttribute('hidden', !_adminFlag);
   _authKnown = true;
@@ -575,14 +633,14 @@ function renderDeviceCommunity(box, d) {
     <div class="device-stars" data-stars></div>`;
   const confirmBtn = box.querySelector('[data-confirm]');
   confirmBtn.addEventListener('click', () => doConfirmDevice(box, d, confirmBtn));
-  hasConfirmedDevice(d.id)
+  myConfirmedDevice(d.id)
     .then((did) => { if (did) { confirmBtn.disabled = true; confirmBtn.textContent = 'You confirmed this'; } })
     .catch(() => {});
   // Interactive quality stars, rendered inline (current rating + aggregate loaded once).
   const wrap = box.querySelector('[data-stars]');
   wrap.innerHTML = '<span class="text-muted" style="font-size:.75rem">Loading rating&hellip;</span>';
   Promise.all([
-    getUserDeviceRating(d.id).catch(() => 0),
+    myDeviceRating(d.id),
     resolveDeviceQuality(d).catch(() => ({ avg: null, count: 0 })),
   ]).then(([current, summary]) => renderDeviceStars(wrap, d, current || 0, summary));
 }
@@ -593,6 +651,7 @@ async function doConfirmDevice(box, d, btn) {
     const res = await confirmDevice(d.id);
     d.confirmCount = res.confirmCount; d.status = res.status;
     btn.textContent = 'You confirmed this';
+    _myConfirmCache.set(d.id, Promise.resolve(d.id));  // known without a re-read
     trackEvent('store_device_confirm');
     logStoreEvent('device_confirms');
     const msg = box.querySelector('[data-msg]');
@@ -619,6 +678,7 @@ function renderDeviceStars(wrap, d, current, summary) {
       trackEvent('store_device_rate', { rating: n });
       logStoreEvent('device_ratings');
       _deviceRatingCache.delete(d.id); // aggregate changed - drop the cached summary
+      _myDeviceRating.set(d.id, Promise.resolve(n)); // we know our own rating now
       let fresh = { avg: null, count: 0 };
       try { fresh = await fetchDeviceQuality(d.id); } catch (_) {}
       renderDeviceStars(wrap, d, n, fresh);
@@ -824,13 +884,14 @@ function renderCycleCommunity(box, c) {
   }
   box.innerHTML = `<button class="btn btn-ghost btn-sm" data-confirm>Confirm this cycle</button><span class="community-msg text-muted" data-msg></span>`;
   const btn = box.querySelector('[data-confirm]');
-  hasConfirmedCycle(c.id).then((did) => { if (did) { btn.disabled = true; btn.textContent = 'You confirmed this'; } }).catch(() => {});
+  myConfirmedCycle(c.id).then((did) => { if (did) { btn.disabled = true; btn.textContent = 'You confirmed this'; } }).catch(() => {});
   btn.addEventListener('click', async () => {
     btn.disabled = true;
     try {
       const res = await confirmCycle(c.id);
       c.confirmCount = res.confirmCount; c.status = res.status;
       btn.textContent = 'You confirmed this';
+      _myCycleConfirm.set(c.id, Promise.resolve(c.id));  // known without a re-read
       const badges = box.closest('.card') ? box.closest('.card').querySelector('.badge-pending') : null;
       const msg = box.querySelector('[data-msg]');
       if (res.status === 'approved') { if (badges) badges.remove(); if (msg) msg.textContent = 'Approved by the community'; }
@@ -844,13 +905,19 @@ function renderCycleCommunity(box, c) {
   });
 }
 
-function _applyFilters() {
+function _applyFilters(force = false) {
   _browseFilters = {
     search: $('filter-brand').value.trim(),
     favoritesOnly: $('filter-favorites').checked,
     approvedOnly: $('filter-approved') ? $('filter-approved').checked : false,
     minRating: $('filter-rating') ? Number($('filter-rating').value) || 0 : 0,
   };
+  // Pressing Apply after typing (or after the debounce already fired) used to re-run the
+  // identical query, and a brand search is uncached by design -- so an unchanged filter
+  // set cost two more document reads for a result already on screen.
+  const key = _queryFilterKey(_browseFilters);
+  if (!force && key === _lastQueryFilterKey) { reapplyRatingGates(); return; }
+  _lastQueryFilterKey = key;
   if (_browseFilters.search) {
     trackEvent('store_search', { query_length: _browseFilters.search.length });
     logStoreEvent('searches');
@@ -858,15 +925,15 @@ function _applyFilters() {
   loadBrands(true);
 }
 let _filterTimer = null;
-$('filter-brand').addEventListener('input', () => { clearTimeout(_filterTimer); _filterTimer = setTimeout(_applyFilters, 350); });
-$('filter-favorites').addEventListener('change', _applyFilters);
-if ($('filter-approved')) $('filter-approved').addEventListener('change', _applyFilters);
+$('filter-brand').addEventListener('input', () => { clearTimeout(_filterTimer); _filterTimer = setTimeout(() => _applyFilters(), 350); });
+$('filter-favorites').addEventListener('change', () => _applyFilters());
+if ($('filter-approved')) $('filter-approved').addEventListener('change', () => _applyFilters());
 // Min-rating filters live (re-gate the shown cards) without a full reload.
 if ($('filter-rating')) $('filter-rating').addEventListener('change', () => {
   _browseFilters.minRating = Number($('filter-rating').value) || 0;
   reapplyRatingGates();
 });
-$('filter-apply').addEventListener('click', _applyFilters);
+$('filter-apply').addEventListener('click', () => _applyFilters());
 $('filter-clear').addEventListener('click', () => {
   $('filter-brand').value = ''; $('filter-favorites').checked = false;
   if ($('filter-approved')) $('filter-approved').checked = false;

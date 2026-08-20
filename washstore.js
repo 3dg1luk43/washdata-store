@@ -159,11 +159,14 @@ const _LASTSEEN_THROTTLE_MS = 6 * 60 * 60 * 1000;
 // githubLogin is only available from getAdditionalUserInfo immediately after
 // signInWithPopup — pass it here from signIn() so it lands in the doc atomically.
 // On page-load auth (onAuth), githubLogin is null and the existing stored value is kept.
+// Returns the user's profile data (post-update), so callers that need the ban status,
+// githubLogin or favorites can reuse this single read instead of re-fetching the same
+// document -- the sign-in path was reading users/{uid} four times per page load.
 export async function ensureUserProfile(user, githubLogin = null) {
   const ref = doc(_db, 'users', user.uid);
   const snap = await getDoc(ref);
   if (!snap.exists()) {
-    await setDoc(ref, {
+    const created = {
       uid: user.uid,
       displayName: user.displayName || null,
       photoURL: user.photoURL || null,
@@ -172,8 +175,11 @@ export async function ensureUserProfile(user, githubLogin = null) {
       status: 'active',
       favorites: [],
       ...(githubLogin ? { githubLogin } : {}),
-    }, { merge: true });
-    return;
+    };
+    await setDoc(ref, created, { merge: true });
+    // The serverTimestamp() sentinels are not readable values; callers only look at
+    // status/githubLogin/favorites, so hand back the resolved shape for those.
+    return { ...created, createdAt: null, lastSeen: null };
   }
   const data = snap.data();
   const updates = {};
@@ -189,6 +195,8 @@ export async function ensureUserProfile(user, githubLogin = null) {
   const last = data.lastSeen && data.lastSeen.toMillis ? data.lastSeen.toMillis() : 0;
   if (Date.now() - last > _LASTSEEN_THROTTLE_MS) updates.lastSeen = serverTimestamp();
   if (Object.keys(updates).length) await updateDoc(ref, updates);
+  // Merge the writes we just made so the caller sees the same state a re-read would show.
+  return { ...data, ...updates, lastSeen: data.lastSeen };
 }
 
 export async function getUserDoc(uid) {
@@ -778,6 +786,16 @@ export async function getProfileRating(profileId, { includePending = true } = {}
         { field: 'profileId', op: 'EQUAL', value: profileId },
         { field: 'status', op: 'EQUAL', value: status },
       ],
+      // Only the two denormalized aggregate fields are needed. Without this projection the
+      // query downloaded whole cycle documents -- `trace.points`, up to MAX_DOC_BYTES each
+      // -- to read two integers, for every profile row on every device page.
+      select: ['ratingSum', 'ratingCount'],
+      // The equality pair alone leaves the implicit `__name__ ASC` ordering, which the
+      // deployed (profileId, status, createdAt DESC) index cannot serve -- Firestore then
+      // falls back to merging the single-field indexes, and the `status` one spans every
+      // cycle in the store (observed: ~10.6 index entries scanned per 0.55 documents
+      // returned). Ordering by createdAt puts the query back on that composite index.
+      orderBy: [{ field: 'createdAt', dir: 'DESCENDING' }],
       limit: 40,
     });
     const groups = includePending ? await Promise.all([q('approved'), q('pending')]) : [await q('approved')];

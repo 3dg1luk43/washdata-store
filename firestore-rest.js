@@ -80,10 +80,16 @@ function decodeDoc(doc) {
 }
 
 // --- queries ---
-// opts: { filters, orderBy:[{field,dir}], limit, startAfter:[values], parent }
+// opts: { filters, orderBy:[{field,dir}], limit, startAfter:[values], parent, select }
 // parent (e.g. "cycles/abc") scopes the query to a subcollection.
+//
+// `select` is a field allow-list (Firestore projection). It does NOT reduce the billed
+// document count -- Firestore charges per document read regardless -- but it does decide
+// how many bytes cross the wire, which matters a great deal here: cycle documents carry
+// `trace.points` and are capped at MAX_DOC_BYTES (900 KB), so a query that wants two
+// integers off 40 of them would otherwise download tens of megabytes.
 export async function restQuery(collectionId, opts = {}) {
-  const { filters = [], orderBy = [], limit, startAfter, parent, allDescendants = false } = opts;
+  const { filters = [], orderBy = [], limit, startAfter, parent, allDescendants = false, select } = opts;
   // allDescendants=true turns this into a collection-group query (every subcollection with
   // this id at any depth). Collection-group queries always run from the database root, so
   // `parent` is ignored in that mode.
@@ -91,6 +97,7 @@ export async function restQuery(collectionId, opts = {}) {
   const ff = filters.map((f) => ({ fieldFilter: { field: { fieldPath: f.field }, op: f.op, value: encodeValue(f.value) } }));
   if (ff.length === 1) sq.where = ff[0];
   else if (ff.length > 1) sq.where = { compositeFilter: { op: 'AND', filters: ff } };
+  if (Array.isArray(select) && select.length) sq.select = { fields: select.map((f) => ({ fieldPath: f })) };
   if (orderBy.length) sq.orderBy = orderBy.map((o) => ({ field: { fieldPath: o.field }, direction: o.dir || 'ASCENDING' }));
   if (limit) sq.limit = limit;
   if (Array.isArray(startAfter) && startAfter.length) {

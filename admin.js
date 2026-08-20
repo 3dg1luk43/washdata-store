@@ -211,8 +211,9 @@ onAuth(async (user) => {
   $('admin-denied').setAttribute('hidden', ''); $('admin-panel').removeAttribute('hidden');
   loadOverview();
   loadMaintenance();
-  // Pre-load users in background so owner labels resolve in Devices/Profiles tabs.
-  loadUsers(true).catch(() => {});
+  // Users are NOT pre-loaded: that was 40 document reads on every admin page load for a
+  // tab the admin may never open. The Users tab loads its own data, the owner picker
+  // loads it on demand, and owner labels fall back to a truncated uid without it.
 });
 
 // ============================================================ tabs
@@ -440,9 +441,17 @@ if ($('cy-filter-rating')) $('cy-filter-rating').addEventListener('change', appl
 $('cycles-load-more').addEventListener('click', () => loadCycles(false));
 
 // ============================================================ owner picker modal
-function populateOwnerPicker(currentOwnerId) {
+async function populateOwnerPicker(currentOwnerId) {
   const sel = $('owner-picker-select');
   if (!sel) return;
+  // The user list used to be pre-loaded on every admin page load (40 documents) purely so
+  // this picker and the owner labels would be populated if the admin happened to open
+  // them. It is loaded here instead, when it is actually needed; owner labels elsewhere
+  // already fall back to a truncated uid when the list is absent.
+  if (!_userItems.length) {
+    sel.innerHTML = '<option value="">Loading users...</option>';
+    try { await loadUsers(true); } catch (_) { /* fall through to the None-only list */ }
+  }
   const opts = _userItems.map((u) => `<option value="${esc(u.uid)}">${esc(u.githubLogin || u.displayName || u.uid.slice(0, 12))} (${esc(u.uid.slice(0, 8))})</option>`).join('');
   sel.innerHTML = '<option value="">-- None (remove owner) --</option>' + opts;
   if (currentOwnerId) sel.value = currentOwnerId;
@@ -451,7 +460,7 @@ function populateOwnerPicker(currentOwnerId) {
 function openOwnerPicker(record, card, isProfile = false) {
   _ownerPickerCtx = { record, isProfile, card };
   $('owner-picker-modal-title').textContent = isProfile ? 'Set Profile Owner' : 'Set Device Owner';
-  populateOwnerPicker(record.ownerId);
+  populateOwnerPicker(record.ownerId).catch(() => {});   // fills asynchronously; modal is already up
   $('owner-picker-modal').removeAttribute('hidden');
   $('owner-picker-save').onclick = async () => {
     const uid = $('owner-picker-select').value || null;
