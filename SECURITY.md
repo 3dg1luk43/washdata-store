@@ -42,6 +42,12 @@ is not protected, and the residual risks an operator should know about.
   average stored on the cycle. The displayed average and count are computed at read time with a
   server-side aggregation query over that subcollection, so they always reflect the real
   per-user ratings.
+- **Favorite counts are a vanity signal, not a vote.** `favoriteCount` on a device is the one
+  field any signed-in GitHub user may change with no further checks, and only by plus or minus one
+  per write. Nothing enforces one nudge per user, so a determined caller can inflate it. The
+  authoritative record is the per-user list on `users/{uid}`. This is deliberately un-gated because
+  nothing depends on it: promotion is driven by `confirmCount`, a one-way per-user vote held in a
+  subcollection, which cannot be gamed the same way.
 - **The `qc` provenance code is obscured, not secret.** Each cycle carries an integer
   provenance hint (how the recording was produced) that only the admin UI decodes to a label.
   Because approved cycles are world-readable, this is deliberate obscurity for a low-stakes

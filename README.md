@@ -21,6 +21,11 @@ No account is needed to browse or download. Open the store, pick a brand, drill 
 
 For a faster path, use the built-in adopt flow in the ha_washdata panel: when the store has a matching device, the panel offers a one-click **Adopt** button that imports a full device package directly into your integration without leaving Home Assistant.
 
+Signed-in users can **favorite** a device with the star on its card. Favorites are stored on
+your own `users/{uid}` document, and the browse view has a **Favorites only** filter alongside
+the search, approved-only and minimum-rating filters, so a shortlist of candidate models stays one
+click away. Each device also shows a `favoriteCount` as a rough popularity signal.
+
 **What a device package includes:**
 
 - All programs listed for that device
@@ -107,6 +112,9 @@ Reference cycles are stored as a sequence of `(offset_seconds, watts)` samples. 
 
 Internally, cycles are downsampled to at most 10,000 points using LTTB (Largest Triangle Three Buckets) before being stored in Firestore as `{o, w}` map objects (Firestore forbids nested arrays). LTTB preserves peaks and troughs by selecting the most visually significant sample in each bucket rather than picking by index, so narrow transients (heater pulses, pump-out spikes) are retained rather than silently dropped. Statistics -- duration, energy in Wh, peak watts, mean watts -- are derived from the stored trace, so they are always consistent with what you see in the power graph.
 
+Each stored cycle carries a `cycleSchemaVersion` so the format can evolve without breaking older
+documents; the current value is shown in the cycle detail panel and in the admin UI.
+
 The `qc` field records provenance: `1` = raw recording from ha_washdata, `2` = trimmed or edited, `3` = manually composed in the browser. Cycles uploaded from ha_washdata carry the appropriate code automatically.
 
 ---
@@ -144,7 +152,7 @@ cycles/{cycleId}
   └─ comments/{commentId}
   └─ ratings/{uid}
 admins/{uid}
-users/{uid}
+users/{uid}                 (own favorites, moderation fields)
 config/site                (maintenance flag, confirmThreshold)
 ```
 
