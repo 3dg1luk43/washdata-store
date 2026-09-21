@@ -46,6 +46,10 @@ function encodeValue(v) {
   if (typeof v === 'number') return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
   if (v instanceof Date) return { timestampValue: v.toISOString() };
   if (v && v._ts) return { timestampValue: v._ts };
+  // Cursor value for an `__name__` sort key. Firestore rejects a document path sent as a
+  // plain stringValue here, so callers pass { _ref: 'devices/abc' } and we expand it to the
+  // fully-qualified reference the API expects.
+  if (v && v._ref) return { referenceValue: `projects/${PID}/databases/(default)/documents/${v._ref}` };
   return { stringValue: String(v) };
 }
 

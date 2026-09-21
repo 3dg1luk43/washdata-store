@@ -25,7 +25,7 @@ import {
   confirmDevice, rateDevice, getDeviceQuality, getUserDeviceRating, hasConfirmedDevice,
   confirmCycle, hasConfirmedCycle,
   getProfileRating, ratingSummaryFromDoc,
-  applianceLabel, confirmThresholdValue, brandConfirmThresholdValue,
+  applianceLabel, confirmThresholdValue, brandConfirmThresholdValue, APPLIANCE_TYPES,
   getSiteConfig,
   subscribeUserStatus,
   logStoreEvent,
@@ -530,53 +530,97 @@ function buildBrandCard(b) {
 // ============================================================ browse: brand -> devices
 let _brandDevices = [];
 let _brandTypeFilter = '';
+let _brandCursor = null;
 
 async function openBrand(b) {
   trackEvent('store_brand_view', { brand: b.brand });
   logStoreEvent('brand_views');
   _brand = b; _device = null; _profile = null; _view = 'brand';
-  _brandDevices = []; _brandTypeFilter = '';
+  _brandTypeFilter = '';
   $('filter-rail').setAttribute('hidden', '');
-  $('load-more-btn').setAttribute('hidden', '');
   renderBreadcrumb();
   renderOwnerActions(null);
-  const body = $('browse-body');
-  body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
-  try {
-    const { items } = await getDevicesByBrand(b.brand_lc, { pageSize: 60, includePending: !_browseFilters.approvedOnly });
-    _brandDevices = items;
-    renderBrandDevices();
-  } catch (e) { body.innerHTML = emptyHTML('&#9888;', 'Failed to load', esc(e.message)); }
+  return loadBrandDevices(true);
 }
 
-// Render the brand's appliances with a device-type filter (client-side over the
-// already-fetched list, so switching type is instant).
-function renderBrandDevices() {
+// Fetch a page of the brand's appliances. The appliance-type filter is part of the QUERY,
+// not a pass over the rendered cards: a brand can hold far more models than one page, so a
+// client-side filter can only show the types that happened to make the page.
+async function loadBrandDevices(reset = false) {
+  const body = $('browse-body');
+  if (reset) {
+    _brandDevices = []; _brandCursor = null;
+    body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
+    $('load-more-btn').setAttribute('hidden', '');
+  }
+  const spinner = reset ? null : loadingPlaceholder();
+  if (spinner) (body.querySelector('.card-grid') || body).appendChild(spinner);
+  try {
+    const { items, cursor } = await getDevicesByBrand(_brand.brand_lc, {
+      applianceType: _brandTypeFilter || null,
+      pageSize: 60,
+      includePending: !_browseFilters.approvedOnly,
+      cursor: _brandCursor,
+    });
+    // Dedupe across pages: the approved and pending cursors advance independently.
+    const seen = new Set(_brandDevices.map((d) => d.id));
+    _brandDevices = _brandDevices.concat(items.filter((d) => !seen.has(d.id)));
+    _brandCursor = cursor;
+    if (spinner) spinner.remove();
+    renderBrandDevices(!reset);
+  } catch (e) {
+    if (spinner) spinner.remove();
+    if (reset) body.innerHTML = emptyHTML('&#9888;', 'Failed to load', esc(e.message));
+    else toast(e.message, 'error');
+  }
+}
+
+// Render the fetched page(s). `append` adds only the cards that are not on screen yet, so
+// Load more does not re-render (and re-fetch the ratings of) what is already there.
+function renderBrandDevices(append = false) {
   const body = $('browse-body');
   if (_brandDevices.length === 0) {
-    body.innerHTML = emptyHTML('&#128203;', 'No models yet', 'No models for this brand yet.') + addApplianceCTA(_brand.brand);
+    const what = _brandTypeFilter ? applianceLabel(_brandTypeFilter).toLowerCase() : 'model';
+    body.innerHTML = emptyHTML('&#128203;', 'Nothing here yet', `No ${what} entries for this brand yet.`)
+      + addApplianceCTA(_brand.brand);
+    renderBrandTypeBar();
+    $('load-more-btn').toggleAttribute('hidden', !_brandCursor);
     return;
   }
-  const types = [...new Set(_brandDevices.map((d) => d.applianceType).filter(Boolean))].sort();
+  let grid = body.querySelector('.card-grid');
+  if (!append || !grid) {
+    body.innerHTML = '';
+    renderBrandTypeBar();
+    grid = document.createElement('div');
+    grid.className = 'card-grid';
+    body.appendChild(grid);
+    const cta = document.createElement('div');
+    cta.innerHTML = addApplianceCTA(_brand.brand);
+    body.appendChild(cta);
+  }
+  const rendered = grid.childElementCount;
+  _brandDevices.slice(rendered).forEach((d) => grid.appendChild(buildDeviceCard(d)));
+  $('load-more-btn').toggleAttribute('hidden', !_brandCursor);
+}
+
+// The type options come from the full APPLIANCE_TYPES list, never from what the current
+// page returned -- otherwise a type with no model on page 1 has no option to select and
+// stays unreachable.
+function renderBrandTypeBar() {
+  const body = $('browse-body');
   const typeOpts = [`<option value="">${esc('All types')}</option>`]
-    .concat(types.map((t) => `<option value="${esc(t)}" ${_brandTypeFilter === t ? 'selected' : ''}>${esc(typeLabel(t))}</option>`))
+    .concat(APPLIANCE_TYPES.map((t) => `<option value="${esc(t)}"${_brandTypeFilter === t ? ' selected' : ''}>${esc(typeLabel(t))}</option>`))
     .join('');
-  const filtered = _brandTypeFilter ? _brandDevices.filter((d) => d.applianceType === _brandTypeFilter) : _brandDevices;
-  body.innerHTML = '';
   const bar = document.createElement('div');
   bar.className = 'filter-rail';
   bar.innerHTML = `<div class="form-group"><label for="brand-type-filter">Appliance type</label>
     <select id="brand-type-filter">${typeOpts}</select></div>`;
   bar.appendChild(buildMinRatingControl()); // filter devices by quality rating
-  body.appendChild(bar);
-  bar.querySelector('#brand-type-filter').addEventListener('change', (e) => { _brandTypeFilter = e.target.value; renderBrandDevices(); });
-  const grid = document.createElement('div');
-  grid.className = 'card-grid';
-  filtered.forEach((d) => grid.appendChild(buildDeviceCard(d)));
-  body.appendChild(grid);
-  const cta = document.createElement('div');
-  cta.innerHTML = addApplianceCTA(_brand.brand);
-  body.appendChild(cta);
+  body.insertBefore(bar, body.firstChild);
+  bar.querySelector('#brand-type-filter').addEventListener('change', (e) => {
+    _brandTypeFilter = e.target.value;
+    loadBrandDevices(true);
+  });
 }
 
 function buildDeviceCard(d) {
@@ -953,7 +997,10 @@ $('filter-clear').addEventListener('click', () => {
   _browseFilters = { search: '', favoritesOnly: false, approvedOnly: false, minRating: 0 };
   loadBrands(true);
 });
-$('load-more-btn').addEventListener('click', () => { if (_view === 'brands') loadBrands(false); });
+$('load-more-btn').addEventListener('click', () => {
+  if (_view === 'brands') loadBrands(false);
+  else if (_view === 'brand') loadBrandDevices(false);
+});
 
 // ============================================================ details modal
 // Prefer the pretty brand/model from the device we navigated through; the deviceId

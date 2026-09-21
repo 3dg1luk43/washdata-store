@@ -81,7 +81,7 @@ export const REPORT_TARGET_TYPES = ['brand', 'device', 'profile', 'cycle', 'comm
 // friendlier client-side gate well below that so uploads fail early with a clear message.
 export const MAX_DOC_BYTES = 900 * 1024;
 
-const APPLIANCE_TYPES = ['washer', 'dryer', 'dishwasher', 'washer_dryer'];
+export const APPLIANCE_TYPES = ['washer', 'dryer', 'dishwasher', 'washer_dryer'];
 
 // Best-effort in-memory write rate limit. This is NOT a security control (a scripted
 // client bypasses it); it stops accidental/casual flooding through the UI. Real
@@ -600,8 +600,10 @@ export async function listBrands({ search = null, pageSize = 60, cursor = null, 
 }
 
 // Devices for a brand (used by brand -> devices browse and by upload autocomplete).
-export async function getDevicesByBrand(brandLc, { applianceType = null, pageSize = 60, includePending = false } = {}) {
-  return searchDevices({ brand: brandLc, applianceType, pageSize, includePending });
+// `applianceType` is resolved SERVER-side: filtering a fetched page in the browser can only
+// ever hide what already arrived, and the page is capped (see _DEVICE_ORDER).
+export async function getDevicesByBrand(brandLc, { applianceType = null, pageSize = 60, includePending = false, cursor = null } = {}) {
+  return searchDevices({ brand: brandLc, applianceType, pageSize, includePending, cursor });
 }
 
 function _deviceFilters(status, applianceType, brand) {
@@ -611,7 +613,32 @@ function _deviceFilters(status, applianceType, brand) {
   return filters;
 }
 
-export async function searchDevices({ applianceType = null, brand = null, favoritesOnly = false, pageSize = 60, includePending = false } = {}) {
+// Popularity first, then the document id as a UNIQUE tiebreak.
+//
+// Naming __name__ explicitly does not change the order and needs no new index: Firestore
+// already appends it in the direction of the last sort key, and favoriteCount is DESCENDING.
+// It changes two things that matter:
+//  - the cursor becomes unique, so pagination is correct. A startAt on favoriteCount alone
+//    lands after the whole tie group, silently skipping every remaining doc that shares the
+//    value -- and nearly every device sits on favoriteCount 0.
+//  - it makes the tiebreak visible at the call site, because it used to decide the whole
+//    page. Device ids are `{type}__{brand}__{model}`, so DESCENDING ranks washer_dryer >
+//    washer > dryer > dishwasher; against a hard page cap that dropped every dishwasher of
+//    any brand with more devices than the cap (Siemens, Bosch, Miele all lost theirs).
+const _DEVICE_ORDER = [
+  { field: 'favoriteCount', dir: 'DESCENDING' },
+  { field: '__name__', dir: 'DESCENDING' },
+];
+
+// Cursor for the next page of one status, or null once that status is exhausted (a short
+// page means there is nothing after it).
+function _devicePageCursor(rows, pageSize) {
+  if (rows.length < pageSize) return null;
+  const last = rows[rows.length - 1];
+  return { fav: last.favoriteCount || 0, id: last.id };
+}
+
+export async function searchDevices({ applianceType = null, brand = null, favoritesOnly = false, pageSize = 60, includePending = false, cursor = null } = {}) {
   if (favoritesOnly) {
     const favs = await getFavorites();
     const items = [];
@@ -621,25 +648,41 @@ export async function searchDevices({ applianceType = null, brand = null, favori
     }
     return { items, cursor: null };  // favorites depend on the signed-in user; not cached
   }
+  // Cache only the first page; later pages pass through, mirroring listBrands.
+  const cacheable = !cursor;
   const cacheKey = `wdcat:devices:${(brand || '').toLowerCase()}:${applianceType || ''}:${includePending ? 1 : 0}:${pageSize}`;
-  const hit = _catalogCacheGet(cacheKey);
-  if (hit) return hit;
-  const q = (status) => restQuery('devices', {
-    filters: _deviceFilters(status, applianceType, brand),
-    orderBy: [{ field: 'favoriteCount', dir: 'DESCENDING' }],
-    limit: pageSize,
-  });
+  if (cacheable) {
+    const hit = _catalogCacheGet(cacheKey);
+    if (hit) return hit;
+  }
+  // Each status paginates on its own cursor: `undefined` = start at the top, `null` = done.
+  const page = async (status) => {
+    const c = cursor ? cursor[status] : undefined;
+    if (c === null) return { rows: [], next: null };
+    const rows = await restQuery('devices', {
+      filters: _deviceFilters(status, applianceType, brand),
+      orderBy: _DEVICE_ORDER,
+      limit: pageSize,
+      startAfter: c ? [c.fav, { _ref: `devices/${c.id}` }] : null,
+    });
+    return { rows, next: _devicePageCursor(rows, pageSize) };
+  };
   let result;
   if (includePending) {
-    const [a, p] = await Promise.all([q('approved'), q('pending')]);
+    const [a, p] = await Promise.all([page('approved'), page('pending')]);
     const byId = new Map();
-    // Approved first, then pending, so approved wins on id collisions.
-    for (const d of [...a, ...p]) if (!byId.has(d.id)) byId.set(d.id, d);
-    result = { items: [...byId.values()].slice(0, pageSize), cursor: null };
+    // Approved first, then pending, so approved wins on id collisions. Deliberately NOT
+    // truncated back to pageSize: that truncation is what hid the dishwashers.
+    for (const d of [...a.rows, ...p.rows]) if (!byId.has(d.id)) byId.set(d.id, d);
+    result = {
+      items: [...byId.values()],
+      cursor: (a.next || p.next) ? { approved: a.next, pending: p.next } : null,
+    };
   } else {
-    result = { items: await q('approved'), cursor: null };
+    const a = await page('approved');
+    result = { items: a.rows, cursor: a.next ? { approved: a.next, pending: null } : null };
   }
-  _catalogCachePut(cacheKey, result);
+  if (cacheable) _catalogCachePut(cacheKey, result);
   return result;
 }
 
