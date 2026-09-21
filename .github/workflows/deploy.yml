@@ -1,7 +1,21 @@
 name: Deploy store to GitHub Pages
 
-# Stamps every local asset with the deploy timestamp (cache-bust) and publishes the
-# static store to GitHub Pages on every push to main.
+# Stamps every local asset with the deploy timestamp (cache-bust), rebuilds the static
+# search index, and publishes the store to GitHub Pages.
+#
+# Runs on every push to main AND once a day. The daily run exists only for
+# search-index.json: it is a snapshot of the catalog, so it goes stale as people contribute,
+# and it is not committed to the repo (~300 KB of daily churn for nothing). Publishing it
+# from here keeps it out of git history entirely.
+#
+# Daily is deliberate, not a placeholder. One rebuild reads the whole catalog once (~2.4k
+# document reads, ~5% of the Firestore Spark free-tier budget of 50k/day); hourly would be
+# ~58k/day and blow the budget on its own. It does not need to be more often: the client
+# fetches everything created after the index's `generatedAt` as a small live delta, so new
+# contributions are searchable immediately regardless of when this last ran. See
+# scripts/build_search_index.mjs.
+#
+# NB: GitHub disables scheduled workflows in a repo with no commit activity for 60 days.
 #
 # ONE-TIME SETUP: in the repo, Settings -> Pages -> Build and deployment -> Source,
 # choose "GitHub Actions" (instead of "Deploy from a branch"). Otherwise this workflow
@@ -10,6 +24,10 @@ name: Deploy store to GitHub Pages
 on:
   push:
     branches: [main]
+  schedule:
+    # 03:17 UTC. Off the top of the hour on purpose: GitHub queues scheduled jobs and
+    # delays the congested :00 slots the most.
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 permissions:
@@ -37,6 +55,13 @@ jobs:
       - name: Stamp assets with the deploy timestamp
         run: ASSET_VERSION="$(date -u +%Y%m%d%H%M%S)" node scripts/stamp_assets.mjs
 
+      # Never fatal: a Firestore hiccup must not block a site deploy. Without the file the
+      # client falls back to live prefix queries, which is what it did before the index
+      # existed - degraded search, not a broken site.
+      - name: Build the static search index
+        continue-on-error: true
+        run: node scripts/build_search_index.mjs
+
       - name: Assemble the static site into dist/
         run: |
           mkdir -p dist/lib dist/img
@@ -45,6 +70,7 @@ jobs:
              styles.css README.md CHANGELOG.md dist/
           cp lib/ids.js lib/trace.js lib/merge_guard.js dist/lib/
           cp img/icon.png dist/img/ 2>/dev/null || true
+          cp search-index.json dist/ 2>/dev/null || echo "no search index - search falls back to live prefix queries"
 
       - uses: actions/configure-pages@v5
 

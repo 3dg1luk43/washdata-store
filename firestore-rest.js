@@ -44,6 +44,7 @@ function encodeValue(v) {
   if (typeof v === 'string') return { stringValue: v };
   if (typeof v === 'boolean') return { booleanValue: v };
   if (typeof v === 'number') return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
+  if (Array.isArray(v)) return { arrayValue: { values: v.map(encodeValue) } };
   if (v instanceof Date) return { timestampValue: v.toISOString() };
   if (v && v._ts) return { timestampValue: v._ts };
   // Cursor value for an `__name__` sort key. Firestore rejects a document path sent as a

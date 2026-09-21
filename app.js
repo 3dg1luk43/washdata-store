@@ -26,6 +26,7 @@ import {
   confirmCycle, hasConfirmedCycle,
   getProfileRating, ratingSummaryFromDoc,
   applianceLabel, confirmThresholdValue, brandConfirmThresholdValue, APPLIANCE_TYPES,
+  globalSearch, SEARCH_MIN_CHARS, getBrand, getDevice, getProfile, getCycle,
   getSiteConfig,
   subscribeUserStatus,
   logStoreEvent,
@@ -183,8 +184,12 @@ function safeUrl(u) {
 }
 function formatDate(ts) {
   if (!ts) return '-';
-  const d = ts.toDate ? ts.toDate() : new Date(typeof ts === 'number' ? ts * 1000 : ts);
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  // `_ts` is the raw ISO string the REST decoder keeps alongside the helper methods. The
+  // methods do not survive the sessionStorage JSON round-trip that the catalog/search cache
+  // does, so read the string when they are gone rather than rendering "Invalid Date".
+  const d = ts.toDate ? ts.toDate()
+    : new Date(typeof ts === 'number' ? ts * 1000 : (ts && ts._ts) || ts);
+  return isNaN(d.getTime()) ? '-' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 function formatDuration(sec) {
   if (sec == null || isNaN(sec)) return '-';
@@ -437,12 +442,20 @@ function renderBreadcrumb() {
   if (_view === 'brands') { bc.setAttribute('hidden', ''); return; }
   bc.removeAttribute('hidden');
   const parts = [`<button class="crumb" data-to="brands">Brands</button>`];
+  // Drilling into a search result keeps the results one click away instead of dumping the
+  // viewer back on the brand grid with their query gone.
+  if (_searchQuery) {
+    parts.push(_view === 'search'
+      ? `<span class="crumb-sep">/</span><span class="crumb current">"${esc(_searchQuery)}"</span>`
+      : `<span class="crumb-sep">/</span><button class="crumb" data-to="search">"${esc(_searchQuery)}"</button>`);
+  }
   if (_brand) parts.push(`<span class="crumb-sep">/</span><button class="crumb" data-to="brand">${esc(_brand.brand)}</button>`);
   if (_device && (_view === 'device' || _view === 'profile')) parts.push(`<span class="crumb-sep">/</span><button class="crumb" data-to="device">${esc(_device.brand)} ${esc(modelOf(_device))}</button>`);
   if (_view === 'profile' && _profile) parts.push(`<span class="crumb-sep">/</span><span class="crumb current">${esc(_profile.program)}</span>`);
   bc.innerHTML = parts.join('');
   bc.querySelectorAll('.crumb[data-to]').forEach((b) => b.addEventListener('click', () => {
-    if (b.dataset.to === 'brands') loadBrands(true);
+    if (b.dataset.to === 'brands') { $('filter-brand').value = ''; loadBrands(true); }
+    else if (b.dataset.to === 'search') loadSearch(_searchQuery);
     else if (b.dataset.to === 'brand') openBrand(_brand);
     else if (b.dataset.to === 'device') openDevice(_device);
   }));
@@ -450,7 +463,7 @@ function renderBreadcrumb() {
 
 // ============================================================ browse: brands
 async function loadBrands(reset = false) {
-  _view = 'brands'; _brand = null; _device = null; _profile = null;
+  _view = 'brands'; _brand = null; _device = null; _profile = null; _searchQuery = '';
   $('filter-rail').removeAttribute('hidden');
   renderBreadcrumb();
   renderOwnerActions(null);
@@ -525,6 +538,184 @@ function buildBrandCard(b) {
   const rb = makeReportBtn(reportCtxFor('brand', b.id, b.brand, b.createdByUid));
   if (rb) el.querySelector('.card-actions').appendChild(rb);
   return el;
+}
+
+// ============================================================ browse: global search
+// One query string searches brands, appliances, programs and reference cycles. Results are
+// grouped by kind and every row navigates into the normal browse views, so the search is a
+// shortcut into the catalog rather than a separate place to be.
+let _searchQuery = '';
+
+async function loadSearch(q) {
+  _view = 'search'; _brand = null; _device = null; _profile = null;
+  _searchQuery = String(q || '').trim().toLowerCase();
+  $('filter-rail').removeAttribute('hidden');
+  $('load-more-btn').setAttribute('hidden', '');
+  renderBreadcrumb();
+  renderOwnerActions(null);
+  const body = $('browse-body');
+  body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
+  try {
+    const res = await globalSearch(q, { includePending: !_browseFilters.approvedOnly });
+    // A slower earlier search must not overwrite a newer one.
+    if (_view !== 'search' || res.query !== _searchQuery) return;
+    renderSearch(res);
+  } catch (e) {
+    body.innerHTML = emptyHTML('&#9888;', 'Search failed', esc(e.message));
+  }
+}
+
+function renderSearch(res) {
+  const body = $('browse-body');
+  body.innerHTML = '';
+  if (res.total === 0) {
+    const why = res.prefixOnly
+      ? `Nothing starts with "${esc(res.query)}". The search index did not load, so only the start of a brand, model or program name is matched right now.`
+      : `Nothing in the library matches "${esc(res.query)}". Every word you type has to appear somewhere in a brand, model or program name.`;
+    body.innerHTML = emptyHTML('&#128269;', 'No matches', why) + addApplianceCTA('');
+    return;
+  }
+  const summary = document.createElement('div');
+  summary.className = 'search-summary';
+  const shown = res.truncated && res.matched
+    ? `<span>showing the closest <strong>${res.total}</strong> of <strong>${res.matched}</strong> for "${esc(res.query)}"</span>`
+    : `<span><strong>${res.total}</strong> ${res.total === 1 ? 'match' : 'matches'} for "${esc(res.query)}"</span>`;
+  summary.innerHTML = shown;
+  // The search index is a published file; if it did not load, matching silently drops to
+  // prefix-only. Say so, because "no matches" would otherwise look like an empty catalog.
+  if (res.prefixOnly) {
+    summary.innerHTML += `<span class="search-group-note" title="The published search index could not be loaded">matching the start of names only</span>`;
+  } else if (res.staleIndex) {
+    summary.innerHTML += `<span class="search-group-note" title="More has been contributed since the search index was last rebuilt than it can carry">results may be incomplete</span>`;
+  }
+  body.appendChild(summary);
+
+  // Brands and appliances reuse the catalog cards; programs and cycles get a compact row
+  // because out of context they need to name the appliance they belong to.
+  addSearchGroup(body, 'Brands', res.brands, res.errors.brands, (b) => buildBrandCard(b));
+  addSearchGroup(body, 'Appliances', res.devices,
+    res.errors.devicesByModel || res.errors.devicesByBrand, (d) => buildDeviceCard(d));
+  addSearchRowGroup(body, 'Programs', res.profiles, res.errors.profiles, (p) => ({
+    main: p.program || p.program_lc || '',
+    where: deviceLabelFromId(p.deviceId),
+    stats: `${_pluralize(p.cycleCount || 0, 'cycle')}`,
+    open: () => openProfileFromSearch(p),
+  }));
+  addSearchRowGroup(body, 'Reference cycles', res.cycles, res.errors.cycles, (c) => ({
+    main: c.program || c.program_lc || '',
+    where: deviceLabelFromId(c.deviceId),
+    stats: [
+      formatDuration((c.stats || {}).duration),
+      (c.stats || {}).energy_wh != null ? `${((c.stats || {}).energy_wh / 1000).toFixed(2)} kWh` : null,
+      `${c.downloads || 0} dl`,
+    ].filter(Boolean).join(' \u00b7 '),
+    open: () => openCycleFromSearch(c),
+  }));
+}
+
+function searchGroupHead(title, items, error) {
+  const head = document.createElement('div');
+  head.className = 'search-group-head';
+  head.innerHTML = `<span class="eyebrow">${esc(title)}</span>
+    <span class="search-group-count">${items.length}</span>`;
+  if (error) {
+    // One group's index can still be building while the others answer. Say so rather than
+    // letting it read as "no matches".
+    const note = document.createElement('span');
+    note.className = 'search-group-note';
+    note.textContent = 'Unavailable';
+    note.title = error;
+    head.appendChild(note);
+  }
+  return head;
+}
+
+function addSearchGroup(body, title, items, error, build) {
+  if (!items.length && !error) return;
+  const sec = document.createElement('div');
+  sec.className = 'search-group';
+  sec.appendChild(searchGroupHead(title, items, error));
+  const grid = document.createElement('div');
+  grid.className = 'card-grid';
+  items.forEach((it) => grid.appendChild(build(it)));
+  sec.appendChild(grid);
+  body.appendChild(sec);
+}
+
+function addSearchRowGroup(body, title, items, error, describe) {
+  if (!items.length && !error) return;
+  const sec = document.createElement('div');
+  sec.className = 'search-group';
+  sec.appendChild(searchGroupHead(title, items, error));
+  const rows = document.createElement('div');
+  rows.className = 'search-rows';
+  items.forEach((it) => {
+    const d = describe(it);
+    const btn = document.createElement('button');
+    btn.className = 'search-row';
+    btn.type = 'button';
+    btn.innerHTML = `<span class="search-row-main">${esc(d.main)}</span>
+      <span class="search-row-where">${esc(d.where)}</span>
+      <span class="search-row-stats">${esc(d.stats)}</span>`;
+    btn.addEventListener('click', d.open);
+    rows.appendChild(btn);
+  });
+  sec.appendChild(rows);
+  body.appendChild(sec);
+}
+
+// Profile and cycle documents carry only a normalized deviceId (`type__brand__model`).
+// Good enough to say which appliance a row belongs to without spending a read per row.
+function deviceLabelFromId(deviceId) {
+  const [type, brand, model] = String(deviceId || '').split('__');
+  if (!brand) return '';
+  const pretty = (x) => String(x || '').replace(/-/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase());
+  return `${pretty(brand)} ${String(model || '').toUpperCase()}${type ? ` \u00b7 ${typeLabel(type)}` : ''}`;
+}
+
+// Opening a search result has to rebuild the brand -> device -> profile chain the browse
+// views and the breadcrumb expect. That costs a point read per level, on click only.
+async function openBrandFromId(brandLc) {
+  _brand = await getBrand(brandLc);
+  return _brand;
+}
+
+// A device card can be opened from the brand list (brand already known) or from a search
+// result / favorites list (brand not known). Resolve it only when it is missing, so the
+// common path costs no extra read.
+async function openDeviceCard(d) {
+  if (_brand && _brand.brand_lc === d.brand_lc) return openDevice(d);
+  try {
+    await openBrandFromId(d.brand_lc);
+  } catch (_) { _brand = null; }  // a missing brand doc must not block the device view
+  return openDevice(d);
+}
+
+async function openProfileFromSearch(p) {
+  const body = $('browse-body');
+  body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
+  try {
+    const dev = await getDevice(p.deviceId);
+    await openBrandFromId(dev.brand_lc);
+    _device = dev;
+    return openProfile(p);
+  } catch (e) { body.innerHTML = emptyHTML('&#9888;', 'Failed to open', esc(e.message)); }
+}
+
+async function openCycleFromSearch(c) {
+  const body = $('browse-body');
+  body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
+  try {
+    // The searched cycle is a projection without `trace` (see _CYCLE_CARD_FIELDS) -- the
+    // details modal graphs the trace, so re-read the full document here.
+    const [dev, prof, full] = await Promise.all([
+      getDevice(c.deviceId), getProfile(c.profileId), getCycle(c.id),
+    ]);
+    await openBrandFromId(dev.brand_lc);
+    _device = dev;
+    await openProfile(prof);
+    return openDetails(full);
+  } catch (e) { body.innerHTML = emptyHTML('&#9888;', 'Failed to open', esc(e.message)); }
 }
 
 // ============================================================ browse: brand -> devices
@@ -646,7 +837,7 @@ function buildDeviceCard(d) {
       <button class="btn btn-primary btn-sm" data-open>Open</button>
       <button class="btn btn-ghost btn-sm star-btn${starred ? ' on' : ''}" data-star aria-label="Toggle favorite">${starred ? '&#9733;' : '&#9734;'}</button>
     </div>`;
-  el.querySelector('[data-open]').addEventListener('click', () => openDevice(d));
+  el.querySelector('[data-open]').addEventListener('click', () => openDeviceCard(d));
   el.querySelector('[data-star]').addEventListener('click', (ev) => toggleStar(ev.currentTarget, d));
   const rbD = makeReportBtn(reportCtxFor('device', d.id, `${d.brand} ${modelOf(d)}`.trim(), d.createdByUid));
   if (rbD) el.querySelector('.card-actions').appendChild(rbD);
@@ -978,10 +1169,21 @@ function _applyFilters(force = false) {
     trackEvent('store_search', { query_length: _browseFilters.search.length });
     logStoreEvent('searches');
   }
-  loadBrands(true);
+  // A query searches the whole library; an empty box is the brand landing grid. The
+  // favorites filter is a device view of its own and keeps its existing path.
+  if (_browseFilters.search.length >= SEARCH_MIN_CHARS && !_browseFilters.favoritesOnly) {
+    loadSearch(_browseFilters.search);
+  } else {
+    loadBrands(true);
+  }
 }
+// 450ms, not the old 350: every keystroke that gets through is five Firestore queries
+// rather than one, and the store runs against a daily read budget.
 let _filterTimer = null;
-$('filter-brand').addEventListener('input', () => { clearTimeout(_filterTimer); _filterTimer = setTimeout(() => _applyFilters(), 350); });
+$('filter-brand').addEventListener('input', () => { clearTimeout(_filterTimer); _filterTimer = setTimeout(() => _applyFilters(), 450); });
+$('filter-brand').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); clearTimeout(_filterTimer); _applyFilters(); }
+});
 $('filter-favorites').addEventListener('change', () => _applyFilters());
 if ($('filter-approved')) $('filter-approved').addEventListener('change', () => _applyFilters());
 // Min-rating filters live (re-gate the shown cards) without a full reload.

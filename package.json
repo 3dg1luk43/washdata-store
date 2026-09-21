@@ -10,6 +10,7 @@
   "scripts": {
     "test:unit": "node --test test/*.test.mjs",
     "test:rules": "firebase emulators:exec --only firestore \"node --test test/rules/\"",
-    "stamp": "node scripts/stamp_assets.mjs"
+    "stamp": "node scripts/stamp_assets.mjs",
+    "build:search-index": "node scripts/build_search_index.mjs"
   }
 }

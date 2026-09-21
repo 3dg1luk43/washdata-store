@@ -19,6 +19,8 @@ Two people with the same appliance and the same program land on the same Device 
 
 No account is needed to browse or download. Open the store, pick a brand, drill into a device and program, and download any approved reference cycle as JSON. In ha_washdata, import it through the panel to seed a profile.
 
+The search box at the top searches the whole library at once - brands, appliances, programs and reference cycles - and matches anywhere in a name, not just the start, so `wm14` finds `iQ300 WM14N292`. Every word you type has to appear somewhere, so `siemens dishwasher` narrows across the brand and the appliance type together.
+
 For a faster path, use the built-in adopt flow in the ha_washdata panel: when the store has a matching device, the panel offers a one-click **Adopt** button that imports a full device package directly into your integration without leaving Home Assistant.
 
 Signed-in users can **favorite** a device with the star on its card. Favorites are stored on

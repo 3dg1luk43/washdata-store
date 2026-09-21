@@ -246,6 +246,8 @@ function _estimateDocSize(data) {
 // same-tab navigation between the browse and contribute pages) for a short TTL. Only the
 // brand/device CARDS consume these, and they render no timestamp fields, so JSON round-trip
 // (which drops decoded-timestamp methods) is safe here. A contribution invalidates the cache.
+// The global-search cache shares these keys and DOES carry cycle documents with a
+// `createdAt`, which is why app.js's formatDate falls back to the raw `_ts` string.
 const _CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;  // 5 min
 
 function _catalogCacheGet(key) {
@@ -552,6 +554,367 @@ export async function getDevice(id) {
   const rec = await restGet(`devices/${id}`);
   if (!rec) throw new Error('Device not found');
   return rec;
+}
+
+export async function getBrand(id) {
+  const rec = await restGet(`brands/${String(id || '').toLowerCase()}`);
+  if (!rec) throw new Error('Brand not found');
+  return rec;
+}
+
+export async function getProfile(id) {
+  const rec = await restGet(`profiles/${id}`);
+  if (!rec) throw new Error('Profile not found');
+  return rec;
+}
+
+// ------------------------------------------------------------------
+// Global search
+//
+// Firestore has no full-text index, so every match here is a PREFIX range on a stored
+// lowercase field (`brand_lc`, `model_lc`, `program_lc`). That buys a real cross-collection
+// search for a bounded, predictable read cost, which is the whole constraint: the store runs
+// on the Spark free tier (50k document reads/day) and the catalog browse already spends most
+// of it. Five queries, each capped, one cache entry per query string.
+//
+// The cost control is layered: a minimum query length, a debounce in the UI, the per-group
+// limits below, and the sessionStorage cache (so backspacing through a query is free).
+
+export const SEARCH_MIN_CHARS = 2;
+
+// Per-group caps. Documents returned, not documents scanned, is what Firestore bills, so
+// these are the worst-case read cost of one search: 8 + 16 + 16 + 10 + 10 = 60.
+const _SEARCH_LIMIT = { brands: 8, devicesByModel: 16, devicesByBrand: 16, profiles: 10, cycles: 10 };
+
+// Cycle documents carry `trace.points` and run up to MAX_DOC_BYTES (900 KB). A projection
+// does not reduce the billed read count, but without one a ten-cycle search result would
+// pull megabytes over the wire.
+const _CYCLE_CARD_FIELDS = [
+  'program_lc', 'deviceId', 'profileId', 'applianceType', 'brand_lc', 'status', 'stats',
+  'downloads', 'ratingSum', 'ratingCount', 'confirmCount', 'createdAt', 'uploaderName',
+  'uploaderUid', 'qc',
+];
+const _DEVICE_CARD_FIELDS = [
+  'brand', 'brand_lc', 'model', 'model_lc', 'applianceType', 'status', 'profileCount',
+  'cycleCount', 'favoriteCount', 'createdByName', 'createdByUid', 'manualUrl', 'ownerId',
+  'ratingSum', 'ratingCount', 'confirmCount',
+];
+
+const _PREFIX_MAX = '\uf8ff';
+
+// status filter + a prefix range on one field. `IN` keeps this to ONE query for the
+// pending-inclusive catalog: two `status EQUAL` queries would return (and bill) up to twice
+// as many documents for the same capped result.
+function _searchFilters(field, prefix, statuses) {
+  return [
+    statuses.length > 1
+      ? { field: 'status', op: 'IN', value: statuses }
+      : { field: 'status', op: 'EQUAL', value: statuses[0] },
+    { field, op: 'GREATER_THAN_OR_EQUAL', value: prefix },
+    { field, op: 'LESS_THAN_OR_EQUAL', value: prefix + _PREFIX_MAX },
+  ];
+}
+
+// Rank an exact hit above a prefix hit, then by popularity, then alphabetically. Keeps
+// "siemens" from burying the brand under fifty models.
+function _rankBy(field, prefix, weight) {
+  return (a, b) => {
+    const ax = (a[field] === prefix ? 0 : 1);
+    const bx = (b[field] === prefix ? 0 : 1);
+    if (ax !== bx) return ax - bx;
+    const aw = weight(a); const bw = weight(b);
+    if (aw !== bw) return bw - aw;
+    return String(a[field] || '').localeCompare(String(b[field] || ''));
+  };
+}
+
+/**
+ * Search brands, appliances, programs and reference cycles in one pass.
+ *
+ * Each group resolves independently: a group whose index is still building reports its own
+ * `error` instead of failing the whole search, so the rest of the results still render.
+ *
+ * @returns {Promise<{query: string, tooShort: boolean, total: number,
+ *   brands: object[], devices: object[], profiles: object[], cycles: object[],
+ *   errors: Record<string, string>}>}
+ */
+// ------------------------------------------------------------------
+// Static search index
+//
+// Firestore prefix ranges cannot match mid-string, so "wm14" never finds "iQ300 WM14N292".
+// The catalog is small enough to publish as one file (see scripts/build_search_index.mjs),
+// which the browser matches with real substring + multi-token search for ZERO reads.
+//
+// Three legs, and each covers the previous one's gap:
+//   1. the index      - brands/devices/profiles as of `generatedAt`. Substring. 0 reads.
+//   2. the delta      - everything created AFTER `generatedAt`, fetched once per cache
+//                       window (not per keystroke) and matched by the same matcher, so a
+//                       contribution is searchable immediately whatever the rebuild cadence.
+//   3. reference cycles - never in the index (measured: half its bytes, and a cycle has no
+//                       text of its own beyond its profile's program name), so they stay a
+//                       live prefix query.
+// If the index file is missing or unreadable the whole thing falls back to the live prefix
+// fan-out, which is what this did before the index existed: degraded, never broken.
+//
+// Known staleness, bounded by one rebuild: the index cannot see a REMOVAL or a
+// pending -> approved promotion. A removed row resolves to a clean "not found" when opened,
+// and a promoted row shows a stale Pending badge on the search card only (the page it opens
+// is read live).
+
+const SEARCH_INDEX_URL = 'search-index.json';
+// Rows rendered per group. The match runs over the whole index; this only caps the DOM.
+const _INDEX_LIMIT = { brands: 12, devices: 24, profiles: 20 };
+const _DELTA_LIMIT = 50;
+
+let _searchIndexPromise = null;
+
+function _rowToObj(fields, row) {
+  const o = {};
+  for (let i = 0; i < fields.length; i++) o[fields[i]] = row[i];
+  return o;
+}
+
+// Everything the matcher and the card renderers need, derived once at load rather than per
+// keystroke. `_hay` is the lowercase text a query is matched against.
+function _shapeIndex(raw) {
+  const f = raw.fields || {};
+  if (!f.brands || !f.devices || !f.profiles) return null;
+  const brands = (raw.brands || []).map((r) => {
+    const b = _rowToObj(f.brands, r);
+    b.brand_lc = b.id;                       // the brand doc id IS the lowercase name
+    b._hay = String(b.brand || b.id).toLowerCase();
+    return b;
+  });
+  const devices = (raw.devices || []).map((r) => {
+    const d = _rowToObj(f.devices, r);
+    const parts = String(d.id).split('__');
+    d.brand_lc = parts[1] || String(d.brand || '').toLowerCase();
+    d.model_lc = String(d.model || '').toLowerCase();
+    // The appliance type joins the haystack so "siemens dishwasher" works as a query.
+    d._hay = `${d.brand || ''} ${d.model || ''} ${String(d.applianceType || '').replace(/_/g, ' ')}`.toLowerCase();
+    return d;
+  });
+  const profiles = (raw.profiles || []).map((r) => {
+    const p = _rowToObj(f.profiles, r);
+    const [type, brand, model] = String(p.deviceId || '').split('__');
+    p.applianceType = type || '';
+    p.program_lc = String(p.program || '').toLowerCase();
+    // A program is searchable by its appliance too, so "bosch eco" finds Bosch's Eco.
+    p._hay = `${p.program || ''} ${brand || ''} ${model || ''}`.toLowerCase();
+    return p;
+  });
+  return { generatedAt: raw.generatedAt || null, brands, devices, profiles };
+}
+
+// Loaded once per page, then held in memory. `no-cache` revalidates rather than refetching:
+// an unchanged index costs a 304 with no body, and a redeployed one is picked up at once.
+function _loadSearchIndex() {
+  if (_searchIndexPromise) return _searchIndexPromise;
+  _searchIndexPromise = (async () => {
+    const res = await fetch(SEARCH_INDEX_URL, { cache: 'no-cache' });
+    if (!res.ok) return null;
+    const raw = await res.json();
+    if (!raw || raw.schema !== 1 || !raw.generatedAt) return null;
+    return _shapeIndex(raw);
+  })().catch(() => null);
+  return _searchIndexPromise;
+}
+
+// Everything created after the index was built. Cached under the shared `wdcat:` prefix, so
+// it is fetched once per cache window instead of once per keystroke -- and a contribution
+// drops it via invalidateCatalogCache(), which is why your own upload is searchable at once.
+async function _searchDelta(generatedAt, statuses, errors) {
+  const key = `wdcat:searchdelta:${statuses.join(',')}:${generatedAt}`;
+  const hit = _catalogCacheGet(key);
+  if (hit) return hit;
+  const statusFilter = statuses.length > 1
+    ? { field: 'status', op: 'IN', value: statuses }
+    : { field: 'status', op: 'EQUAL', value: statuses[0] };
+  const run = async (group, collectionId, select) => {
+    try {
+      return await restQuery(collectionId, {
+        filters: [statusFilter, { field: 'createdAt', op: 'GREATER_THAN', value: { _ts: generatedAt } }],
+        orderBy: [{ field: 'createdAt', dir: 'DESCENDING' }],
+        limit: _DELTA_LIMIT,
+        ...(select ? { select } : {}),
+      });
+    } catch (e) {
+      errors[group] = e.message;
+      return [];
+    }
+  };
+  const [brands, devices, profiles] = await Promise.all([
+    run('brands', 'brands'),
+    run('devices', 'devices', _DEVICE_CARD_FIELDS),
+    run('profiles', 'profiles'),
+  ]);
+  // A full page means more was created since the rebuild than the delta can carry, so the
+  // results are genuinely incomplete. With the daily cadence this is a handful of rows and
+  // never happens; if the scheduled rebuild has stopped (GitHub disables cron workflows in a
+  // repo dormant for 60 days) it is the signal, so it is surfaced rather than swallowed.
+  const capped = brands.length >= _DELTA_LIMIT || devices.length >= _DELTA_LIMIT || profiles.length >= _DELTA_LIMIT;
+  const out = { brands, devices, profiles, capped };
+  // Only cache a complete answer: a failed leg must be retried, not remembered as empty.
+  if (!errors.brands && !errors.devices && !errors.profiles) _catalogCachePut(key, out);
+  return out;
+}
+
+// Delta rows are raw Firestore documents, so they need the same derived fields the index
+// rows got. Delta wins on an id collision: it is strictly newer than the snapshot.
+function _mergeDelta(indexRows, deltaRows, shape) {
+  if (!deltaRows.length) return indexRows;
+  const byId = new Map();
+  for (const r of deltaRows) byId.set(r.id, shape(r));
+  const out = indexRows.filter((r) => !byId.has(r.id));
+  return [...byId.values(), ...out];
+}
+
+const _shapeDeltaBrand = (b) => ({ ...b, brand_lc: b.brand_lc || b.id, _hay: String(b.brand || b.id).toLowerCase() });
+const _shapeDeltaDevice = (d) => ({
+  ...d,
+  _hay: `${d.brand || ''} ${d.model || ''} ${String(d.applianceType || '').replace(/_/g, ' ')}`.toLowerCase(),
+});
+const _shapeDeltaProfile = (p) => {
+  const [, brand, model] = String(p.deviceId || '').split('__');
+  return { ...p, _hay: `${p.program || ''} ${brand || ''} ${model || ''}`.toLowerCase() };
+};
+
+// Multi-token AND: every whitespace-separated token must appear somewhere in the haystack,
+// in any order. "siemens dish" and "dish siemens" both find the Siemens dishwashers.
+function _tokenize(q) { return q.split(/\s+/).filter(Boolean); }
+
+function _matches(hay, tokens) {
+  for (const t of tokens) if (hay.indexOf(t) === -1) return false;
+  return true;
+}
+
+// 0 = the whole query is a prefix of the text, 1 = it starts a word inside it, 2 = mid-word.
+// Keeps "Eco" above "Deco" and an exact model above a coincidental substring.
+function _matchTier(hay, q) {
+  if (hay.startsWith(q)) return 0;
+  return hay.includes(` ${q}`) ? 1 : 2;
+}
+
+function _searchRank(q, weight) {
+  return (a, b) => {
+    const at = _matchTier(a._hay, q); const bt = _matchTier(b._hay, q);
+    if (at !== bt) return at - bt;
+    const aw = weight(a); const bw = weight(b);
+    if (aw !== bw) return bw - aw;
+    return a._hay.localeCompare(b._hay);
+  };
+}
+
+function _pickMatches(rows, q, tokens, statuses, limit, weight) {
+  const allowed = new Set(statuses);
+  const hits = rows.filter((r) => allowed.has(r.status) && _matches(r._hay, tokens));
+  hits.sort(_searchRank(q, weight));
+  return { hits: hits.slice(0, limit), matched: hits.length };
+}
+
+/**
+ * Search brands, appliances, programs and reference cycles in one pass.
+ *
+ * Each group resolves independently: a group whose index is still building reports its own
+ * `error` instead of failing the whole search, so the rest of the results still render.
+ *
+ * @returns {Promise<{query: string, tooShort: boolean, total: number, truncated: boolean,
+ *   brands: object[], devices: object[], profiles: object[], cycles: object[],
+ *   errors: Record<string, string>}>}
+ */
+export async function globalSearch(query, { includePending = true } = {}) {
+  const q = String(query == null ? '' : query).trim().toLowerCase();
+  const empty = {
+    query: q, tooShort: true, total: 0, truncated: false,
+    brands: [], devices: [], profiles: [], cycles: [], errors: {},
+  };
+  if (q.length < SEARCH_MIN_CHARS) return empty;
+
+  const cacheKey = `wdcat:search:${includePending ? 1 : 0}:${q}`;
+  const hit = _catalogCacheGet(cacheKey);
+  if (hit) return hit;
+
+  const statuses = includePending ? ['approved', 'pending'] : ['approved'];
+  const errors = {};
+
+  // Reference cycles are not in the static index, so this leg is live either way.
+  const cyclesPromise = _livePrefixSearch('cycles', 'cycles', 'program_lc', q, statuses, _CYCLE_CARD_FIELDS, errors);
+
+  const idx = await _loadSearchIndex();
+  const result = idx
+    ? await _indexedSearch(idx, q, statuses, errors)
+    : await _livePrefixGroups(q, statuses, errors);
+
+  const cycles = await cyclesPromise;
+  // A cycle document only stores `program_lc`, so a cycle row would read "eco 50" next to
+  // the profile row's "Eco 50". Borrow the cased name when the owning profile matched too.
+  const cased = new Map(result.profiles.map((pr) => [pr.id, pr.program]).filter(([, v]) => v));
+  for (const c of cycles) c.program = cased.get(c.profileId) || c.program_lc;
+  result.cycles = cycles.map(hydrateCycle).sort(_rankBy('program_lc', q, (c) => c.downloads || 0));
+
+  result.query = q;
+  result.tooShort = false;
+  result.errors = errors;
+  result.total = result.brands.length + result.devices.length + result.profiles.length + result.cycles.length;
+  _catalogCachePut(cacheKey, result);
+  return result;
+}
+
+async function _indexedSearch(idx, q, statuses, errors) {
+  const delta = await _searchDelta(idx.generatedAt, statuses, errors);
+  const tokens = _tokenize(q);
+  const brands = _pickMatches(_mergeDelta(idx.brands, delta.brands, _shapeDeltaBrand), q, tokens, statuses, _INDEX_LIMIT.brands, (b) => b.deviceCount || 0);
+  const devices = _pickMatches(_mergeDelta(idx.devices, delta.devices, _shapeDeltaDevice), q, tokens, statuses, _INDEX_LIMIT.devices, (d) => d.favoriteCount || 0);
+  const profiles = _pickMatches(_mergeDelta(idx.profiles, delta.profiles, _shapeDeltaProfile), q, tokens, statuses, _INDEX_LIMIT.profiles, (p) => p.cycleCount || 0);
+  return {
+    brands: brands.hits,
+    devices: devices.hits,
+    profiles: profiles.hits,
+    cycles: [],
+    staleIndex: !!delta.capped,
+    // Whether any group had more matches than it is showing, so the UI can say so.
+    truncated: brands.matched > brands.hits.length
+      || devices.matched > devices.hits.length
+      || profiles.matched > profiles.hits.length,
+    matched: brands.matched + devices.matched + profiles.matched,
+  };
+}
+
+// One capped prefix-range query. Used for reference cycles always, and for every group when
+// the static index is unavailable.
+async function _livePrefixSearch(group, collectionId, field, q, statuses, select, errors) {
+  try {
+    return await restQuery(collectionId, {
+      filters: _searchFilters(field, q, statuses),
+      orderBy: [{ field, dir: 'ASCENDING' }],
+      limit: _SEARCH_LIMIT[group],
+      ...(select ? { select } : {}),
+    });
+  } catch (e) {
+    errors[group] = e.message;
+    return [];
+  }
+}
+
+// Fallback for a missing/unreadable index: prefix-only, one query per group.
+async function _livePrefixGroups(q, statuses, errors) {
+  const [brands, byModel, byBrand, profiles] = await Promise.all([
+    _livePrefixSearch('brands', 'brands', 'brand_lc', q, statuses, null, errors),
+    _livePrefixSearch('devicesByModel', 'devices', 'model_lc', q, statuses, _DEVICE_CARD_FIELDS, errors),
+    _livePrefixSearch('devicesByBrand', 'devices', 'brand_lc', q, statuses, _DEVICE_CARD_FIELDS, errors),
+    _livePrefixSearch('profiles', 'profiles', 'program_lc', q, statuses, null, errors),
+  ]);
+  // A device matches on either its model or its brand; dedupe and rank once.
+  const devById = new Map();
+  for (const d of [...byModel, ...byBrand]) if (!devById.has(d.id)) devById.set(d.id, d);
+  return {
+    brands: brands.sort(_rankBy('brand_lc', q, (b) => b.deviceCount || 0)),
+    devices: [...devById.values()].sort(_rankBy('model_lc', q, (d) => d.favoriteCount || 0)),
+    profiles: profiles.sort(_rankBy('program_lc', q, (p) => p.cycleCount || 0)),
+    cycles: [],
+    truncated: false,
+    prefixOnly: true,
+  };
 }
 
 function _brandFilters(status, search) {

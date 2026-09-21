@@ -1872,3 +1872,78 @@ input[type="url"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
 .report-item-date { font-size: .72rem; }
 .report-item-comment { font-size: .875rem; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
 .report-actions { display: flex; gap: .5rem; flex-wrap: wrap; padding-top: .6rem; border-top: 1px solid var(--border-subtle); }
+
+/* ============================================================
+   Global search
+   ============================================================ */
+.field-hint {
+  display: block;
+  margin-top: .3rem;
+  font-size: .72rem;
+  color: var(--text-muted);
+}
+.search-summary {
+  display: flex;
+  align-items: baseline;
+  gap: .5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+  font-size: .875rem;
+  color: var(--text-muted);
+}
+.search-summary strong { color: var(--text); font-weight: 600; }
+.search-group { margin-bottom: 1.75rem; }
+.search-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: .5rem;
+  padding-bottom: .5rem;
+  margin-bottom: .85rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.search-group-count {
+  font-family: var(--font-mono);
+  font-size: .72rem;
+  color: var(--text-muted);
+}
+.search-group-note {
+  margin-left: auto;
+  font-size: .72rem;
+  color: var(--warning);
+}
+/* Compact one-line rows for programs and cycles: a search result needs to be scannable and
+   to say which appliance it belongs to, not to repeat the full card. */
+.search-rows {
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+}
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: .65rem;
+  width: 100%;
+  text-align: left;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: .6rem .8rem;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition);
+}
+.search-row:hover { border-color: var(--accent); background: var(--bg-surface); }
+.search-row-main { font-weight: 600; font-size: .9375rem; }
+.search-row-where { color: var(--text-muted); font-size: .8125rem; }
+.search-row-stats {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: .75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+@media (max-width: 640px) {
+  .search-row { flex-wrap: wrap; gap: .25rem .5rem; }
+  .search-row-stats { margin-left: 0; width: 100%; }
+}
