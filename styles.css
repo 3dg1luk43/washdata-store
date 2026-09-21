@@ -766,6 +766,57 @@ input[type="file"]:hover {
   align-items: flex-end;
   flex-shrink: 0;
 }
+/* Two-row variant of the rail: the search field gets a row of its own so it is as wide as
+   the page, and its hint reads as one line instead of wrapping into a narrow column beside
+   the filters. Only the landing rail opts in -- the inline rails app.js builds for the
+   brand/device/cycle views stay single-row. */
+.filter-rail-stacked {
+  flex-direction: column;
+  /* nowrap matters: .filter-rail sets flex-wrap:wrap for its single-row use, and on a COLUMN
+     container that lets the rows form additional columns and changes how the lines are
+     sized - measured, it inflated the filters row from 58px to 100px and left a band of dead
+     space above the controls. The stacked rail is exactly two rows; it never wraps.
+     The rows themselves still wrap internally, which is what reflows them on a phone. */
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 0.875rem;
+}
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+  /* A flex item defaults to min-width:auto, so this row could not shrink below the
+     min-content width of its widest child -- .filter-actions is flex-shrink:0 and holds four
+     nowrap buttons. On a phone that pushed the whole row (and the stretched search row with
+     it) past the rail's padding. */
+  min-width: 0;
+}
+/* min-width:0 overrides the rail's 140px floor, which a flex item at 100% basis would
+   otherwise add to, pushing the input past the rail's padding on a narrow screen. */
+.filter-row-search .form-group { flex: 1 1 100%; min-width: 0; }
+.filter-row-search input { font-size: 0.9375rem; }
+/* The two checkbox pills size to their label. They inherit flex:1 from the rail's
+   form-group rule, which on a row of their own stretched them into wide empty boxes; the
+   slack belongs to nothing, so let the row keep it. */
+.filter-rail-stacked .filter-fav { flex: 0 0 auto; }
+/* Let the action buttons wrap onto another line rather than force the row wider. */
+.filter-rail-stacked .filter-actions { flex-wrap: wrap; }
+/* Min rating holds five short options, so it does not want the row's whole slack (which
+   flex:1 handed it once the pills stopped taking any). The slack goes to the gap before the
+   actions instead. */
+.filter-rail-stacked .filter-row:not(.filter-row-search) > .form-group:not(.filter-fav) { flex: 0 1 180px; }
+/* The actions sit at the right end of the filters row, away from the inputs they act on.
+   Done by growing the block and right-aligning inside it, NOT with margin-left:auto: an auto
+   margin in a wrapping flex row resolves to the whole remaining free space, which pushed the
+   block onto a second line and left a band of dead space above the filters. */
+.filter-rail-stacked .filter-actions {
+  flex: 1 1 auto;
+  justify-content: flex-end;
+}
+@media (max-width: 720px) {
+  .filter-rail-stacked .filter-actions { justify-content: flex-start; }
+}
 
 /* ============================================================
    Rating stars
