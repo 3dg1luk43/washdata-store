@@ -12,3 +12,8 @@ firestore-debug.log
 # OS / editor cruft
 .DS_Store
 *.swp
+
+# Built by scripts/build_search_index.mjs and published straight from the deploy workflow.
+# Deliberately NOT committed: it is ~300 KB that changes whenever the catalog does, and the
+# deploy rebuilds it anyway. `npm run build:search-index` makes one for local testing.
+search-index.json

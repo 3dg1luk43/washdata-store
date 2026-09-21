@@ -123,3 +123,23 @@ test('stamp_assets.mjs cache-busts every module in the graph', () => {
   const missingHtml = HTML_ENTRIES.filter((f) => !stampHtml.has(f));
   assert.deepEqual(missingHtml, [], `HTML pages missing from the stamp list: ${missingHtml.join(', ')}`);
 });
+
+// The module-graph walk above only follows `import`/`src`/`href`, so a file the app fetches
+// at RUNTIME is invisible to it - and search-index.json is exactly that. Left out of the
+// deploy list it would 404, the search would silently fall back to prefix-only matching,
+// and nothing would fail loudly. Hold the build step and the copy step to each other.
+test('a runtime-fetched data file is built and published', () => {
+  const published = publishedFiles();
+  const fetched = [...read('washstore.js').matchAll(/const\s+\w*_?URL\s*=\s*'([^']+\.json)'/g)].map((m) => m[1]);
+  assert.ok(fetched.includes('search-index.json'),
+    'washstore.js no longer names search-index.json; update this test with whatever replaced it');
+  for (const f of fetched) {
+    assert.ok(published.has(normalize(f)),
+      `${f} is fetched at runtime but never copied into dist/ by .github/workflows/deploy.yml`);
+  }
+  const yml = read('.github/workflows/deploy.yml');
+  assert.match(yml, /node scripts\/build_search_index\.mjs/,
+    'deploy.yml copies search-index.json but never builds it');
+  assert.match(yml, /schedule:/,
+    'the search index is a snapshot: deploy.yml needs a schedule trigger to refresh it');
+});
