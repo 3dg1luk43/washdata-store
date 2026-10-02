@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <!-- Content-Security-Policy: no inline script and no script origin beyond the ones this page
+       loads (see SECURITY.md). Inline style stays allowed: the markup uses style= attributes. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.gstatic.com https://apis.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://avatars.githubusercontent.com; connect-src 'self' https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com; frame-src https://washdata-store.firebaseapp.com; object-src 'none'; base-uri 'self'; form-action 'self'">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="Add an appliance or brand to the WashData community catalog.">
   <title>Add to WashData Store</title>
@@ -130,7 +133,7 @@
           </div>
           <div class="form-group">
             <label for="prof-desc">Description <span class="text-muted">(optional)</span></label>
-            <textarea id="prof-desc" rows="2"></textarea>
+            <textarea id="prof-desc" rows="2" maxlength="2000"></textarea>
           </div>
           <details class="contribute-guide">
             <summary>Profile naming standards</summary>

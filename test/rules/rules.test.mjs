@@ -22,15 +22,20 @@ import {
   initializeTestEnvironment, assertFails, assertSucceeds,
 } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
-import { doc, setDoc, updateDoc, writeBatch, getDoc, serverTimestamp, increment } from 'firebase/firestore';
+import { createHash } from 'node:crypto';
+import { doc, collection, setDoc, updateDoc, writeBatch, getDoc, serverTimestamp, increment } from 'firebase/firestore';
 
 let env;
 const PID = 'washdata-store';
 
+// No hardcoded host/port: `firebase emulators:exec` exports FIRESTORE_EMULATOR_HOST for the
+// port configured in firebase.json, and initializeTestEnvironment reads it. A local run on
+// another port (8080 taken) then only needs a different firebase.json, e.g.
+//   firebase emulators:exec -c /tmp/fb/firebase.json --project washdata-store --only firestore "node --test test/rules/"
 before(async () => {
   env = await initializeTestEnvironment({
     projectId: PID,
-    firestore: { rules: readFileSync('firestore.rules', 'utf8'), host: "127.0.0.1", port: 8080 },
+    firestore: { rules: readFileSync('firestore.rules', 'utf8') },
   });
 });
 after(async () => { await env.cleanup(); });
@@ -38,8 +43,9 @@ after(async () => { await env.cleanup(); });
 function gh(uid) { return env.authenticatedContext(uid, { firebase: { sign_in_provider: 'github.com' } }); }
 function anon() { return env.unauthenticatedContext(); }
 
+// The cycle's parent profile must exist and belong to its device (seeded below).
 const validCycle = (uid) => ({
-  profileId: 'washer__bosch__wat__cotton-40', deviceId: 'washer__bosch__wat',
+  profileId: 'washer__bosch__cyc__cotton-40', deviceId: 'washer__bosch__cyc',
   brand_lc: 'bosch', program_lc: 'cotton-40', applianceType: 'washer',
   uploaderUid: uid, uploaderName: 'x', status: 'pending', rejectionReason: null,
   // Traces are stored as {o, w} maps, not nested arrays (Firestore rejects nested arrays).
@@ -51,6 +57,7 @@ const validCycle = (uid) => ({
 });
 
 test('github user can create a pending cycle; anon cannot', async () => {
+  await seedCycleParents();
   await assertSucceeds(setDoc(doc(gh('u1').firestore(), 'cycles/c1'), validCycle('u1')));
   await assertFails(setDoc(doc(anon().firestore(), 'cycles/c2'), validCycle('anon')));
 });
@@ -79,11 +86,19 @@ test('a banned user cannot flip their own banned flag', async () => {
   await assertFails(updateDoc(doc(gh('u1').firestore(), 'users/u1'), { banned: false }));
 });
 
-test('a user may update their own favorites', async () => {
+test('a user may update their own favorites (together with the device counter)', async () => {
   await env.withSecurityRulesDisabled(async (ctx) => {
     await setDoc(doc(ctx.firestore(), 'users/u2'), { uid: 'u2', banned: false, favorites: [] });
+    await setDoc(doc(ctx.firestore(), 'devices/washer__bosch__fav0'), { applianceType: 'washer', status: 'approved', favoriteCount: 0 });
   });
-  await assertSucceeds(updateDoc(doc(gh('u2').firestore(), 'users/u2'), { favorites: ['washer__bosch__wat'] }));
+  // washstore.favoriteDevice: one batch moves the user's list and the device's count.
+  const db = gh('u2').firestore();
+  const b = writeBatch(db);
+  b.update(doc(db, 'users/u2'), { favorites: ['washer__bosch__fav0'] });
+  b.update(doc(db, 'devices/washer__bosch__fav0'), { favoriteCount: increment(1) });
+  await assertSucceeds(b.commit());
+  // The list alone can no longer change: that was half of the favoriteCount pump.
+  await assertFails(updateDoc(doc(db, 'users/u2'), { favorites: [] }));
 });
 
 const validDevice = (uid, over = {}) => ({
@@ -95,16 +110,16 @@ const validDevice = (uid, over = {}) => ({
 test('device create requires github + matching brand_lc; anon denied', async () => {
   await assertSucceeds(setDoc(doc(gh('u1').firestore(), 'devices/washer__bosch__wat'), validDevice('u1')));
   // brand_lc must equal brand.lower(); a lowercase-but-wrong value still fails the rule.
-  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/d_bad_brand_lc'), validDevice('u1', { brand_lc: 'other' })));
+  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/washer__bosch__bad-lc'), validDevice('u1', { brand_lc: 'other' })));
   await assertFails(setDoc(doc(anon().firestore(), 'devices/y'), validDevice('anon')));
 });
 
 test('device create validates confirmCount, manualUrl and createdByName', async () => {
-  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/d_cc'), validDevice('u1', { confirmCount: 3 })));
-  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/d_url'), validDevice('u1', { manualUrl: 'javascript:alert(1)' })));
-  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/d_url2'), validDevice('u1', { manualUrl: 'a'.repeat(501) })));
-  await assertSucceeds(setDoc(doc(gh('u1').firestore(), 'devices/d_url_ok'), validDevice('u1', { manualUrl: 'https://example.com/manual.pdf', createdByName: 'Alice' })));
-  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/d_name'), validDevice('u1', { createdByName: 'x'.repeat(101) })));
+  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/washer__bosch__cc'), validDevice('u1', { confirmCount: 3 })));
+  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/washer__bosch__url'), validDevice('u1', { manualUrl: 'javascript:alert(1)' })));
+  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/washer__bosch__url2'), validDevice('u1', { manualUrl: 'a'.repeat(501) })));
+  await assertSucceeds(setDoc(doc(gh('u1').firestore(), 'devices/washer__bosch__url-ok'), validDevice('u1', { manualUrl: 'https://example.com/manual.pdf', createdByName: 'Alice' })));
+  await assertFails(setDoc(doc(gh('u1').firestore(), 'devices/washer__bosch__name'), validDevice('u1', { createdByName: 'x'.repeat(101) })));
 });
 
 test('pending device is publicly readable; removed is not', async () => {
@@ -326,6 +341,10 @@ test('analytics is admin-read-only', async () => {
 // report's real location, so seed the parent first.
 async function seedDoc(path, data) {
   await env.withSecurityRulesDisabled(async (ctx) => { await setDoc(doc(ctx.firestore(), path), data); });
+}
+async function seedCycleParents() {
+  await seedDoc('devices/washer__bosch__cyc', { applianceType: 'washer', brand: 'Bosch', brand_lc: 'bosch', model: 'CYC', model_lc: 'cyc', status: 'approved' });
+  await seedDoc('profiles/washer__bosch__cyc__cotton-40', { deviceId: 'washer__bosch__cyc', program: 'Cotton 40', program_lc: 'cotton 40', status: 'approved' });
 }
 const deviceReport = (uid, deviceId = 'd_rep', over = {}) => ({
   reporterUid: uid, reporterName: 'Rep', reason: 'spam', comment: 'looks like spam',
@@ -657,4 +676,482 @@ test('brand promotion is status-only, one-way, and denied to anon', async () => 
   await assertSucceeds(updateDoc(doc(gh('u1').firestore(), 'brands/bone'), { status: 'approved' }));
   // Already approved: the rule requires the previous status to be pending, so no re-flip.
   await assertFails(updateDoc(doc(gh('u1').firestore(), 'brands/bone'), { status: 'pending' }));
+});
+
+// ===========================================================================
+// Audit 2026-10-02 (STORE-01 / STORE-02 / STORE-16): the nine abuse writes the auditor's
+// emulator probe found ACCEPTED. Each must now be refused. Kept close to the probe's own
+// payloads so a regression reads as "probe A<n> is open again".
+// ===========================================================================
+
+const XSS = '<img src=x onerror=alert(document.domain)>';
+async function seedProbeWorld() {
+  await seedDoc('config/site', { confirmThreshold: 5 });
+  await seedDoc('devices/washer__miele__w1', {
+    applianceType: 'washer', brand: 'Miele', brand_lc: 'miele', model: 'W1', model_lc: 'w1',
+    status: 'approved', createdByUid: 'victim', favoriteCount: 0, confirmCount: 7,
+  });
+  await seedDoc('profiles/washer__miele__w1__eco', {
+    deviceId: 'washer__miele__w1', program: 'Eco', program_lc: 'eco', status: 'approved', createdByUid: 'victim',
+  });
+}
+const probeCycle = (uid, extra = {}) => ({
+  profileId: 'washer__miele__w1__eco', deviceId: 'washer__miele__w1', brand_lc: 'miele', program_lc: 'eco',
+  applianceType: 'washer', uploaderUid: uid, uploaderName: null, status: 'pending',
+  trace: { points: [{ o: 0, w: 1 }, { o: 60, w: 2000 }], sampleIntervalSec: 5 },
+  stats: { duration: 60, peak_w: 2000 }, cycleSchemaVersion: 1, downloads: 0, commentCount: 0, confirmCount: 0,
+  qc: 1, createdAt: serverTimestamp(), ...extra,
+});
+
+test('probe control: the honest probe cycle is accepted (so every refusal below is the abuse, not the base)', async () => {
+  await seedProbeWorld();
+  await assertSucceeds(setDoc(doc(gh('atk').firestore(), 'cycles/x0'), probeCycle('atk')));
+});
+
+test('A1 cycle with HTML in stats.peak_w / trace.sampleIntervalSec is refused', async () => {
+  await seedProbeWorld();
+  const db = gh('atk').firestore();
+  await assertFails(setDoc(doc(db, 'cycles/x1'), probeCycle('atk', {
+    stats: { peak_w: XSS, duration: 'x' }, trace: { points: [{ o: 0, w: 1 }, { o: 5, w: 2 }], sampleIntervalSec: XSS } })));
+  // Each half on its own, so neither check can mask the other.
+  await assertFails(setDoc(doc(db, 'cycles/x1a'), probeCycle('atk', { stats: { duration: 60, peak_w: XSS } })));
+  await assertFails(setDoc(doc(db, 'cycles/x1b'), probeCycle('atk', {
+    trace: { points: [{ o: 0, w: 1 }, { o: 5, w: 2 }], sampleIntervalSec: XSS } })));
+  await assertFails(setDoc(doc(db, 'cycles/x1c'), probeCycle('atk', { stats: { duration: 60, peak_w: 1, evil: XSS } })));
+  await assertFails(setDoc(doc(db, 'cycles/x1d'), probeCycle('atk', { stats: { duration: NaN, peak_w: 1 } })));
+});
+
+test('A2 cycle attached to a program that does not exist or belongs to another device is refused', async () => {
+  await seedProbeWorld();
+  const db = gh('atk').firestore();
+  // The auditor's payload: a program id under a foreign device that was never created.
+  await assertFails(setDoc(doc(db, 'cycles/x2'), probeCycle('atk', { profileId: 'washer__miele__w1__cotton-90' })));
+  // An existing program, but the cycle claims a different device.
+  await seedDoc('devices/washer__atk__m1', { applianceType: 'washer', brand: 'Atk', brand_lc: 'atk', model: 'M1', model_lc: 'm1', status: 'pending' });
+  await assertFails(setDoc(doc(db, 'cycles/x2b'), probeCycle('atk', { deviceId: 'washer__atk__m1' })));
+  // Ids that do not nest (<device>__<program>) or are not catalog ids at all.
+  await assertFails(setDoc(doc(db, 'cycles/x2c'), probeCycle('atk', { profileId: 'washer__atk__m1__eco' })));
+  await assertFails(setDoc(doc(db, 'cycles/x2d'), probeCycle('atk', { profileId: 'washer__miele__w1__eco/ratings/x' })));
+  // The cycle's applianceType must match its device id.
+  await assertFails(setDoc(doc(db, 'cycles/x2e'), probeCycle('atk', { applianceType: 'dryer' })));
+});
+
+test('A3 cycle pointing at a device that does not exist is refused', async () => {
+  await seedProbeWorld();
+  await assertFails(setDoc(doc(gh('atk').firestore(), 'cycles/x3'), probeCycle('atk', { deviceId: 'nope__nope__nope', profileId: 'nope' })));
+  await assertFails(setDoc(doc(gh('atk').firestore(), 'cycles/x3b'),
+    probeCycle('atk', { deviceId: 'washer__nope__nope', profileId: 'washer__nope__nope__eco' })));
+});
+
+test('A4 cycle created with a forged rating aggregate is refused', async () => {
+  await seedProbeWorld();
+  await assertFails(setDoc(doc(gh('atk').firestore(), 'cycles/x4'), probeCycle('atk', { ratingSum: 500, ratingCount: 100 })));
+  // Zero-initialised aggregates (STORE-15) stay allowed.
+  await assertSucceeds(setDoc(doc(gh('atk').firestore(), 'cycles/x4ok'), probeCycle('atk', { ratingSum: 0, ratingCount: 0 })));
+});
+
+test('A5 cycle with garbage trace contents is refused', async () => {
+  await seedProbeWorld();
+  const db = gh('atk').firestore();
+  await assertFails(setDoc(doc(db, 'cycles/x5'), probeCycle('atk', {
+    trace: { points: [{ o: 'a', w: { z: 1 } }, { evil: XSS }], sampleIntervalSec: -1 } })));
+  // Malformed end points, an out-of-range interval, junk trace keys, a one-point trace.
+  await assertFails(setDoc(doc(db, 'cycles/x5b'), probeCycle('atk', {
+    trace: { points: [{ o: 'a', w: { z: 1 } }, { evil: XSS }], sampleIntervalSec: 5 } })));
+  await assertFails(setDoc(doc(db, 'cycles/x5c'), probeCycle('atk', {
+    trace: { points: [{ o: 0, w: 1 }, { o: 60, w: 2 }], sampleIntervalSec: -1 } })));
+  await assertFails(setDoc(doc(db, 'cycles/x5d'), probeCycle('atk', {
+    trace: { points: [{ o: 0, w: 1 }, { o: 60, w: 2 }], sampleIntervalSec: 5, html: XSS } })));
+  await assertFails(setDoc(doc(db, 'cycles/x5e'), probeCycle('atk', {
+    trace: { points: [{ o: 0, w: 1 }], sampleIntervalSec: 5 } })));
+});
+
+test('A6 device created with self ownerId + forged counters is refused; settings cannot be rewritten freely', async () => {
+  const db = gh('atk').firestore();
+  await assertFails(setDoc(doc(db, 'devices/washer__atk__m1x'), {
+    applianceType: 'washer', brand: 'Atk', brand_lc: 'atk', model: 'M1', model_lc: 'm1', status: 'pending',
+    createdByUid: 'atk', favoriteCount: 0, confirmCount: 0, ownerId: 'atk', ratingSum: 50, ratingCount: 10,
+    profileCount: 999, cycleCount: 999, createdAt: serverTimestamp(),
+  }));
+  // Each forged field on its own.
+  for (const extra of [{ ownerId: 'atk' }, { ratingSum: 50 }, { ratingCount: 10 }, { profileCount: 999 },
+    { cycleCount: 999 }, { profileCount: XSS }, { approvedAt: 1 }]) {
+    await assertFails(setDoc(doc(db, 'devices/washer__atk__m1y'), validDevice('atk', { brand: 'Atk', brand_lc: 'atk', ...extra })));
+  }
+  // Settings at create: allow-listed numeric keys only.
+  await assertFails(setDoc(doc(db, 'devices/washer__atk__m1z'), validDevice('atk', { settings: { junk: XSS } })));
+  await assertFails(setDoc(doc(db, 'devices/washer__atk__m1z'), validDevice('atk', { settings: { min_power: XSS } })));
+  await assertFails(setDoc(doc(db, 'devices/washer__atk__m1z'), validDevice('atk', { settings: { off_delay: -1 } })));
+  // The doc id must carry the device's own appliance type.
+  await assertFails(setDoc(doc(db, 'devices/dryer__atk__m1'), validDevice('atk')));
+  // Even a REAL (admin-assigned) owner cannot write junk into settings.
+  await seedDoc('devices/washer__atk__owned', validDevice('creator', { ownerId: 'atk' }));
+  await assertFails(updateDoc(doc(db, 'devices/washer__atk__owned'), { settings: { min_power: 99999, off_delay: 1, junk: XSS } }));
+  await assertFails(updateDoc(doc(db, 'devices/washer__atk__owned'), { settings: { min_power: XSS } }));
+  await assertSucceeds(updateDoc(doc(db, 'devices/washer__atk__owned'), { settings: { min_power: 99999, off_delay: 1 } }));
+});
+
+test('A7 profile with self ownerId / oversized description / unrelated id is refused; phases bounded', async () => {
+  await seedProbeWorld();
+  const db = gh('atk').firestore();
+  await assertFails(setDoc(doc(db, 'profiles/totally-unrelated-id'), {
+    deviceId: 'washer__miele__w1', program: 'Eco', program_lc: 'eco', status: 'pending', createdByUid: 'atk',
+    ownerId: 'atk', description: 'y'.repeat(200000), createdAt: serverTimestamp(),
+  }));
+  const prof = (over = {}) => ({ deviceId: 'washer__miele__w1', program: 'Cotton', program_lc: 'cotton', status: 'pending',
+    createdByUid: 'atk', createdAt: serverTimestamp(), ...over });
+  await assertFails(setDoc(doc(db, 'profiles/totally-unrelated-id'), prof()));                       // id not <device>__<program>
+  await assertFails(setDoc(doc(db, 'profiles/washer__miele__w1__cotton'), prof({ ownerId: 'atk' })));
+  await assertFails(setDoc(doc(db, 'profiles/washer__miele__w1__cotton'), prof({ description: 'y'.repeat(2001) })));
+  await assertFails(setDoc(doc(db, 'profiles/washer__miele__w1__cotton'), prof({ cycleCount: 99 })));
+  await assertFails(setDoc(doc(db, 'profiles/washer__miele__w1__cotton'), prof({ phases: Array(51).fill({ name: 'p', start: 0, end: 1 }) })));
+  await assertFails(setDoc(doc(db, 'profiles/washer__miele__w1__cotton'), prof({ applianceType: 'dryer' })));
+  await assertFails(setDoc(doc(db, 'profiles/washer__nope__x__cotton'), prof({ deviceId: 'washer__nope__x' })));  // no parent device
+  // Contributing a program under someone else's device is the normal case and stays allowed.
+  await assertSucceeds(setDoc(doc(db, 'profiles/washer__miele__w1__cotton'), prof({ description: 'ok' })));
+  // Phases: a non-owner cannot rewrite them, an owner only with a bounded list.
+  await assertFails(updateDoc(doc(db, 'profiles/washer__miele__w1__cotton'), { phases: [{ name: XSS, start: 'a', end: [] }] }));
+  await seedDoc('profiles/washer__miele__w1__owned', { deviceId: 'washer__miele__w1', program: 'Owned', program_lc: 'owned', status: 'approved', ownerId: 'atk' });
+  await assertFails(updateDoc(doc(db, 'profiles/washer__miele__w1__owned'), { phases: 'not a list' }));
+  await assertFails(updateDoc(doc(db, 'profiles/washer__miele__w1__owned'), { phases: Array(51).fill({ name: 'p', start: 0, end: 1 }) }));
+  await assertSucceeds(updateDoc(doc(db, 'profiles/washer__miele__w1__owned'), { phases: [{ name: 'Wash', start: 0, end: 600 }] }));
+});
+
+test('A8 favoriteCount cannot be pumped (one +1 per user, tied to their favorites list)', async () => {
+  await seedProbeWorld();
+  await seedDoc('users/atk', { uid: 'atk', status: 'active', favorites: [] });
+  const db = gh('atk').firestore();
+  // The probe: bare +1, three times.
+  await assertFails(updateDoc(doc(db, 'devices/washer__miele__w1'), { favoriteCount: 1 }));
+  await assertFails(updateDoc(doc(db, 'devices/washer__miele__w1'), { favoriteCount: increment(1) }));
+  // The honest add works once...
+  const fav = (favorites, delta) => {
+    const b = writeBatch(db);
+    b.update(doc(db, 'users/atk'), { favorites });
+    b.update(doc(db, 'devices/washer__miele__w1'), { favoriteCount: increment(delta) });
+    return b.commit();
+  };
+  await assertSucceeds(fav(['washer__miele__w1'], 1));
+  // ...and cannot be repeated while the device is already in the list.
+  await assertFails(updateDoc(doc(db, 'devices/washer__miele__w1'), { favoriteCount: increment(1) }));
+  await assertFails(fav(['washer__miele__w1'], 1));
+  // Dropping it from the list without the -1 (the other half of a pump loop) is refused.
+  await assertFails(updateDoc(doc(db, 'users/atk'), { favorites: [] }));
+  // A +2 / mismatched step is refused; the honest remove works.
+  await assertFails(fav([], 1));
+  await assertSucceeds(fav([], -1));
+  const after = await getDoc(doc(db, 'devices/washer__miele__w1'));
+  assert.equal(after.data().favoriteCount, 0);
+  // A fresh user doc cannot be created with favorites pre-filled (that would allow a free -1).
+  await assertFails(setDoc(doc(gh('atk2').firestore(), 'users/atk2'), { uid: 'atk2', status: 'active', favorites: ['washer__miele__w1'] }));
+});
+
+test('A9 counter +1 is refused unless it names a child created in the same batch', async () => {
+  await seedProbeWorld();
+  await seedDoc('brands/miele', { brand: 'Miele', brand_lc: 'miele', status: 'approved', deviceCount: 1, cycleCount: 0 });
+  const db = gh('atk').firestore();
+  // The probe: a bare bump on each counter.
+  await assertFails(updateDoc(doc(db, 'devices/washer__miele__w1'), { cycleCount: 1 }));
+  await assertFails(updateDoc(doc(db, 'devices/washer__miele__w1'), { profileCount: increment(1) }));
+  await assertFails(updateDoc(doc(db, 'profiles/washer__miele__w1__eco'), { cycleCount: increment(1) }));
+  await assertFails(updateDoc(doc(db, 'brands/miele'), { deviceCount: increment(1) }));
+  await assertFails(updateDoc(doc(db, 'brands/miele'), { cycleCount: increment(1) }));
+  // Naming a child that already exists (re-using an old id) is refused too.
+  await seedDoc('cycles/old-cycle', { ...probeCycle('victim'), createdAt: new Date() });
+  await assertFails(updateDoc(doc(db, 'devices/washer__miele__w1'), { cycleCount: increment(1), lastCycleId: 'old-cycle' }));
+  // Naming a NEW child of a different parent is refused.
+  await seedDoc('devices/washer__other__x', { applianceType: 'washer', brand: 'Other', brand_lc: 'other', model: 'X', model_lc: 'x', status: 'approved' });
+  await seedDoc('profiles/washer__other__x__eco', { deviceId: 'washer__other__x', program: 'Eco', program_lc: 'eco', status: 'approved' });
+  const b = writeBatch(db);
+  b.set(doc(db, 'cycles/x9'), probeCycle('atk', { profileId: 'washer__other__x__eco', deviceId: 'washer__other__x', brand_lc: 'other' }));
+  b.update(doc(db, 'devices/washer__miele__w1'), { cycleCount: increment(1), lastCycleId: 'x9' });
+  await assertFails(b.commit());
+});
+
+test('probe control: a banned user is refused', async () => {
+  await seedProbeWorld();
+  await seedDoc('users/bad', { uid: 'bad', status: 'banned' });
+  await assertFails(setDoc(doc(gh('bad').firestore(), 'cycles/xb'), probeCycle('bad')));
+});
+
+test('users create: only the ensureUserProfile fields; no moderation field can be pre-seeded', async () => {
+  const mk = (uid, over = {}) => ({ uid, displayName: 'N', photoURL: null, createdAt: serverTimestamp(),
+    lastSeen: serverTimestamp(), status: 'active', favorites: [], githubLogin: 'n', ...over });
+  await assertSucceeds(setDoc(doc(gh('nu1').firestore(), 'users/nu1'), mk('nu1'), { merge: true }));
+  await assertFails(setDoc(doc(gh('nu2').firestore(), 'users/nu2'), mk('nu2', { removedContentCount: XSS })));
+  await assertFails(setDoc(doc(gh('nu3').firestore(), 'users/nu3'), mk('nu3', { banReason: 'x' })));
+  await assertFails(setDoc(doc(gh('nu4').firestore(), 'users/nu4'), mk('nu4', { status: 'banned' })));
+  // Returning-user self-service update (ensureUserProfile) still works.
+  await assertSucceeds(updateDoc(doc(gh('nu1').firestore(), 'users/nu1'), { displayName: 'New', lastSeen: serverTimestamp() }));
+});
+
+// ===========================================================================
+// Legitimate writes must keep working. Each test below replays one client's EXACT payload:
+// the website through the JS SDK (washstore.js), the Home Assistant integration through the
+// Firestore REST :commit body it really sends (custom_components/ha_washdata/store_client.py).
+// ===========================================================================
+
+// ---- website (washstore.js) -----------------------------------------------------------
+
+test('web ensureBrand: brand create with zeroed counters', async () => {
+  await assertSucceeds(setDoc(doc(gh('w1').firestore(), 'brands/webbrand'), {
+    brand: 'WebBrand', brand_lc: 'webbrand', status: 'pending', createdByUid: 'w1', createdByName: null,
+    createdAt: serverTimestamp(), deviceCount: 0, cycleCount: 0, approvedDeviceCount: 0,
+  }));
+  // The doc id is the lowercased brand: an alias id is refused.
+  await assertFails(setDoc(doc(gh('w1').firestore(), 'brands/alias'), {
+    brand: 'WebBrand2', brand_lc: 'webbrand2', status: 'pending', createdByUid: 'w1', createdAt: serverTimestamp(),
+  }));
+});
+
+const webDevice = (uid, over = {}) => ({
+  applianceType: 'washer', brand: 'WebBrand', brand_lc: 'webbrand', model: 'M1', model_lc: 'm1',
+  status: 'pending', createdByUid: uid, createdByName: null, manualUrl: null, createdAt: serverTimestamp(),
+  favoriteCount: 0, confirmCount: 0, ...over,
+});
+
+test('web ensureDevice: device create + brand deviceCount +1 in one batch (and the no-counter fallback)', async () => {
+  await seedDoc('brands/webbrand2', { brand: 'WebBrand2', brand_lc: 'webbrand2', status: 'pending', deviceCount: 0 });
+  const db = gh('w1').firestore();
+  const b = writeBatch(db);
+  b.set(doc(db, 'devices/washer__webbrand2__m1'), webDevice('w1', { brand: 'WebBrand2', brand_lc: 'webbrand2' }));
+  b.update(doc(db, 'brands/webbrand2'), { deviceCount: increment(1), lastDeviceId: 'washer__webbrand2__m1' });
+  await assertSucceeds(b.commit());
+  assert.equal((await getDoc(doc(db, 'brands/webbrand2'))).data().deviceCount, 1);
+  // _createWithCounters fallback: the device on its own.
+  await assertSucceeds(setDoc(doc(db, 'devices/washer__webbrand2__m2'), webDevice('w1', { brand: 'WebBrand2', brand_lc: 'webbrand2', model: 'M2', model_lc: 'm2' })));
+  // washer_dryer is spelled washer-dryer in the id (normalizeToken).
+  await assertSucceeds(setDoc(doc(db, 'devices/washer-dryer__webbrand2__wd1'),
+    webDevice('w1', { applianceType: 'washer_dryer', brand: 'WebBrand2', brand_lc: 'webbrand2', model: 'WD1', model_lc: 'wd1' })));
+});
+
+test('web ensureProfile: profile create + device profileCount +1 in one batch', async () => {
+  await seedDoc('devices/washer-dryer__webbrand3__wd', { applianceType: 'washer_dryer', brand: 'WebBrand3', brand_lc: 'webbrand3', status: 'pending', profileCount: 0 });
+  const db = gh('w1').firestore();
+  const b = writeBatch(db);
+  // applianceType comes from deviceId.split('__')[0] on the website.
+  b.set(doc(db, 'profiles/washer-dryer__webbrand3__wd__bawełna-40'), {
+    deviceId: 'washer-dryer__webbrand3__wd', applianceType: 'washer-dryer', program: 'Bawełna 40',
+    program_lc: 'bawełna 40', description: '', status: 'pending', createdByUid: 'w1', createdAt: serverTimestamp(),
+  });
+  b.update(doc(db, 'devices/washer-dryer__webbrand3__wd'), { profileCount: increment(1), lastProfileId: 'washer-dryer__webbrand3__wd__bawełna-40' });
+  await assertSucceeds(b.commit());
+});
+
+test('web uploadReferenceCycle: cycle create + profile/device/brand cycleCount +1 in one batch', async () => {
+  await seedDoc('brands/webbrand4', { brand: 'WebBrand4', brand_lc: 'webbrand4', status: 'pending', cycleCount: 0 });
+  await seedDoc('devices/washer__webbrand4__m', { applianceType: 'washer', brand: 'WebBrand4', brand_lc: 'webbrand4', status: 'pending', cycleCount: 0 });
+  await seedDoc('profiles/washer__webbrand4__m__eco-50', { deviceId: 'washer__webbrand4__m', program: 'Eco 50', program_lc: 'eco 50', status: 'pending', cycleCount: 0 });
+  const db = gh('w1').firestore();
+  const ref = doc(collection(db, 'cycles'));
+  const b = writeBatch(db);
+  b.set(ref, {
+    profileId: 'washer__webbrand4__m__eco-50', deviceId: 'washer__webbrand4__m', brand_lc: 'webbrand4',
+    program_lc: 'eco 50', applianceType: 'washer', uploaderUid: 'w1', uploaderName: 'Web User',
+    status: 'pending', rejectionReason: null,
+    trace: { points: [{ o: 0, w: 2.5 }, { o: 30, w: 2100 }, { o: 3600, w: 1 }], sampleIntervalSec: 30 },
+    stats: { duration: 3600, energy_wh: 512.25, peak_w: 2100, mean_w: 700 },
+    cycleSchemaVersion: 1, downloads: 0, commentCount: 0, confirmCount: 0, qc: 3, createdAt: serverTimestamp(),
+  });
+  b.update(doc(db, 'profiles/washer__webbrand4__m__eco-50'), { cycleCount: increment(1), lastCycleId: ref.id });
+  b.update(doc(db, 'devices/washer__webbrand4__m'), { cycleCount: increment(1), lastCycleId: ref.id });
+  b.update(doc(db, 'brands/webbrand4'), { cycleCount: increment(1), lastCycleId: ref.id });
+  await assertSucceeds(b.commit());
+});
+
+test('web confirmCycle: confirmation doc + confirmCount +1 batch, then promotion at threshold', async () => {
+  await seedDoc('config/site', { confirmThreshold: 1 });
+  await seedDoc('cycles/c_conf', { ...validCycle('owner'), confirmCount: 0, createdAt: new Date() });
+  const db = gh('cv1').firestore();
+  const b = writeBatch(db);
+  b.set(doc(db, 'cycles/c_conf/confirmations/cv1'), { uid: 'cv1', createdAt: serverTimestamp() });
+  b.update(doc(db, 'cycles/c_conf'), { confirmCount: increment(1) });
+  await assertSucceeds(b.commit());
+  await assertSucceeds(updateDoc(doc(db, 'cycles/c_conf'), { status: 'approved' }));
+  await seedDoc('config/site', { confirmThreshold: 5 });
+});
+
+test('web addComment / deleteComment: comment + commentCount batches', async () => {
+  await seedDoc('cycles/c_cmt', { ...validCycle('owner'), status: 'approved', commentCount: 0, createdAt: new Date() });
+  const db = gh('cm1').firestore();
+  const ref = doc(collection(db, 'cycles/c_cmt/comments'));
+  const b = writeBatch(db);
+  b.set(ref, { authorUid: 'cm1', authorName: 'C', text: 'works for me', createdAt: serverTimestamp() });
+  b.update(doc(db, 'cycles/c_cmt'), { commentCount: increment(1) });
+  await assertSucceeds(b.commit());
+  const d = writeBatch(db);
+  d.delete(ref);
+  d.update(doc(db, 'cycles/c_cmt'), { commentCount: increment(-1) });
+  await assertSucceeds(d.commit());
+});
+
+test('web owner editors: updateDeviceSettings with every editor field, updateProfilePhases', async () => {
+  await seedDoc('devices/washer__ed__m', { applianceType: 'washer', status: 'approved', ownerId: 'own1' });
+  await seedDoc('profiles/washer__ed__m__eco', { deviceId: 'washer__ed__m', program: 'Eco', program_lc: 'eco', status: 'approved' });
+  const db = gh('own1').firestore();
+  // editors.js SETTINGS_FIELDS, parseFloat() values.
+  const keys = ['min_power', 'off_delay', 'start_threshold_w', 'stop_threshold_w', 'start_duration_threshold',
+    'start_energy_threshold', 'completion_min_seconds', 'running_dead_zone', 'min_off_gap', 'end_energy_threshold',
+    'power_off_threshold_w', 'power_off_delay', 'profile_match_threshold', 'profile_unmatch_threshold',
+    'profile_match_interval', 'profile_match_min_duration_ratio', 'profile_match_max_duration_ratio',
+    'profile_duration_tolerance', 'duration_tolerance', 'auto_label_confidence', 'learning_confidence'];
+  const settings = Object.fromEntries(keys.map((k, i) => [k, i % 2 ? i + 0.5 : i]));
+  await assertSucceeds(updateDoc(doc(db, 'devices/washer__ed__m'), { settings }));
+  await assertSucceeds(updateDoc(doc(db, 'devices/washer__ed__m'), { settings: {} }));    // all fields cleared
+  // The device owner edits a program's phase map (editors.js keeps any extra keys of old phases).
+  await assertSucceeds(updateDoc(doc(db, 'profiles/washer__ed__m__eco'),
+    { phases: [{ name: 'Wash', start: 0, end: 1800 }, { name: 'Spin', start: 1800, end: 2400, color: 'x' }] }));
+});
+
+// ---- Home Assistant integration (store_client.py REST :commit) ------------------------
+
+// The integration talks REST with a Firebase ID token. The emulator accepts an unsigned
+// token (alg none), the same thing @firebase/rules-unit-testing builds for its contexts.
+function b64url(s) { return Buffer.from(s).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_'); }
+function idToken(uid) {
+  const now = Math.floor(Date.now() / 1000);
+  const payload = {
+    iss: `https://securetoken.google.com/${PID}`, aud: PID, iat: now, exp: now + 3600, auth_time: now,
+    sub: uid, user_id: uid, firebase: { sign_in_provider: 'github.com', identities: {} },
+  };
+  return [b64url(JSON.stringify({ alg: 'none', kid: 'fakekid', type: 'JWT' })), b64url(JSON.stringify(payload)), ''].join('.');
+}
+// Python floats -> doubleValue, ints -> integerValue: mark floats explicitly so the typed
+// payload is byte-for-byte what store_client._encode emits.
+class F { constructor(v) { this.v = v; } }
+const f = (v) => new F(v);
+function enc(v) {
+  if (v === null || v === undefined) return { nullValue: null };
+  if (v instanceof F) return { doubleValue: v.v };
+  if (typeof v === 'boolean') return { booleanValue: v };
+  if (typeof v === 'number') return { integerValue: String(v) };
+  if (typeof v === 'string') return { stringValue: v };
+  if (Array.isArray(v)) return { arrayValue: { values: v.map(enc) } };
+  return { mapValue: { fields: Object.fromEntries(Object.entries(v).map(([k, x]) => [k, enc(x)])) } };
+}
+const DOCS = `projects/${PID}/databases/(default)/documents`;
+async function restCommit(writes, uid = null) {
+  const host = process.env.FIRESTORE_EMULATOR_HOST;
+  const res = await fetch(`http://${host}/v1/${DOCS}:commit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(uid ? { Authorization: `Bearer ${idToken(uid)}` } : {}) },
+    body: JSON.stringify({ writes }),
+  });
+  return { status: res.status, body: await res.text() };
+}
+// StoreClient._commit_create_ex: create-if-missing with a server createdAt.
+const restCreate = (path, fields, uid) => restCommit([{
+  update: { name: `${DOCS}/${path}`, fields: Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, enc(v)])) },
+  currentDocument: { exists: false },
+  updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+}], uid);
+// What the client counts as success: created, or "already exists" (idempotent re-share).
+const createOk = (r) => r.status === 200 || r.status === 409 || r.body.includes('ALREADY_EXISTS') || r.body.includes('FAILED_PRECONDITION');
+
+// store_client.upload_reference_cycle, field for field (brand -> device -> profile -> cycle).
+function haShare(uid, { type = 'washer', brand = 'HaBrand', model = 'HM-1', program = 'Eco 40', settings, phases, points, interval = 30.0 } = {}) {
+  const typeTok = type.replace('_', '-');
+  const tokn = (s) => s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const bId = brand.toLowerCase();
+  const dId = `${typeTok}__${tokn(brand)}__${tokn(model)}`;
+  const pId = `${dId}__${tokn(program)}`;
+  const device = { applianceType: type, brand, brand_lc: bId, model, model_lc: model.toLowerCase(), status: 'pending',
+    createdByUid: uid, createdByName: null, manualUrl: null, favoriteCount: 0, confirmCount: 0 };
+  if (settings) device.settings = settings;
+  const profile = { deviceId: dId, applianceType: type, program, program_lc: program.toLowerCase(), description: '',
+    status: 'pending', createdByUid: uid };
+  if (phases) Object.assign(profile, { phases, phaseSourceCycleId: 'a'.repeat(64), phasesSchemaVersion: 1 });
+  const pts = points || [[0, 1.5], [30, 2150.0], [5400, 0.8]];
+  // store_client.trace_hash: sha256 over the profile id + rounded points; the doc id.
+  const cycId = createHash('sha256').update(`${pId}|${JSON.stringify(pts)}`).digest('hex');
+  const cycle = { profileId: pId, deviceId: dId, brand_lc: bId, program_lc: program.toLowerCase(), applianceType: type,
+    uploaderUid: uid, uploaderName: 'Ha User', status: 'pending', rejectionReason: null, traceHash: cycId,
+    trace: { points: pts.map(([o, w]) => ({ o: f(o), w: f(w) })), sampleIntervalSec: f(interval) },
+    stats: { duration: f(5400.0), peak_w: f(2150.0), mean_w: f(717.4),
+      signature: { duration: f(5400.0), total_energy: f(1076.1), max_power: f(2150.0), time_to_first_high: f(30.0),
+        high_phase_ratio: f(0.31), p05: f(0.8), p25: f(1.5), p50: f(12.0), p75: f(1900.0), p95: f(2150.0) } },
+    cycleSchemaVersion: 1, downloads: 0, commentCount: 0, confirmCount: 0, qc: 1 };
+  return { bId, dId, pId, cycId, brand: { brand, brand_lc: bId, status: 'pending', createdByUid: uid }, device, profile, cycle };
+}
+
+test('integration share: brand -> device(+settings) -> profile(+phases) -> cycle, exact REST payloads', async () => {
+  const s = haShare('ha1', {
+    // Every SHAREABLE_SETTING_KEYS entry, as entry.options holds them (ints and floats).
+    settings: { min_power: 2, off_delay: f(180.0), start_threshold_w: f(5.0), stop_threshold_w: f(2.5),
+      start_duration_threshold: 10, start_energy_threshold: f(0.2), completion_min_seconds: 600, min_off_gap: 900,
+      end_energy_threshold: f(0.05), power_off_threshold_w: 0, power_off_delay: 300, profile_match_threshold: f(0.4),
+      profile_unmatch_threshold: f(0.35), profile_match_interval: 300, profile_match_min_duration_ratio: f(0.1),
+      profile_match_max_duration_ratio: f(1.8), profile_duration_tolerance: f(0.25), duration_tolerance: f(0.1),
+      auto_label_confidence: f(0.9), learning_confidence: f(0.6) },
+    phases: [{ name: 'Wash', start: f(0.0), end: f(1800.0) }, { name: 'Spin', start: f(4800.0), end: f(5400.0) }],
+  });
+  for (const [path, fields] of [[`brands/${s.bId}`, s.brand], [`devices/${s.dId}`, s.device],
+    [`profiles/${s.pId}`, s.profile], [`cycles/${s.cycId}`, s.cycle]]) {
+    const r = await restCreate(path, fields, 'ha1');
+    assert.equal(r.status, 200, `${path}: HTTP ${r.status} ${r.body.slice(0, 300)}`);
+  }
+});
+
+test('integration share: unknown sampling interval (0.0), no energy, washer_dryer, second cycle of an existing program', async () => {
+  const s = haShare('ha2', { type: 'washer_dryer', brand: 'Fisher & Paykel', model: 'WD 8060', program: 'Cotton', interval: 0.0 });
+  for (const [path, fields] of [[`brands/${s.bId}`, s.brand], [`devices/${s.dId}`, s.device],
+    [`profiles/${s.pId}`, s.profile], [`cycles/${s.cycId}`, s.cycle]]) {
+    const r = await restCreate(path, fields, 'ha2');
+    assert.equal(r.status, 200, `${path}: HTTP ${r.status} ${r.body.slice(0, 300)}`);
+  }
+  // Re-share (another user, same program): ancestors already exist, so the create
+  // precondition refuses them -- which the client treats as success -- and the new cycle lands.
+  const t = haShare('ha3', { type: 'washer_dryer', brand: 'Fisher & Paykel', model: 'WD 8060', program: 'Cotton',
+    points: [[0, 1.0], [60, 2000.0], [6000, 0.5]] });
+  for (const [path, fields] of [[`brands/${t.bId}`, t.brand], [`devices/${t.dId}`, t.device], [`profiles/${t.pId}`, t.profile]]) {
+    const r = await restCreate(path, fields, 'ha3');
+    assert.ok(createOk(r), `${path}: HTTP ${r.status} ${r.body.slice(0, 300)}`);
+  }
+  const r = await restCreate(`cycles/${t.cycId}x`, { ...t.cycle, traceHash: `${t.cycId}x` }, 'ha3');
+  assert.equal(r.status, 200, `cycle: HTTP ${r.status} ${r.body.slice(0, 300)}`);
+  // An identical re-upload collides on the content-hash id: refused, counted as "duplicate".
+  const dup = await restCreate(`cycles/${t.cycId}x`, { ...t.cycle, traceHash: `${t.cycId}x` }, 'ha3');
+  assert.ok(createOk(dup) && dup.status !== 200, `duplicate: HTTP ${dup.status} ${dup.body.slice(0, 300)}`);
+});
+
+test('integration share is refused when its payload is tampered (same REST path)', async () => {
+  const s = haShare('ha4', { brand: 'TamperCo' });
+  for (const [path, fields] of [[`brands/${s.bId}`, s.brand], [`devices/${s.dId}`, s.device], [`profiles/${s.pId}`, s.profile]]) {
+    assert.equal((await restCreate(path, fields, 'ha4')).status, 200);
+  }
+  const bad = await restCreate(`cycles/${s.cycId}`, { ...s.cycle, stats: { ...s.cycle.stats, peak_w: XSS } }, 'ha4');
+  assert.equal(bad.status, 403);
+  const badId = await restCreate(`cycles/${s.cycId}`, { ...s.cycle, traceHash: 'not-the-doc-id' }, 'ha4');
+  assert.equal(badId.status, 403);
+  const badSettings = await restCreate('devices/washer__tamperco__other', { ...s.device, model: 'Other', model_lc: 'other', settings: { junk: 1 } }, 'ha4');
+  assert.equal(badSettings.status, 403);
+});
+
+test('integration confirm_device / promote / rate_device / bump_downloads / bump_analytics', async () => {
+  await seedDoc('config/site', { confirmThreshold: 1 });
+  await seedDoc('devices/washer__haconf__m', { applianceType: 'washer', brand: 'HaConf', brand_lc: 'haconf', status: 'pending', confirmCount: 0 });
+  await seedDoc('cycles/ha-dl', { ...validCycle('owner'), status: 'approved', downloads: 0, createdAt: new Date() });
+  const dev = `${DOCS}/devices/washer__haconf__m`;
+  const conf = await restCommit([
+    { update: { name: `${dev}/confirmations/hc1`, fields: { uid: enc('hc1') } }, currentDocument: { exists: false },
+      updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }] },
+    { transform: { document: dev, fieldTransforms: [{ fieldPath: 'confirmCount', increment: enc(1) }] } },
+  ], 'hc1');
+  assert.equal(conf.status, 200, conf.body.slice(0, 300));
+  const promote = await restCommit([{ update: { name: dev, fields: { status: enc('approved') } },
+    updateMask: { fieldPaths: ['status'] }, currentDocument: { exists: true } }], 'hc1');
+  assert.equal(promote.status, 200, promote.body.slice(0, 300));
+  const rate = await restCommit([{ update: { name: `${dev}/ratings/hc1`, fields: { uid: enc('hc1'), rating: enc(4) } },
+    updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }] }], 'hc1');
+  assert.equal(rate.status, 200, rate.body.slice(0, 300));
+  // Anonymous, as the integration sends them.
+  const dl = await restCommit([{ transform: { document: `${DOCS}/cycles/ha-dl`,
+    fieldTransforms: [{ fieldPath: 'downloads', increment: enc(1) }] } }]);
+  assert.equal(dl.status, 200, dl.body.slice(0, 300));
+  const an = await restCommit([
+    { transform: { document: `${DOCS}/analytics/daily_20261002`, fieldTransforms: [{ fieldPath: 'downloads', increment: enc(1) }] } },
+    { transform: { document: `${DOCS}/analytics/totals`, fieldTransforms: [{ fieldPath: 'downloads', increment: enc(1) }] } },
+  ]);
+  assert.equal(an.status, 200, an.body.slice(0, 300));
+  await seedDoc('config/site', { confirmThreshold: 5 });
 });

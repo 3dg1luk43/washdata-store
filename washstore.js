@@ -30,7 +30,6 @@ import {
   getDoc,
   getDocs,
   setDoc,
-  addDoc,
   updateDoc,
   deleteDoc,
   query,
@@ -311,7 +310,7 @@ export async function ensureDevice({ applianceType, brand, model, manualUrl = nu
   if (!snap.exists()) {
     const user = _auth.currentUser;
     if (!user) throw new Error('Not signed in');
-    await setDoc(ref, {
+    const data = {
       applianceType,
       brand,
       brand_lc: brand.toLowerCase(),
@@ -324,9 +323,12 @@ export async function ensureDevice({ applianceType, brand, model, manualUrl = nu
       createdAt: serverTimestamp(),
       favoriteCount: 0,
       confirmCount: 0,
-    });
-    // Increment brand's stored device counter (best-effort; rules allow exactly +1).
-    try { await updateDoc(doc(_db, 'brands', brand.toLowerCase()), { deviceCount: increment(1) }); } catch (_) {}
+    };
+    // The brand's device counter may only move in the batch that creates the device it
+    // counts (the rule checks lastDeviceId was created by this very commit).
+    await _createWithCounters(ref, data, [
+      { ref: doc(_db, 'brands', brand.toLowerCase()), field: 'deviceCount', link: 'lastDeviceId' },
+    ]);
     invalidateCatalogCache();  // a new device must appear in the cached listing immediately
   }
   return id;
@@ -534,7 +536,7 @@ export async function ensureProfile({ deviceId, program, description = '' }) {
   if (!snap.exists()) {
     const user = _auth.currentUser;
     if (!user) throw new Error('Not signed in');
-    await setDoc(ref, {
+    await _createWithCounters(ref, {
       deviceId,
       applianceType: deviceId.split('__')[0],
       program,
@@ -543,11 +545,24 @@ export async function ensureProfile({ deviceId, program, description = '' }) {
       status: 'pending',
       createdByUid: user.uid,
       createdAt: serverTimestamp(),
-    });
-    // Increment device's stored profile counter (best-effort; rules allow exactly +1).
-    try { await updateDoc(doc(_db, 'devices', deviceId), { profileCount: increment(1) }); } catch (_) {}
+    }, [{ ref: doc(_db, 'devices', deviceId), field: 'profileCount', link: 'lastProfileId' }]);
   }
   return id;
+}
+
+// Create `ref` and bump each parent's denormalized counter in ONE batch. The rules only
+// accept a counter +1 that names (via `link`) a child created by the same commit, so a
+// bare increment is refused. Counters stay best-effort: if the batch is refused (e.g. a
+// parent doc is missing), the child is still created on its own.
+async function _createWithCounters(ref, data, counters) {
+  const batch = writeBatch(_db);
+  batch.set(ref, data);
+  for (const c of counters) batch.update(c.ref, { [c.field]: increment(1), [c.link]: ref.id });
+  try {
+    await batch.commit();
+  } catch (_) {
+    await setDoc(ref, data);
+  }
 }
 
 export async function getDevice(id) {
@@ -1075,6 +1090,9 @@ export async function createProfile({ deviceId, program, description = '' }) {
   if (typeof program !== 'string' || program.trim().length < 1 || program.length > 60) {
     throw new Error('Profile name must be 1-60 characters');
   }
+  if (typeof description !== 'string' || description.length > 2000) {
+    throw new Error('Description must be at most 2000 characters');
+  }
   _rateGuard();
   return ensureProfile({ deviceId, program: program.trim(), description });
 }
@@ -1208,15 +1226,14 @@ export async function uploadReferenceCycle(meta, tracePoints, stats, qc = 3) {
     throw new Error(`Cycle exceeds the ${Math.round(MAX_DOC_BYTES / 1024)}KB size limit. Downsample the trace further.`);
   }
 
-  const ref = await addDoc(collection(_db, 'cycles'), docData);
-  // Increment denormalized counts on the profile, device, and brand (best-effort).
-  try {
-    await Promise.all([
-      updateDoc(doc(_db, 'profiles', profId), { cycleCount: increment(1) }),
-      updateDoc(doc(_db, 'devices', devId), { cycleCount: increment(1) }),
-      updateDoc(doc(_db, 'brands', brand.toLowerCase()), { cycleCount: increment(1) }),
-    ]);
-  } catch (_) {}
+  // Create the cycle and bump the profile/device/brand counters in one batch (the rules tie
+  // each +1 to this cycle via lastCycleId); best-effort, as before.
+  const ref = doc(collection(_db, 'cycles'));
+  await _createWithCounters(ref, docData, [
+    { ref: doc(_db, 'profiles', profId), field: 'cycleCount', link: 'lastCycleId' },
+    { ref: doc(_db, 'devices', devId), field: 'cycleCount', link: 'lastCycleId' },
+    { ref: doc(_db, 'brands', brand.toLowerCase()), field: 'cycleCount', link: 'lastCycleId' },
+  ]);
   return ref.id;
 }
 

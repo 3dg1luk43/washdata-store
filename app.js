@@ -170,10 +170,27 @@ function maybeLoadBrowse() {
 }
 
 // ============================================================ helpers
-function _pluralize(n, word) { return `${n} ${word}${n === 1 ? '' : 's'}`; }
+function _pluralize(n, word) { const v = num(n); return `${v} ${word}${v === 1 ? '' : 's'}`; }
 function esc(str) {
   if (str == null) return '';
-  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+// Stored numbers rendered into HTML go through these, never raw: the rules type-check new
+// writes, but older docs and admin-written ones are not, and a string in a "numeric" field
+// (stats.peak_w, a counter) would otherwise be injected as markup. A non-finite value
+// renders as the fallback.
+function num(x, fallback = 0) {
+  if (x == null || x === '') return fallback;
+  const n = Number(x);
+  return Number.isFinite(n) ? n : fallback;
+}
+// `x / scale` with an optional fixed precision and unit suffix, or '-' when x is not a number.
+function fmtUnit(x, suffix = '', scale = 1, digits = null) {
+  const n = num(x, null);
+  if (n == null) return '-';
+  const v = n / scale;
+  return `${digits == null ? v : v.toFixed(digits)}${suffix}`;
 }
 // Defense-in-depth for hrefs: only allow absolute http(s) URLs. The write rules
 // already enforce this on manualUrl, but the render layer must never trust stored
@@ -507,9 +524,9 @@ function statusBadge(rec, kind) {
     // counter. Profiles have neither and stay a plain "awaiting approval".
     let label = 'Pending';
     if (kind === 'brand') {
-      label = `Pending &middot; ${rec.approvedDeviceCount || 0}/${_brandThreshold} models`;
+      label = `Pending &middot; ${num(rec.approvedDeviceCount)}/${num(_brandThreshold)} models`;
     } else if (typeof rec.confirmCount === 'number') {
-      label = `Pending &middot; ${rec.confirmCount}/${_confirmThreshold}`;
+      label = `Pending &middot; ${num(rec.confirmCount)}/${num(_confirmThreshold)}`;
     }
     return `<span class="badge badge-pending">${label}</span>`;
   }
@@ -830,7 +847,7 @@ function buildDeviceCard(d) {
       </div>
       <div class="card-title">${esc(d.brand)} ${esc(modelOf(d))}</div>
       <div class="card-counts"><span>${_pluralize(d.profileCount || 0, 'profile')}</span> <span class="dot">&middot;</span> <span>${_pluralize(d.cycleCount || 0, 'cycle')}</span></div>
-      <div class="card-meta"><span>&#11088; <span data-favcount>${d.favoriteCount || 0}</span></span><span data-devrating hidden></span><span>by ${esc(d.createdByName || 'Anonymous')}</span>${manual}</div>
+      <div class="card-meta"><span>&#11088; <span data-favcount>${num(d.favoriteCount)}</span></span><span data-devrating hidden></span><span>by ${esc(d.createdByName || 'Anonymous')}</span>${manual}</div>
       <div class="card-community" data-community></div>
     </div>
     <div class="card-actions">
@@ -900,7 +917,7 @@ async function doConfirmDevice(box, d, btn) {
     if (badges) {
       const b = badges.querySelector('.badge-pending');
       if (res.status === 'approved') { if (b) b.remove(); }
-      else if (b) b.innerHTML = `Pending &middot; ${res.confirmCount}/${_confirmThreshold}`;
+      else if (b) b.innerHTML = `Pending &middot; ${num(res.confirmCount)}/${num(_confirmThreshold)}`;
     }
     // Confirming the Nth model can carry its BRAND over the line too. Say so, otherwise the
     // brand silently changes status somewhere the user is not looking.
@@ -989,9 +1006,9 @@ async function openDevice(d) {
       </div>
       <h2 class="device-header-title">${esc(d.brand)} <span class="device-header-model">${esc(modelOf(d))}</span></h2>
       <div class="device-header-stats">
-        <span>&#11088; ${d.favoriteCount || 0} saves</span>
+        <span>&#11088; ${num(d.favoriteCount)} saves</span>
         <span>&middot;</span>
-        <span>&#10003; ${d.confirmCount || 0} confirmations</span>
+        <span>&#10003; ${num(d.confirmCount)} confirmations</span>
         <span>&middot;</span>
         <span>${_pluralize(profiles.length, 'profile')}</span>
         <span>&middot;</span>
@@ -1093,10 +1110,10 @@ function buildCycleCard(c) {
     <div class="card-body">
       <div class="card-title">${esc(_profile ? _profile.program : c.program_lc)}</div>
       ${badge ? `<div class="card-badges">${badge}</div>` : ''}
-      <div class="card-subtitle mono-data">${formatDuration(st.duration)} &middot; ${st.energy_wh != null ? (st.energy_wh / 1000).toFixed(2) + ' kWh' : '-'}</div>
+      <div class="card-subtitle mono-data">${formatDuration(st.duration)} &middot; ${fmtUnit(st.energy_wh, ' kWh', 1000, 2)}</div>
       <div class="card-meta">
         <span>by ${esc(c.uploaderName || 'Anonymous')}</span>
-        <span>&middot; ${c.downloads || 0} dl</span>
+        <span>&middot; ${num(c.downloads)} dl</span>
         <span data-crating hidden>&middot; &#9733; <span></span></span>
       </div>
       <div class="card-community" data-community></div>
@@ -1238,13 +1255,13 @@ function buildDetailGrid(c) {
     <div class="detail-item"><span class="detail-label">Profile</span><span class="detail-value">${esc(_profile ? _profile.program : c.program_lc)}</span></div>
     <div class="detail-item"><span class="detail-label">Type</span><span class="detail-value">${esc(typeLabel(c.applianceType))}</span></div>
     <div class="detail-item"><span class="detail-label">Duration</span><span class="detail-value mono-data">${formatDuration(st.duration)}</span></div>
-    <div class="detail-item"><span class="detail-label">Energy</span><span class="detail-value mono-data">${st.energy_wh != null ? (st.energy_wh / 1000).toFixed(3) + ' kWh' : '-'}</span></div>
-    <div class="detail-item"><span class="detail-label">Peak</span><span class="detail-value mono-data">${st.peak_w != null ? st.peak_w + ' W' : '-'}</span></div>
-    <div class="detail-item"><span class="detail-label">Interval</span><span class="detail-value mono-data">${c.trace && c.trace.sampleIntervalSec != null ? c.trace.sampleIntervalSec + 's' : '-'}</span></div>
+    <div class="detail-item"><span class="detail-label">Energy</span><span class="detail-value mono-data">${fmtUnit(st.energy_wh, ' kWh', 1000, 3)}</span></div>
+    <div class="detail-item"><span class="detail-label">Peak</span><span class="detail-value mono-data">${fmtUnit(st.peak_w, ' W')}</span></div>
+    <div class="detail-item"><span class="detail-label">Interval</span><span class="detail-value mono-data">${fmtUnit(c.trace && c.trace.sampleIntervalSec, 's')}</span></div>
     <div class="detail-item"><span class="detail-label">Uploader</span><span class="detail-value">${esc(c.uploaderName || 'Anonymous')}</span></div>
     <div class="detail-item"><span class="detail-label">Uploaded</span><span class="detail-value">${formatDate(c.createdAt)}</span></div>
-    <div class="detail-item"><span class="detail-label">Downloads</span><span class="detail-value mono-data">${c.downloads || 0}</span></div>
-    <div class="detail-item"><span class="detail-label">Schema v</span><span class="detail-value mono-data">${c.cycleSchemaVersion ?? '-'}</span></div>
+    <div class="detail-item"><span class="detail-label">Downloads</span><span class="detail-value mono-data">${num(c.downloads)}</span></div>
+    <div class="detail-item"><span class="detail-label">Schema v</span><span class="detail-value mono-data">${num(c.cycleSchemaVersion, '-')}</span></div>
   </div>`;
 }
 
@@ -1284,7 +1301,7 @@ function renderStars(summary, current, id) {
       <div class="rating-stars" id="star-row" aria-label="Rate this cycle">
         ${[1, 2, 3, 4, 5].map((n) => `<button class="star${n <= current ? ' filled' : ''}" data-n="${n}" aria-label="${n} star${n > 1 ? 's' : ''}">&#9733;</button>`).join('')}
       </div><span class="rating-info">${esc(avgInfo)}</span></div>
-    ${current ? `<div class="text-muted" style="font-size:.75rem">Your rating: ${current}/5</div>` : ''}`;
+    ${current ? `<div class="text-muted" style="font-size:.75rem">Your rating: ${num(current)}/5</div>` : ''}`;
   const stars = Array.from($('star-row').querySelectorAll('.star'));
   stars.forEach((btn) => {
     btn.addEventListener('mouseenter', () => { const n = +btn.dataset.n; stars.forEach((s) => s.classList.toggle('hov', +s.dataset.n <= n)); });

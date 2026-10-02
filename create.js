@@ -48,7 +48,8 @@ const CAN_POST_BACK = !!(window.opener && isAllowedOrigin(OPENER_ORIGIN));
 function $(id) { return document.getElementById(id); }
 function esc(s) {
   if (s == null) return '';
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 function toast(msg, type = 'success') {
   const el = document.createElement('div');

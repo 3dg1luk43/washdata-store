@@ -63,9 +63,9 @@ Contributions require a GitHub account. Sign in once; your public GitHub display
 
 ## The approval system
 
-Every new entry -- brand, device, program, or reference cycle -- starts as **pending**. Pending entries are visible to signed-in users but not shown in public browsing or to the ha_washdata integration.
+Every new entry -- brand, device, program, or reference cycle -- starts as **pending**. Pending entries are public: they are searchable with an "awaiting approval" tag, and the ha_washdata integration can download them.
 
-An entry is promoted to **approved** automatically when five distinct GitHub users confirm it (the threshold is admin-tunable). Any signed-in user can open a pending entry and click **Confirm** if it looks correct. When the count reaches the threshold the entry is auto-approved instantly, with no moderator action needed.
+A device or reference cycle is promoted to **approved** automatically when five distinct GitHub users confirm it (the threshold is admin-tunable). Any signed-in user can open a pending entry and click **Confirm** if it looks correct. When the count reaches the threshold the entry is auto-approved instantly, with no moderator action needed. A brand is approved once enough of its devices are; programs are approved by a moderator.
 
 Confirmation documents are create-only and one-per-user, so the vote count cannot be inflated. Moderators can also approve, reject, or delete entries at any time through the admin panel.
 
@@ -139,7 +139,7 @@ The store has no server process. It is:
 - **Backend:** Cloud Firestore (Firebase free/Spark plan). The security-rules file is the entire access-control layer; admin operations require existence in a server-side `admins` collection not writable via the client.
 - **Hosting:** GitHub Pages (static files only).
 - **Auth:** Firebase Auth with GitHub OAuth. Contributors must authenticate; public browsing uses the Firestore REST API directly (no WebChannel handshake, faster cold load).
-- **Python client:** `washstore_client.py` -- a `requests`-based read-only client used by the ha_washdata integration. It signs in anonymously via the Firebase REST API and queries approved cycles without the JS SDK.
+- **Python client:** `washstore_client.py` -- a legacy `requests`-based read-only client for the old (schema v1) layout. The ha_washdata integration does not use it; it ships its own REST client (`store_client.py`).
 
 ### Data hierarchy
 

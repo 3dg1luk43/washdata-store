@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <!-- Content-Security-Policy: no inline script and no script origin beyond the ones this page
+       loads (see SECURITY.md). Inline style stays allowed: the markup uses style= attributes. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="WashData Store documentation - how to browse, contribute, and adopt appliance profiles.">
   <title>Docs - WashData Store</title>
@@ -218,35 +221,6 @@
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script>
-    (async function () {
-      const README_URL = './README.md';
-
-      const elLoading = document.getElementById('docs-loading');
-      const elError   = document.getElementById('docs-error');
-      const elContent = document.getElementById('docs-content');
-      const elErrText = document.getElementById('docs-error-text');
-
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 10000);
-      try {
-        const res = await fetch(README_URL, { signal: ctrl.signal });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const md = await res.text();
-        elContent.innerHTML = marked.parse(md);
-        elLoading.hidden = true;
-        elContent.hidden = false;
-      } catch (err) {
-        elLoading.hidden = true;
-        elErrText.textContent =
-          'Unable to load the documentation (' +
-          (err.name === 'AbortError' ? 'request timed out' : err.message) +
-          '). Check your connection or view it on GitHub directly.';
-        elError.hidden = false;
-      } finally {
-        clearTimeout(timer);
-      }
-    })();
-  </script>
+  <script src="md-page.js" data-src="./README.md" data-what="documentation"></script>
 </body>
 </html>

@@ -35,7 +35,8 @@ const msg = document.getElementById('msg');
 const retry = document.getElementById('retry');
 
 function escHtml(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 // The HA panel passes its own origin. Accept only a bare http(s) origin (never '*',

@@ -99,7 +99,22 @@ function filterRows(inputId, tbody) {
 }
 function esc(str) {
   if (str == null) return '';
-  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+// Stored numbers rendered into HTML go through these, never raw (see app.js): this panel is
+// where every pending contribution is opened, so a string smuggled into a "numeric" field
+// must never reach innerHTML as markup. A non-finite value renders as the fallback.
+function num(x, fallback = 0) {
+  if (x == null || x === '') return fallback;
+  const n = Number(x);
+  return Number.isFinite(n) ? n : fallback;
+}
+function fmtUnit(x, suffix = '', scale = 1, digits = null) {
+  const n = num(x, null);
+  if (n == null) return '-';
+  const v = n / scale;
+  return `${digits == null ? v : v.toFixed(digits)}${suffix}`;
 }
 function formatDate(ts) {
   if (!ts) return '-';
@@ -276,12 +291,12 @@ async function loadOverview() {
   try {
     const s = await ensureStats(true);
     $('stats-grid').innerHTML = `
-      <div class="stat-card stat-card-link" id="ov-reports-card"><div class="stat-label">Open Reports</div><div class="stat-value ${s.openReports ? 'c-rejected' : 'c-approved'}">${s.openReports}</div></div>
-      <div class="stat-card"><div class="stat-label">Pending Review</div><div class="stat-value c-pending">${s.pending}</div>${statBreakdown(s.pendingByType)}</div>
-      <div class="stat-card"><div class="stat-label">Approved</div><div class="stat-value c-approved">${s.approved}</div>${statBreakdown(s.approvedByType)}</div>
-      <div class="stat-card"><div class="stat-label">Rejected</div><div class="stat-value c-rejected">${s.rejected}</div></div>
-      <div class="stat-card"><div class="stat-label">Removed</div><div class="stat-value c-removed">${s.removed}</div>${statBreakdown(s.removedByType)}</div>
-      <div class="stat-card"><div class="stat-label">Banned Users</div><div class="stat-value c-ban">${s.bannedUsers}</div></div>`;
+      <div class="stat-card stat-card-link" id="ov-reports-card"><div class="stat-label">Open Reports</div><div class="stat-value ${s.openReports ? 'c-rejected' : 'c-approved'}">${num(s.openReports)}</div></div>
+      <div class="stat-card"><div class="stat-label">Pending Review</div><div class="stat-value c-pending">${num(s.pending)}</div>${statBreakdown(s.pendingByType)}</div>
+      <div class="stat-card"><div class="stat-label">Approved</div><div class="stat-value c-approved">${num(s.approved)}</div>${statBreakdown(s.approvedByType)}</div>
+      <div class="stat-card"><div class="stat-label">Rejected</div><div class="stat-value c-rejected">${num(s.rejected)}</div></div>
+      <div class="stat-card"><div class="stat-label">Removed</div><div class="stat-value c-removed">${num(s.removed)}</div>${statBreakdown(s.removedByType)}</div>
+      <div class="stat-card"><div class="stat-label">Banned Users</div><div class="stat-value c-ban">${num(s.bannedUsers)}</div></div>`;
     setOpenReports(s.openReports);
     const rc = $('ov-reports-card');
     if (rc) rc.addEventListener('click', () => { switchTab('reports'); if (!_reportsLoaded) loadReports(true); });
@@ -405,7 +420,7 @@ function buildCycleRow(c) {
     <td class="text-muted" style="font-size:.72rem">${esc(qcLabel(c.qc))}</td>
     <td class="text-muted truncate" title="${esc(c.uploaderName || '')}">${esc(truncate(c.uploaderName || 'Anon', 14))}</td>
     <td class="text-muted" style="white-space:nowrap;font-size:.72rem">${formatDate(c.createdAt)}</td>
-    <td class="text-muted">${c.downloads || 0}</td>
+    <td class="text-muted">${num(c.downloads)}</td>
     <td class="text-muted" data-rating style="white-space:nowrap;font-size:.72rem">&hellip;</td>
     <td><div class="action-cell"></div></td>`;
   buildCycleActions(tr.querySelector('.action-cell'), c, tr);
@@ -1022,7 +1037,7 @@ function renderCatDevices() {
     const metaParts = [
       esc(typeLabel(device.applianceType)),
       `${profCount} profile${profCount !== 1 ? 's' : ''}`,
-      device.favoriteCount ? `⭐ ${device.favoriteCount}` : null,
+      device.favoriteCount ? `⭐ ${num(device.favoriteCount)}` : null,
       device.ownerId ? `owner: <span class="cat-owner-label">${esc(resolveOwnerLabel(device.ownerId))}</span>` : null,
     ].filter(Boolean).join(' · ');
     const card = catMakeCard(device, device.model || device.id, metaParts);
@@ -1122,7 +1137,7 @@ async function renderCatCyclesLevel() {
         <td class="text-muted" style="font-size:.72rem">${esc(qcLabel(c.qc))}</td>
         <td class="text-muted truncate" title="${esc(c.uploaderName || '')}">${esc(truncate(c.uploaderName || 'Anon', 14))}</td>
         <td class="text-muted" style="white-space:nowrap;font-size:.72rem">${formatDate(c.createdAt)}</td>
-        <td class="text-muted">${c.downloads || 0}</td>
+        <td class="text-muted">${num(c.downloads)}</td>
         <td class="text-muted" data-rating style="white-space:nowrap;font-size:.72rem">&hellip;</td>
         <td><div class="action-cell"></div></td>`;
       buildCycleActions(tr.querySelector('.action-cell'), c, tr);
@@ -1187,7 +1202,7 @@ async function updateUsersCount() {
 
 // Repeat-offender strike cell: number of this user's contributions an admin has removed.
 function strikeCellHTML(u) {
-  const n = u.removedContentCount || 0;
+  const n = num(u.removedContentCount);
   if (!n) return '<span class="text-muted">0</span>';
   return `<span class="strike-badge${n >= 3 ? ' strike-high' : ''}" title="Contributions removed by moderators">&#9873; ${n}</span>`;
 }
@@ -1197,7 +1212,7 @@ function buildUserRow(u) {
   const name = u.displayName || u.githubLogin || u.email || u.uid.slice(0, 12);
   tr.dataset.search = `${name} ${u.githubLogin || ''} ${u.email || ''} ${u.uid} ${u.status || ''}`.toLowerCase();
   const initial = name.charAt(0).toUpperCase();
-  const avatar = u.photoURL ? `<img src="${esc(u.photoURL)}" alt="">` : initial;
+  const avatar = u.photoURL ? `<img src="${esc(u.photoURL)}" alt="">` : esc(initial);
   tr.innerHTML = `
     <td><div class="user-cell"><div class="user-cell-avatar">${avatar}</div><span style="font-size:.8125rem;font-weight:500">${esc(name)}</span></div></td>
     <td><code class="mono" style="font-size:.7rem">${esc(truncate(u.uid, 12))}</code></td>
@@ -1270,10 +1285,10 @@ function openReviewModal(c) {
       <div class="detail-item"><span class="detail-label">Uploader</span><span class="detail-value">${esc(c.uploaderName || 'Anonymous')}</span></div>
       <div class="detail-item"><span class="detail-label">Provenance</span><span class="detail-value">${esc(qcLabel(c.qc))}</span></div>
       <div class="detail-item"><span class="detail-label">Duration</span><span class="detail-value">${formatDuration(st.duration)}</span></div>
-      <div class="detail-item"><span class="detail-label">Energy</span><span class="detail-value">${st.energy_wh != null ? (st.energy_wh / 1000).toFixed(3) + ' kWh' : '-'}</span></div>
-      <div class="detail-item"><span class="detail-label">Peak</span><span class="detail-value">${st.peak_w != null ? st.peak_w + ' W' : '-'}</span></div>
-      <div class="detail-item"><span class="detail-label">Points</span><span class="detail-value">${c.trace && c.trace.points ? c.trace.points.length : 0}</span></div>
-      <div class="detail-item"><span class="detail-label">Schema v</span><span class="detail-value">${c.cycleSchemaVersion ?? '-'}</span></div>
+      <div class="detail-item"><span class="detail-label">Energy</span><span class="detail-value">${fmtUnit(st.energy_wh, ' kWh', 1000, 3)}</span></div>
+      <div class="detail-item"><span class="detail-label">Peak</span><span class="detail-value">${fmtUnit(st.peak_w, ' W')}</span></div>
+      <div class="detail-item"><span class="detail-label">Points</span><span class="detail-value">${c.trace && Array.isArray(c.trace.points) ? c.trace.points.length : 0}</span></div>
+      <div class="detail-item"><span class="detail-label">Schema v</span><span class="detail-value">${num(c.cycleSchemaVersion, '-')}</span></div>
     </div>
     <div style="margin-top:.875rem"><div class="detail-label" style="margin-bottom:.35rem">Trace preview</div>
       <pre class="envelope-json" style="max-height:180px">${esc(JSON.stringify({ deviceId: c.deviceId, profileId: c.profileId, stats: c.stats }, null, 2))}</pre></div>`;
@@ -1447,8 +1462,8 @@ async function renderReportIdentity(card, g, live) {
   let isCycle = false;
   if (g.targetType === 'brand') {
     parts.push(main(live.brand || g.targetId));
-    if (live.deviceCount != null) parts.push(`${live.deviceCount} device${live.deviceCount === 1 ? '' : 's'}`);
-    if (live.cycleCount != null) parts.push(`${live.cycleCount} cycle${live.cycleCount === 1 ? '' : 's'}`);
+    if (live.deviceCount != null) { const n = num(live.deviceCount); parts.push(`${n} device${n === 1 ? '' : 's'}`); }
+    if (live.cycleCount != null) { const n = num(live.cycleCount); parts.push(`${n} cycle${n === 1 ? '' : 's'}`); }
   } else if (g.targetType === 'device') {
     parts.push(main(`${live.brand || ''} ${live.model || g.targetId}`.trim()));
     if (live.applianceType) parts.push(typeChip(live.applianceType));
@@ -1463,7 +1478,7 @@ async function renderReportIdentity(card, g, live) {
     const who = isCycle ? live.uploaderName : live.createdByName;
     if (who) parts.push(`by ${esc(who)}`);
     if (isCycle && live.createdAt) parts.push(formatDate(live.createdAt));
-    if (isCycle && live.downloads != null) parts.push(`${live.downloads} DL`);
+    if (isCycle && live.downloads != null) parts.push(`${num(live.downloads)} DL`);
   } else if (g.targetType === 'comment') {
     parts.push(main(`"${truncate(live.text || '', 80)}"`));
     if (live.authorName) parts.push(`by ${esc(live.authorName)}`);
@@ -1520,7 +1535,7 @@ async function renderReportCreator(container, creatorUid, card, g) {
   let u = null;
   try { u = await lookup; } catch (_) { _reportUserCache.delete(creatorUid); u = null; }
   const name = (u && (u.displayName || u.githubLogin)) || truncate(creatorUid, 12);
-  const strikes = (u && u.removedContentCount) || 0;
+  const strikes = num(u && u.removedContentCount);
   const banned = u && u.status === 'banned';
   const strikeBadge = strikes > 0 ? `<span class="strike-badge${strikes >= 3 ? ' strike-high' : ''}" title="Contributions removed">&#9873; ${strikes} removed</span>` : '';
   container.innerHTML = `
@@ -1656,7 +1671,7 @@ function _statCard(label, value, colorClass) {
 
 function _buildActivityChart(daily, field) {
   if (!daily.length) return '<div class="text-muted" style="font-size:.875rem;padding:.5rem 0">No data yet.</div>';
-  const vals = daily.map((d) => d[field] || 0);
+  const vals = daily.map((d) => num(d[field]));
   const maxVal = Math.max(...vals, 1);
   const n = daily.length;
   // Viewbox: 700 wide, 96 tall (80 chart + 16 label row).
@@ -1667,13 +1682,13 @@ function _buildActivityChart(daily, field) {
     const x = padX + i * (barW + gap);
     const y = CH - h;
     const op = v > 0 ? '1' : '0.2';
-    return `<rect x="${x}" y="${y}" width="${barW}" height="${h}" rx="1" opacity="${op}"><title>${daily[i].date}: ${v}</title></rect>`;
+    return `<rect x="${x}" y="${y}" width="${barW}" height="${h}" rx="1" opacity="${op}"><title>${esc(daily[i].date)}: ${v}</title></rect>`;
   }).join('');
   // Date axis: first / middle / last
   const axisIdx = [0, Math.floor((n - 1) / 2), n - 1];
   const axis = axisIdx.map((i) => {
     const cx = padX + i * (barW + gap) + barW / 2;
-    return `<text x="${cx}" y="${CH + LH - 1}" text-anchor="middle" font-size="9" fill="currentColor" opacity=".55">${daily[i].date.slice(5)}</text>`;
+    return `<text x="${cx}" y="${CH + LH - 1}" text-anchor="middle" font-size="9" fill="currentColor" opacity=".55">${esc(String(daily[i].date || '').slice(5))}</text>`;
   }).join('');
   return `<svg viewBox="0 0 ${W} ${CH + LH}" width="100%" class="analytics-chart" role="img" aria-label="Integration downloads per day">
     <g fill="var(--accent,#6c8ebf)">${bars}</g>${axis}</svg>`;

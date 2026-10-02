@@ -57,6 +57,116 @@ service cloud.firestore {
         && request.resource.data.createdAt == request.time;
     }
 
+    // ---- Shape validation for contributor-created catalog data ---------------------------
+    // Everything a contributor writes is rendered by the website and downloaded by the
+    // integration, so the create rules below pin the field list, the types and the parent
+    // links instead of trusting the client. Admin writes keep their own unrestricted branch.
+
+    // A finite number in a sane range. NaN and +/-Infinity fail every comparison, so they are
+    // rejected too (rules have no isFinite). Rules literals cannot use exponent notation.
+    function finiteNum(v) { return v is number && v > -1000000000000 && v < 1000000000000; }
+    function optFiniteNum(m, k) { return !(k in m) || finiteNum(m[k]); }
+    // A counter the creator may only omit or initialise to zero.
+    function zeroOrAbsent(m, k) { return m.get(k, 0) == 0; }
+    function optText(v, max) { return v == null || (v is string && v.size() <= max); }
+    // One normalised id token, exactly what lib/ids.js normalizeToken (and the integration's
+    // store_client.normalize_token) can emit: letters/digits of any script and '-'. It holds
+    // no '/' (so an id can never step outside its document when interpolated into a path) and
+    // no regex metacharacter (so an id is safe to splice into a matches() pattern).
+    function tok() { return '[\\p{L}\\p{N}-]*'; }
+    // devices/{type__brand__model}; the type token is normalizeToken(applianceType), so
+    // washer_dryer is spelled washer-dryer in the id.
+    function isDeviceId(v) { return v is string && v.size() <= 300 && v.matches('[a-z-]+__' + tok() + '__' + tok()); }
+    function isProfileId(v) { return v is string && v.size() <= 400 && v.matches('[a-z-]+__' + tok() + '__' + tok() + '__' + tok()); }
+    function idOfType(id, type) { return id.matches(type.replace('_', '-') + '__.*'); }
+    function applianceTypeOk(t) { return t in ['washer', 'dryer', 'dishwasher', 'washer_dryer']; }
+
+    // Shared device settings: the integration's SHAREABLE_SETTING_KEYS (+ the retired
+    // running_dead_zone the web editor still lists), each a non-negative finite number.
+    function settingOk(s, k) { return !(k in s) || (s[k] is number && s[k] >= 0 && s[k] <= 1000000000); }
+    function settingsOk(s) {
+      return s is map
+        && s.keys().hasOnly(['min_power', 'off_delay', 'start_threshold_w', 'stop_threshold_w',
+             'start_duration_threshold', 'start_energy_threshold', 'completion_min_seconds',
+             'running_dead_zone', 'min_off_gap', 'end_energy_threshold', 'power_off_threshold_w',
+             'power_off_delay', 'profile_match_threshold', 'profile_unmatch_threshold',
+             'profile_match_interval', 'profile_match_min_duration_ratio',
+             'profile_match_max_duration_ratio', 'profile_duration_tolerance', 'duration_tolerance',
+             'auto_label_confidence', 'learning_confidence'])
+        && settingOk(s, 'min_power') && settingOk(s, 'off_delay') && settingOk(s, 'start_threshold_w')
+        && settingOk(s, 'stop_threshold_w') && settingOk(s, 'start_duration_threshold')
+        && settingOk(s, 'start_energy_threshold') && settingOk(s, 'completion_min_seconds')
+        && settingOk(s, 'running_dead_zone') && settingOk(s, 'min_off_gap')
+        && settingOk(s, 'end_energy_threshold') && settingOk(s, 'power_off_threshold_w')
+        && settingOk(s, 'power_off_delay') && settingOk(s, 'profile_match_threshold')
+        && settingOk(s, 'profile_unmatch_threshold') && settingOk(s, 'profile_match_interval')
+        && settingOk(s, 'profile_match_min_duration_ratio')
+        && settingOk(s, 'profile_match_max_duration_ratio')
+        && settingOk(s, 'profile_duration_tolerance') && settingOk(s, 'duration_tolerance')
+        && settingOk(s, 'auto_label_confidence') && settingOk(s, 'learning_confidence');
+    }
+    // A phase map. Rules cannot loop over a list, so only its type and length are enforced;
+    // the element contents are coerced by every consumer (web editor, integration download).
+    function phasesOk(p) { return p is list && p.size() <= 50; }
+    // A reference-cycle trace, {points: [{o, w}, ...], sampleIntervalSec}. The point list is
+    // bounded and its first and last points are type-checked; the interior cannot be iterated
+    // by rules, so readers coerce every point (lib/trace.js unpackPoints, the integration's
+    // import gate) instead of trusting it.
+    function pointOk(p) { return p is map && p.keys().hasOnly(['o', 'w']) && finiteNum(p.o) && finiteNum(p.w); }
+    function traceOk(t) {
+      return t is map
+        && t.keys().hasOnly(['points', 'sampleIntervalSec'])
+        && t.points is list && t.points.size() >= 2 && t.points.size() <= 10000
+        && pointOk(t.points[0]) && pointOk(t.points[t.points.size() - 1])
+        // 0 = unknown: the integration sends 0 when a cycle has no recorded sampling interval.
+        && t.sampleIntervalSec is number && t.sampleIntervalSec >= 0 && t.sampleIntervalSec <= 86400;
+    }
+    function cycleStatsOk(s) {
+      return s is map
+        && s.keys().hasOnly(['duration', 'energy_wh', 'peak_w', 'mean_w', 'signature'])
+        && optFiniteNum(s, 'duration') && optFiniteNum(s, 'energy_wh')
+        && optFiniteNum(s, 'peak_w') && optFiniteNum(s, 'mean_w')
+        // The local matcher signature: never rendered or imported, so only bounded.
+        && (!('signature' in s) || (s.signature is map && s.signature.size() <= 32));
+    }
+    // A denormalized counter bump must NAME the child document that justifies it, and that
+    // child must be created by this very batch (absent before, present after) -- the same proof
+    // the brand approved-device counter uses. A bare +1, or one naming a child that already
+    // existed, is refused, so a counter can no longer be inflated without a real contribution.
+    function newChild(coll, id) {
+      return id is string && id.size() >= 1 && id.size() <= 300 && !id.matches('(?s).*/.*')
+        && !exists(/databases/$(database)/documents/$(coll)/$(id))
+        && existsAfter(/databases/$(database)/documents/$(coll)/$(id));
+    }
+
+    // Favorites: a device's favoriteCount and the user's own favorites list move together in
+    // one batch (washstore.favoriteDevice). Each side checks the other, so a user can add a
+    // device once (+1) and remove it once (-1), never pump the count on its own.
+    function favoritesBefore() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('favorites', [])
+        : [];
+    }
+    function favoritesAfter() {
+      return getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('favorites', []);
+    }
+    function favoriteCountMoved(devId, delta) {
+      return devId is string && devId.size() >= 1 && devId.size() <= 300 && !devId.matches('(?s).*/.*')
+        && getAfter(/databases/$(database)/documents/devices/$(devId)).data.get('favoriteCount', 0)
+             == get(/databases/$(database)/documents/devices/$(devId)).data.get('favoriteCount', 0) + delta;
+    }
+    // The favorites list may change by exactly one device per write, with that device's
+    // counter moving the same way in the same batch.
+    function favoritesStepOk(before, after) {
+      let added = after.removeAll(before);
+      let removed = before.removeAll(after);
+      return after.size() <= 1000
+        && ((added.size() == 1 && removed.size() == 0 && after.size() == before.size() + 1
+              && favoriteCountMoved(added[0], 1))
+            || (removed.size() == 1 && added.size() == 0 && after.size() == before.size() - 1
+              && favoriteCountMoved(removed[0], -1)));
+    }
+
     // brands
     match /brands/{brandId} {
       // Pending is public (searchable with an "awaiting approval" tag); removed stays hidden.
@@ -65,10 +175,16 @@ service cloud.firestore {
       allow read: if resource == null || resource.data.status in ['approved', 'pending'] || isAdmin()
         || (isSignedIn() && resource.data.createdByUid == request.auth.uid);
       allow create: if canContribute()
+        // Exactly the fields the website (ensureBrand) and the integration write.
+        && request.resource.data.keys().hasOnly(['brand', 'brand_lc', 'status', 'createdByUid',
+             'createdByName', 'createdAt', 'deviceCount', 'cycleCount', 'approvedDeviceCount'])
         && request.resource.data.createdByUid == request.auth.uid
         && request.resource.data.status == 'pending'
         && strLen(request.resource.data.brand, 40)
         && request.resource.data.brand_lc == request.resource.data.brand.lower()
+        // The doc id IS the lowercased brand, so the catalog cannot hold an alias under a
+        // foreign id.
+        && brandId == request.resource.data.brand_lc
         && optName(request.resource.data.get('createdByName', null))
         // Counters must start at zero. approvedDeviceCount especially: it gates brand
         // auto-approval, so a contributor who could seed it non-zero could create a brand and
@@ -78,13 +194,18 @@ service cloud.firestore {
         && request.resource.data.get('approvedDeviceCount', 0) == 0
         && request.resource.data.createdAt == request.time;
       // Denormalized counters: contributors may increment deviceCount or cycleCount by
-      // exactly +1 when they add a new device or upload a cycle. Decrement is admin-only.
+      // exactly +1, in the same batch that creates the device / cycle of THIS brand, which the
+      // bump names (lastDeviceId / lastCycleId, see newChild). Decrement is admin-only.
       allow update: if canContribute()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deviceCount'])
-        && request.resource.data.deviceCount == resource.data.get('deviceCount', 0) + 1;
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deviceCount', 'lastDeviceId'])
+        && request.resource.data.deviceCount == resource.data.get('deviceCount', 0) + 1
+        && newChild('devices', request.resource.data.get('lastDeviceId', null))
+        && getAfter(/databases/$(database)/documents/devices/$(request.resource.data.lastDeviceId)).data.brand_lc == brandId;
       allow update: if canContribute()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cycleCount'])
-        && request.resource.data.cycleCount == resource.data.get('cycleCount', 0) + 1;
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cycleCount', 'lastCycleId'])
+        && request.resource.data.cycleCount == resource.data.get('cycleCount', 0) + 1
+        && newChild('cycles', request.resource.data.get('lastCycleId', null))
+        && getAfter(/databases/$(database)/documents/cycles/$(request.resource.data.lastCycleId)).data.brand_lc == brandId;
       // Honest approved-device counter, the basis of brand auto-approval.
       //
       // Rules cannot run a query, so they cannot count this brand's approved devices. Instead
@@ -139,34 +260,60 @@ service cloud.firestore {
       allow read: if resource == null || resource.data.status in ['approved', 'pending'] || isAdmin()
         || (isSignedIn() && resource.data.createdByUid == request.auth.uid);
       allow create: if canContribute()
+        // Exactly the fields the website (ensureDevice) and the integration write. ownerId is
+        // admin-assigned, so it can never be self-granted at create.
+        && request.resource.data.keys().hasOnly(['applianceType', 'brand', 'brand_lc', 'model',
+             'model_lc', 'status', 'createdByUid', 'createdByName', 'manualUrl', 'createdAt',
+             'favoriteCount', 'confirmCount', 'profileCount', 'cycleCount', 'ratingSum',
+             'ratingCount', 'settings'])
         && request.resource.data.createdByUid == request.auth.uid
         && request.resource.data.status == 'pending'
-        && request.resource.data.applianceType in ['washer', 'dryer', 'dishwasher', 'washer_dryer']
+        && applianceTypeOk(request.resource.data.applianceType)
+        // The doc id is normalizeToken(type)__brand__model; at least the type must agree.
+        && isDeviceId(deviceId) && idOfType(deviceId, request.resource.data.applianceType)
         && strLen(request.resource.data.brand, 40) && strLen(request.resource.data.model, 60)
         && request.resource.data.brand_lc == request.resource.data.brand.lower()
         && request.resource.data.model_lc == request.resource.data.model.lower()
         && request.resource.data.favoriteCount == 0
         && request.resource.data.confirmCount == 0
+        && zeroOrAbsent(request.resource.data, 'profileCount')
+        && zeroOrAbsent(request.resource.data, 'cycleCount')
+        && zeroOrAbsent(request.resource.data, 'ratingSum')
+        && zeroOrAbsent(request.resource.data, 'ratingCount')
+        && (!('settings' in request.resource.data) || settingsOk(request.resource.data.settings))
         && optUrl(request.resource.data.get('manualUrl', null))
         && optName(request.resource.data.get('createdByName', null))
         && request.resource.data.createdAt == request.time;
-      // Device owner (ownerId field, admin-set) may update settings only.
+      // Device owner (ownerId field, admin-set) may update settings only, and only with a
+      // well-formed settings map.
       allow update: if isGithubUser()
         && resource.data.get('ownerId', null) == request.auth.uid
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['settings']);
-      // favoriteCount is a vanity counter: any GitHub user may nudge it by exactly +/-1.
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['settings'])
+        && settingsOk(request.resource.data.settings);
+      // favoriteCount: +/-1, one per user. The bump must ride in the same batch that adds
+      // this device to (or removes it from) the user's own favorites list, so a user can
+      // move it by at most one in each direction (the users rule enforces the other half).
       allow update: if isGithubUser()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['favoriteCount'])
-        && (request.resource.data.favoriteCount == resource.data.favoriteCount + 1
-            || request.resource.data.favoriteCount == resource.data.favoriteCount - 1);
+        && ((request.resource.data.favoriteCount == resource.data.get('favoriteCount', 0) + 1
+              && !(deviceId in favoritesBefore())
+              && deviceId in favoritesAfter())
+            || (request.resource.data.favoriteCount == resource.data.get('favoriteCount', 0) - 1
+              && deviceId in favoritesBefore()
+              && !(deviceId in favoritesAfter())));
       // Denormalized counters: contributors may increment profileCount or cycleCount by
-      // exactly +1 when creating a profile or uploading a cycle. Decrement is admin-only.
+      // exactly +1, in the batch that creates the profile / cycle of THIS device, which the
+      // bump names (lastProfileId / lastCycleId). Decrement is admin-only.
       allow update: if canContribute()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['profileCount'])
-        && request.resource.data.profileCount == resource.data.get('profileCount', 0) + 1;
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['profileCount', 'lastProfileId'])
+        && request.resource.data.profileCount == resource.data.get('profileCount', 0) + 1
+        && newChild('profiles', request.resource.data.get('lastProfileId', null))
+        && getAfter(/databases/$(database)/documents/profiles/$(request.resource.data.lastProfileId)).data.deviceId == deviceId;
       allow update: if canContribute()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cycleCount'])
-        && request.resource.data.cycleCount == resource.data.get('cycleCount', 0) + 1;
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cycleCount', 'lastCycleId'])
+        && request.resource.data.cycleCount == resource.data.get('cycleCount', 0) + 1
+        && newChild('cycles', request.resource.data.get('lastCycleId', null))
+        && getAfter(/databases/$(database)/documents/cycles/$(request.resource.data.lastCycleId)).data.deviceId == deviceId;
       // Honest confirm-count bump: +1 on confirmCount ONLY when the same batch creates
       // this user's confirmation doc that did not already exist. One per uid, un-gameable.
       allow update: if isGithubUser()
@@ -243,25 +390,54 @@ service cloud.firestore {
       allow read: if resource == null || resource.data.status in ['approved', 'pending'] || isAdmin()
         || (isSignedIn() && resource.data.createdByUid == request.auth.uid);
       allow create: if canContribute()
+        // Exactly the fields the website (ensureProfile) and the integration write; no
+        // ownerId (admin-assigned) and no pre-seeded counters.
+        && request.resource.data.keys().hasOnly(['deviceId', 'applianceType', 'program',
+             'program_lc', 'description', 'status', 'createdByUid', 'createdAt', 'cycleCount',
+             'phases', 'phaseSourceCycleId', 'phasesSchemaVersion'])
         && request.resource.data.createdByUid == request.auth.uid
         && request.resource.data.status == 'pending'
-        && request.resource.data.deviceId is string
+        // Parent binding: the device must exist and the profile id must be
+        // <deviceId>__<program token>, so a profile cannot be filed under one device while
+        // naming another, or under an id unrelated to its device.
+        && isDeviceId(request.resource.data.deviceId)
+        && profileId.matches(request.resource.data.deviceId + '__' + tok())
+        && exists(/databases/$(database)/documents/devices/$(request.resource.data.deviceId))
+        // The website derives applianceType from the device id (washer-dryer), the
+        // integration sends the enum (washer_dryer); either must agree with the device id.
+        && (!('applianceType' in request.resource.data)
+            || (request.resource.data.applianceType in ['washer', 'dryer', 'dishwasher', 'washer_dryer', 'washer-dryer']
+                && idOfType(request.resource.data.deviceId, request.resource.data.applianceType)))
         && strLen(request.resource.data.program, 60)
         && request.resource.data.program_lc == request.resource.data.program.lower()
+        && optText(request.resource.data.get('description', null), 2000)
+        && zeroOrAbsent(request.resource.data, 'cycleCount')
+        && (!('phases' in request.resource.data) || phasesOk(request.resource.data.phases))
+        && optText(request.resource.data.get('phaseSourceCycleId', null), 128)
+        && (!('phasesSchemaVersion' in request.resource.data)
+            || (request.resource.data.phasesSchemaVersion is int
+                && request.resource.data.phasesSchemaVersion >= 1
+                && request.resource.data.phasesSchemaVersion <= 100))
         && request.resource.data.createdAt == request.time;
-      // Denormalized counter: contributors may increment cycleCount by exactly +1 when
-      // uploading a cycle. Decrement is admin-only.
+      // Denormalized counter: contributors may increment cycleCount by exactly +1, in the
+      // batch that creates a cycle of THIS profile, which the bump names (lastCycleId).
+      // Decrement is admin-only.
       allow update: if canContribute()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cycleCount'])
-        && request.resource.data.cycleCount == resource.data.get('cycleCount', 0) + 1;
-      // Profile owner (ownerId) or parent device owner may update phases only.
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cycleCount', 'lastCycleId'])
+        && request.resource.data.cycleCount == resource.data.get('cycleCount', 0) + 1
+        && newChild('cycles', request.resource.data.get('lastCycleId', null))
+        && getAfter(/databases/$(database)/documents/cycles/$(request.resource.data.lastCycleId)).data.profileId == profileId;
+      // Profile owner (ownerId) or parent device owner may update phases only, and only with
+      // a bounded phase list.
       allow update: if isGithubUser()
         && resource.data.get('ownerId', null) == request.auth.uid
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phases']);
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phases'])
+        && phasesOk(request.resource.data.phases);
       allow update: if isGithubUser()
         && exists(/databases/$(database)/documents/devices/$(resource.data.deviceId))
         && get(/databases/$(database)/documents/devices/$(resource.data.deviceId)).data.get('ownerId', null) == request.auth.uid
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phases']);
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phases'])
+        && phasesOk(request.resource.data.phases);
       // Admin may create a profile doc directly (faithful ID migration for rename/merge --
       // preserves status/owner/createdAt/counters, which the contributor-create branch cannot).
       allow create: if isAdmin();
@@ -285,24 +461,40 @@ service cloud.firestore {
       // community can confirm it; removed stays hidden.
       allow read: if resource == null || resource.data.status in ['approved', 'pending'] || isOwner() || isAdmin();
       allow create: if canContribute()
+        // Exactly the fields the integration (store_client.upload_reference_cycle) and the
+        // website (uploadReferenceCycle) write; no forged rating aggregate, no approval state.
+        && request.resource.data.keys().hasOnly(['profileId', 'deviceId', 'brand_lc', 'program_lc',
+             'applianceType', 'uploaderUid', 'uploaderName', 'status', 'rejectionReason',
+             'traceHash', 'trace', 'stats', 'cycleSchemaVersion', 'downloads', 'commentCount',
+             'confirmCount', 'ratingSum', 'ratingCount', 'qc', 'createdAt'])
         && request.resource.data.uploaderUid == request.auth.uid
         && request.resource.data.status == 'pending'
+        && request.resource.data.get('rejectionReason', null) == null
         && request.resource.data.downloads == 0
         && request.resource.data.commentCount == 0
         && request.resource.data.confirmCount == 0
+        && zeroOrAbsent(request.resource.data, 'ratingSum')
+        && zeroOrAbsent(request.resource.data, 'ratingCount')
         && request.resource.data.cycleSchemaVersion is number
-        && request.resource.data.applianceType in ['washer', 'dryer', 'dishwasher', 'washer_dryer']
-        && request.resource.data.deviceId is string
-        && request.resource.data.profileId is string
-        && request.resource.data.brand_lc is string
-        && request.resource.data.program_lc is string
+        && request.resource.data.cycleSchemaVersion >= 1 && request.resource.data.cycleSchemaVersion <= 100
+        && applianceTypeOk(request.resource.data.applianceType)
+        // Parent binding: the profile must exist, belong to the named device, and the ids
+        // must nest (<device>__<program>) under the cycle's own appliance type, so a cycle
+        // cannot be attached to a program it does not belong to or to nothing at all.
+        && isDeviceId(request.resource.data.deviceId)
+        && idOfType(request.resource.data.deviceId, request.resource.data.applianceType)
+        && isProfileId(request.resource.data.profileId)
+        && request.resource.data.profileId.matches(request.resource.data.deviceId + '__' + tok())
+        && exists(/databases/$(database)/documents/profiles/$(request.resource.data.profileId))
+        && get(/databases/$(database)/documents/profiles/$(request.resource.data.profileId)).data.deviceId == request.resource.data.deviceId
+        && strLen(request.resource.data.brand_lc, 120)
+        && strLen(request.resource.data.program_lc, 120)
         && request.resource.data.qc is int && request.resource.data.qc >= 1 && request.resource.data.qc <= 3
-        && request.resource.data.trace is map
-        && request.resource.data.trace.points is list
-        && request.resource.data.trace.points.size() <= 10000
-        && request.resource.data.stats is map
-        && (request.resource.data.uploaderName == null
-            || (request.resource.data.uploaderName is string && request.resource.data.uploaderName.size() <= 100))
+        && traceOk(request.resource.data.trace)
+        && cycleStatsOk(request.resource.data.stats)
+        && optName(request.resource.data.get('uploaderName', null))
+        // The integration's content-hash id is mirrored in traceHash; they must agree.
+        && (!('traceHash' in request.resource.data) || request.resource.data.traceHash == cycleId)
         && request.resource.data.createdAt == request.time;
       // public download bump: exactly +1 and no other field
       allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['downloads'])
@@ -418,15 +610,24 @@ service cloud.firestore {
     match /users/{uid} {
       allow read: if (isSignedIn() && request.auth.uid == uid) || isAdmin();
       allow create: if isGithubUser() && request.auth.uid == uid
+        // Exactly what ensureUserProfile writes: no moderation field (strike counter, ban
+        // state) can be pre-seeded, and favorites start empty (they move with favoriteCount).
+        && request.resource.data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'createdAt',
+             'lastSeen', 'status', 'favorites', 'githubLogin'])
         && request.resource.data.uid == uid
-        && request.resource.data.get('status', 'active') == 'active';
+        && request.resource.data.get('status', 'active') == 'active'
+        && request.resource.data.get('favorites', []).size() == 0;
       allow update: if isAdmin()
         || (isGithubUser() && request.auth.uid == uid
             // Self-service updates: name/photo/activity fields + githubLogin (set at sign-in).
             // status must not change (only admin may ban/unban).
             && request.resource.data.diff(resource.data).affectedKeys()
                  .hasOnly(['displayName', 'photoURL', 'lastSeen', 'favorites', 'githubLogin'])
-            && request.resource.data.get('status', 'active') == resource.data.get('status', 'active'));
+            && request.resource.data.get('status', 'active') == resource.data.get('status', 'active')
+            // A favorites change is one device at a time, tied to its favoriteCount.
+            && (!('favorites' in request.resource.data.diff(resource.data).affectedKeys())
+                || (request.resource.data.favorites is list
+                    && favoritesStepOk(resource.data.get('favorites', []), request.resource.data.favorites))));
       allow delete: if isAdmin();
     }
 

@@ -66,7 +66,7 @@ jobs:
         run: |
           mkdir -p dist/lib dist/img
           cp index.html admin.html connect.html create.html docs.html changelog.html \
-             app.js admin.js editors.js connect.js create.js washstore.js firestore-rest.js site-config.js config.js \
+             app.js admin.js editors.js connect.js create.js washstore.js firestore-rest.js site-config.js config.js md-page.js \
              styles.css README.md CHANGELOG.md dist/
           cp lib/ids.js lib/trace.js lib/merge_guard.js dist/lib/
           cp img/icon.png dist/img/ 2>/dev/null || true

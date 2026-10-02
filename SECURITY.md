@@ -12,45 +12,68 @@ is not protected, and the residual risks an operator should know about.
   exposes nothing that loading the site would not.
 - **The Firebase `apiKey` is not a secret.** It identifies the project; it is not a
   credential. Access is enforced by the rules, not by hiding the key.
-- **Approved devices, programs, reference cycles, comments, and ratings** are world-readable
-  (that is the point). The store is organized as `devices` -> `profiles` -> `cycles` flat
-  collections with deterministic parent-ID references.
+- **Approved and pending catalog content is world-readable.** Brands, devices, programs
+  (`profiles`) and reference cycles in `pending` status are public and searchable with an
+  "awaiting approval" tag, and the integration downloads them by default. Only `removed`
+  content is hidden. Comments and ratings are world-readable. The store is organized as
+  `brands` / `devices` -> `profiles` -> `cycles` flat collections with deterministic
+  parent-ID references.
 
 ## What is protected
 
-- **Admin actions** (approve/reject/remove, ban/unban, delete) require the caller's UID to
-  exist in the `admins` collection. That collection is not client-writable - admins are added
-  only via the Firebase console. The `admin.html` page being public does not grant access;
-  every action is checked server-side by the rules.
-- **Self-approval is impossible.** Changing a device's, program's, or cycle's `status` to
-  `approved` is allowed only for admins. An uploader can delete their own reference cycle but
-  cannot approve it or alter other fields.
-- **Contributing requires a GitHub sign-in.** Upload, comment, and rating writes are gated on
-  `sign_in_provider == 'github.com'`. Anonymous sessions (used by the read-only integration
-  client) can browse approved content but cannot write.
-- **Bans are enforced server-side and cannot be self-reverted.** A user cannot modify their
-  own moderation fields (`banned`, `banReason`, ...); only an admin can. Banned users cannot
-  upload, comment, or rate.
+- **Admin actions** (approve/reject/remove, ban/unban, delete, rename/merge, owner assignment)
+  require the caller's UID to exist in the `admins` collection. That collection is not
+  client-writable - admins are added only via the Firebase console. The `admin.html` page
+  being public does not grant access; every action is checked server-side by the rules.
+- **No self-approval.** Every contributor create must be `status: 'pending'`. Approval of a
+  device or cycle is a community vote: any GitHub user may flip `pending -> approved` once its
+  `confirmCount` reaches `config/site.confirmThreshold` (admin-tunable, default 5). Each user
+  confirms at most once (a uid-keyed confirmation doc created in the same batch as the +1).
+  A brand is promoted the same way once enough of its devices are approved
+  (`brandConfirmThreshold`). Programs are approved by admins only. An uploader can delete their
+  own reference cycle but cannot edit it.
+- **Contributing requires a GitHub sign-in.** Every catalog, comment, rating, confirmation and
+  report write is gated on `sign_in_provider == 'github.com'`. The only anonymous writes are
+  the `downloads` +1 on a cycle and the bounded `analytics` counters. The integration reads
+  anonymously and writes only through the user's connected GitHub account.
+- **Bans are enforced server-side and cannot be self-reverted.** The moderation fields on
+  `users/{uid}` (`status`, `banReason`, `bannedAt`, `bannedBy`, `removedContentCount`,
+  `lastRemovalAt`) are admin-only, and a user cannot pre-seed them when their record is
+  created. Banned users cannot contribute, comment, confirm, rate or report.
 - **User records are private.** A signed-in user can read only their own `users` document;
-  admins can read all. No email addresses are stored (only the public GitHub display name and
-  avatar used for attribution).
-- **Field validation** (types, length caps, allowed appliance types, `*_lc` consistency) is
-  enforced by the rules on create, so malformed or oversized documents are rejected regardless
-  of what a client sends.
+  admins can read all. A self-created record holds only the uid, the public GitHub display
+  name / login / avatar, timestamps, status and favorites (no email).
+- **Creates are shape-validated.** For brands, devices, programs, cycles, users and reports the
+  rules pin the exact field list, the types and length caps, the allowed appliance types and
+  `*_lc` consistency. Catalog ids must be the normalized `type__brand__model[__program]` form
+  and nest under their parent; a program's device and a cycle's program must exist, and a
+  cycle's program must belong to the cycle's device. A creator cannot set `ownerId`, rating
+  aggregates or counters (they must be absent or zero). Cycle `stats` and `trace` fields must
+  be finite numbers. Owner edits are validated too: device `settings` accept only the shared
+  setting keys with non-negative numbers, and phase maps are bounded.
+- **What the rules cannot check.** Rules cannot loop over a list, so the interior of a cycle's
+  point list and the elements of a phase map are only bounded (length, plus the first and last
+  point), and documents written before this validation existed were never re-checked. Every
+  consumer therefore treats stored data as untrusted: the website escapes every string and
+  coerces every number before rendering, and the integration validates traces on import.
+- **Script injection is contained.** Every page carries a Content-Security-Policy that allows
+  no inline script and only the script origins the page needs (Firebase on `www.gstatic.com`
+  and `apis.google.com`, Google Analytics on the browse page if enabled, the Markdown renderer
+  on `cdn.jsdelivr.net` for the docs and changelog pages).
 - **Ratings cannot be forged.** Each user has exactly one rating document (keyed by their UID,
-  value constrained to 1-5) in a cycle's `ratings` subcollection. There is no denormalized
-  average stored on the cycle. The displayed average and count are computed at read time with a
-  server-side aggregation query over that subcollection, so they always reflect the real
-  per-user ratings.
-- **Favorite counts are a vanity signal, not a vote.** `favoriteCount` on a device is the one
-  field any signed-in GitHub user may change with no further checks, and only by plus or minus one
-  per write. Nothing enforces one nudge per user, so a determined caller can inflate it. The
-  authoritative record is the per-user list on `users/{uid}`. This is deliberately un-gated because
-  nothing depends on it: promotion is driven by `confirmCount`, a one-way per-user vote held in a
-  subcollection, which cannot be gamed the same way.
+  value constrained to 1-5) per cycle or device. The denormalized `ratingSum` / `ratingCount`
+  on the parent may move only in the same batch as that user's rating doc, by exactly that
+  rating's contribution. Documents without the aggregate fall back to a live aggregation over
+  the subcollection.
+- **Counters are tied to real contributions.** `favoriteCount` moves by one only in the batch
+  that adds the device to (or removes it from) the caller's own favorites list, so each user
+  counts once. `deviceCount` / `profileCount` / `cycleCount` may rise by one only in the batch
+  that creates the counted child, which the write names (`lastDeviceId` / `lastProfileId` /
+  `lastCycleId`). Decrements are admin-only. The integration does not maintain these counters,
+  so they undercount what it contributes.
 - **The `qc` provenance code is obscured, not secret.** Each cycle carries an integer
   provenance hint (how the recording was produced) that only the admin UI decodes to a label.
-  Because approved cycles are world-readable, this is deliberate obscurity for a low-stakes
+  Because cycles are world-readable, this is deliberate obscurity for a low-stakes
   moderation signal, not access control - do not treat it as private.
 
 ## Document size
@@ -59,13 +82,11 @@ Firestore enforces a hard **1 MiB (about 1.05 MB) per-document limit** server-si
 the real backend ceiling and it cannot be raised - a 5 MB document simply cannot be created in
 Firestore. WashData Store therefore keeps documents small:
 
-- The client rejects an upload larger than ~900 KB (`MAX_DOC_BYTES` in `washstore.js`) with a
-  clear message, before it reaches the backend.
-- The rules cap the raw cycle trace at 3000 points and bound every metadata string, so a
-  direct-API caller still cannot create a document anywhere near the 1 MiB limit with valid
-  data.
-- Any oversized or malformed write is rejected by Firestore. Uploads that do get through always
-  land in `pending` (never public) and can be deleted by a moderator.
+- The rules cap a cycle trace at 10000 points, a program description at 2000 characters, a
+  phase map at 50 entries, and bound every metadata string. The integration downsamples traces
+  before upload.
+- Anything larger than 1 MiB is rejected by Firestore itself. Uploads land in `pending`,
+  which is publicly readable until a moderator removes them.
 
 If you ever need to store payloads larger than ~1 MiB (e.g. full-resolution raw traces), that
 requires Cloud Storage, which needs the Blaze plan - out of scope for the zero-cost design.
@@ -80,8 +101,8 @@ abuse-mitigation control, not a rate limiter. The current controls:
   per browser session and counts each cycle's download at most once per session. This stops
   accidental or casual flooding through the UI. It is **not** a security control - a scripted
   client that bypasses the UI is unaffected.
-- **Public download counter** remains an unauthenticated `+1`. A determined script could still
-  spend the daily free write quota. Impact is bounded: on the Spark plan, quota exhaustion just
+- **Public download and analytics counters** remain unauthenticated `+1` writes. A determined
+  script could still spend the daily free write quota. Impact is bounded: on the Spark plan, quota exhaustion just
   pauses writes until the next day (no bill, no data loss), and the counter is a vanity metric.
 
 To mitigate scripted abuse, enable
