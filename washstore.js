@@ -47,6 +47,7 @@ import {
   assertDeviceMergeOk, assertProfileMergeOk, assertCycleMoveOk, assertBrandMergeOk,
 } from './lib/merge_guard.js';
 import { downsampleCycle, parseCycle, cycleStats, packPoints, unpackPoints } from './lib/trace.js';
+import { mergeBrandPages } from './lib/brand_pages.js';
 import { restQuery, restGet, restRatingSummary, restDeviceRating, restCount, setTokenProvider } from './firestore-rest.js';
 
 export { downsampleCycle, parseCycle, cycleStats };
@@ -955,14 +956,14 @@ export async function listBrands({ search = null, pageSize = 60, cursor = null, 
   }
   let result;
   if (includePending) {
-    const [a, p] = await Promise.all([
-      restQuery('brands', { filters: _brandFilters('approved', search), orderBy: [{ field: 'brand_lc', dir: 'ASCENDING' }], limit: pageSize }),
-      restQuery('brands', { filters: _brandFilters('pending', search), orderBy: [{ field: 'brand_lc', dir: 'ASCENDING' }], limit: pageSize }),
-    ]);
-    const byId = new Map();
-    for (const b of [...a, ...p]) byId.set(b.id, b);
-    const items = [...byId.values()].sort((x, y) => (x.brand_lc || '').localeCompare(y.brand_lc || '')).slice(0, pageSize);
-    result = { items, cursor: null };
+    const page = (status) => restQuery('brands', {
+      filters: _brandFilters(status, search),
+      orderBy: [{ field: 'brand_lc', dir: 'ASCENDING' }],
+      limit: pageSize,
+      startAfter: cursor ? [cursor] : null,
+    });
+    const [a, p] = await Promise.all([page('approved'), page('pending')]);
+    result = mergeBrandPages(a, p, pageSize);
   } else {
     const items = await restQuery('brands', {
       filters: _brandFilters('approved', search),

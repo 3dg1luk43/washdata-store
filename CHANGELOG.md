@@ -13,6 +13,10 @@ Firebase Firestore, with no ads, no tracking, and no paid tier.
 
 ## Unreleased
 
+### Fixed
+
+- **The landing page showed only the first 60 brands**: with pending brands included it merged one page of each status and returned no "Load more", so Miele, Siemens, Samsung, Whirlpool and every other brand after the 60th were reachable only through search. Both statuses now page together behind one cursor, and a page never ends past a brand either list has not fetched yet.
+
 ### Added
 
 - **One search bar for the whole library**: The landing box searched brand names only, so a model number like `SN636X00PD` returned nothing. It now searches **brands, appliances, programs and reference cycles** in one pass, grouped by kind, and every row navigates into the normal browse views (a cycle row opens its trace with the full breadcrumb rebuilt, and a crumb back to the results).
