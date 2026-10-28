@@ -1998,3 +1998,72 @@ input[type="url"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
   .search-row { flex-wrap: wrap; gap: .25rem .5rem; }
   .search-row-stats { margin-left: 0; width: 100%; }
 }
+
+/* ---- Automation templates (templates.html) ---- */
+.tpl-howto {
+  color: var(--text-muted);
+  max-width: 62ch;
+  margin: .6rem 0 0;
+  font-size: .875rem;
+  line-height: 1.55;
+}
+.tpl-howto strong { color: var(--text); font-weight: 600; }
+.tpl-filters .tpl-search { flex: 1 1 260px; }
+.tpl-filters .tpl-type { flex: 0 1 200px; }
+.tpl-card-top { display: flex; align-items: center; gap: .75rem; }
+.tpl-card-head { min-width: 0; }
+.tpl-port {
+  flex: 0 0 auto;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-dim);
+  box-shadow: inset 0 0 0 2px rgba(124, 156, 255, 0.28);
+  color: var(--accent);
+}
+.tpl-port svg { width: 1.3rem; height: 1.3rem; fill: currentColor; }
+.tpl-card-title { white-space: normal; }
+.tpl-summary {
+  margin: .35rem 0 .15rem;
+  font-size: .875rem;
+  line-height: 1.5;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.tpl-card .card-actions { flex-wrap: wrap; align-items: center; }
+.tpl-para { margin: 0 0 .75rem; line-height: 1.6; }
+.tpl-risk {
+  margin: 0 0 .75rem;
+  padding: .6rem .8rem;
+  line-height: 1.55;
+  border-left: 3px solid var(--warning);
+  background: var(--pulse-dim);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+.tpl-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: .35rem 1rem;
+  margin: .25rem 0 1rem;
+  font-size: .875rem;
+}
+.tpl-facts dt { color: var(--text-muted); }
+.tpl-facts dd { margin: 0; }
+.tpl-sub {
+  font-family: var(--font-heading);
+  font-size: .9375rem;
+  font-weight: 600;
+  margin: .5rem 0 .5rem;
+}
+.tpl-inputs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .6rem; }
+.tpl-inputs li { padding: .55rem .75rem; background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: var(--radius); }
+.tpl-input-name { font-weight: 600; font-size: .875rem; display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.tpl-input-desc { color: var(--text-muted); font-size: .8125rem; margin-top: .2rem; line-height: 1.5; }
+#tpl-modal-footer { flex-wrap: wrap; }

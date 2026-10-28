@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <!-- Content-Security-Policy: no inline script and no script origin beyond the ones this page
+       loads (see SECURITY.md). Inline style stays allowed: the markup uses style= attributes.
+       connect-src adds raw.githubusercontent.com on this page only: the template list is
+       library.json in the washdata-automations repository, fetched live (no Firestore). -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://raw.githubusercontent.com; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Ready-made Home Assistant automations for WashData: blueprints that act when a washer, dryer or dishwasher starts, finishes or needs unloading.">
+  <title>Automations - WashData Store</title>
+  <link rel="icon" type="image/png" href="img/icon.png">
+  <link rel="apple-touch-icon" href="img/icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <header class="topbar">
+    <a href="index.html" class="brand">
+      <img src="img/icon.png" alt="" aria-hidden="true" class="brand-icon">
+      WashData Store
+    </a>
+    <nav aria-label="Main navigation">
+      <a class="nav-link" href="index.html">Browse</a>
+      <a class="nav-link active" href="templates.html" aria-current="page">Automations</a>
+      <a class="nav-link" href="docs.html">Docs</a>
+      <a class="nav-link" href="changelog.html">Changelog</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="page-head">
+      <span class="eyebrow">Automation templates</span>
+      <h1 class="page-title">Ready-made automations</h1>
+      <p class="page-lede">Home Assistant blueprints that act when an appliance starts, finishes or needs unloading. Each one becomes a normal automation you can edit.</p>
+      <p class="tpl-howto">In WashData 0.5.9 or newer, the panel's <strong>Automations</strong> tab adds these to an appliance in one click. It needs WashData's online features turned on. Without them, use <strong>Import with My Home Assistant</strong>.</p>
+    </div>
+
+    <div class="filter-rail tpl-filters">
+      <div class="form-group tpl-search">
+        <label for="tpl-search">Search templates</label>
+        <input type="search" id="tpl-search" placeholder="Name, description, author or tag" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="form-group tpl-type">
+        <label for="tpl-type">Appliance</label>
+        <select id="tpl-type">
+          <option value="">All appliances</option>
+          <option value="washing_machine">Washers</option>
+          <option value="dryer">Dryers</option>
+          <option value="washer_dryer">Washer-dryers</option>
+          <option value="dishwasher">Dishwashers</option>
+          <option value="pump">Pumps</option>
+          <option value="generic">Other appliances</option>
+          <option value="other">Threshold devices</option>
+        </select>
+      </div>
+      <div class="filter-actions">
+        <a class="btn btn-ghost btn-sm" href="https://github.com/3dg1luk43/washdata-automations/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Share your own template on GitHub &#8599;</a>
+      </div>
+    </div>
+
+    <div id="tpl-body" aria-live="polite">
+      <div class="loading-center">
+        <div class="loading-spinner"></div>
+        <span>Loading templates...</span>
+      </div>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <span>Initial idea by <a href="https://github.com/3dg1luk43/ha_washdata/discussions/48" target="_blank" rel="noopener">oli-z</a></span>
+    <span class="foot-sep">&middot;</span>
+    <span>Developed by <a href="https://github.com/3dg1luk43" target="_blank" rel="noopener">3dg1luk43</a></span>
+    <span class="foot-sep">&middot;</span>
+    <span>Copyright &copy; 2026</span>
+  </footer>
+
+  <!-- Template details -->
+  <div class="modal-overlay" id="tpl-modal" hidden aria-modal="true" role="dialog" aria-labelledby="tpl-modal-title">
+    <div class="modal">
+      <div class="modal-header">
+        <div>
+          <h2 class="modal-title" id="tpl-modal-title"></h2>
+          <div class="modal-subtitle" id="tpl-modal-author"></div>
+        </div>
+        <button type="button" class="modal-close" id="tpl-modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body" id="tpl-modal-body"></div>
+      <div class="modal-footer" id="tpl-modal-footer"></div>
+    </div>
+  </div>
+
+  <script type="module" src="templates.js"></script>
+</body>
+</html>

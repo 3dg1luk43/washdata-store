@@ -63,7 +63,7 @@ function stampLists() {
 }
 
 // ---- the real module graph ---------------------------------------------------
-const HTML_ENTRIES = ['index.html', 'admin.html', 'connect.html', 'create.html', 'docs.html', 'changelog.html'];
+const HTML_ENTRIES = ['index.html', 'admin.html', 'connect.html', 'create.html', 'docs.html', 'changelog.html', 'templates.html'];
 
 // Resolve a relative specifier against the importing file, stripping any ?v= cache-buster.
 function resolveFrom(fromFile, spec) {

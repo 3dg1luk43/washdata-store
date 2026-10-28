@@ -19,6 +19,8 @@ Firebase Firestore, with no ads, no tracking, and no paid tier.
 
 ### Added
 
+- **Automation templates page**: a new **Automations** page lists the Home Assistant blueprints from [washdata-automations](https://github.com/3dg1luk43/washdata-automations), with search, an appliance filter, details (risk note, inputs, required WashData version) and an **Import with My Home Assistant** link. It reads `library.json` from that repository, which is regenerated after every merge, so it is always current and costs no Firestore read. It stays available while the store is in maintenance.
+
 - **One search bar for the whole library**: The landing box searched brand names only, so a model number like `SN636X00PD` returned nothing. It now searches **brands, appliances, programs and reference cycles** in one pass, grouped by kind, and every row navigates into the normal browse views (a cycle row opens its trace with the full breadcrumb rebuilt, and a crumb back to the results).
 
   Matching is **substring and multi-token**, not prefix: `wm14` finds `iQ300 WM14N292` (49 matches where the old box found none), and `siemens dishwasher` matches across the brand, the model and the appliance type at once. Firestore has no full-text index and cannot do this, so the catalog is published as a static snapshot - `search-index.json`, 1,580 rows, 63 KB gzipped - that the browser matches entirely client-side for **zero** Firestore reads. Reference cycles stay a live prefix query: they were half the index's bytes (a third of it incompressible document ids) and a cycle carries no text of its own beyond the program name its profile row already has.
