@@ -218,7 +218,7 @@ async function showResult(res) {
   } else if (res.kind === 'brand') {
     title = `${esc(res.brand)} added`;
     sub = 'Brand awaiting approval';
-    note = 'It is visible with an "awaiting approval" tag until an admin approves it.';
+    note = 'It is visible with an "awaiting approval" tag until enough of its appliances are approved, or an admin approves it.';
   } else {
     title = `${esc(res.program)} added`;
     sub = 'Profile awaiting approval';

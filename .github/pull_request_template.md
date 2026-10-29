@@ -5,7 +5,7 @@
 
 ## Linked Accepted Issue
 
-Closes #<!-- issue number — must have the `accepted` label -->
+Closes #<!-- issue number: must have the `accepted` label -->
 
 ## Description
 
@@ -46,7 +46,7 @@ Closes #<!-- issue number — must have the `accepted` label -->
 
 <!-- Only if this PR changes firestore.rules or firestore.indexes.json -->
 
-- [ ] N/A — this PR does not touch Firestore rules or indexes
+- [ ] N/A: this PR does not touch Firestore rules or indexes
 - [ ] I tested the rules change against the emulator (`npm run test:rules`)
 - [ ] I confirmed the change does not loosen read/write access unexpectedly
 

@@ -8,7 +8,7 @@ body:
       value: |
         Thanks for helping improve the WashData Store documentation!
 
-        If you are able to fix the issue yourself, a **Pull Request is preferred** over an issue. See [CONTRIBUTING.md](https://github.com/3dg1luk43/washdata_store/blob/main/CONTRIBUTING.md) for details.
+        If you are able to fix the issue yourself, a **Pull Request is preferred** over an issue. See [CONTRIBUTING.md](https://github.com/3dg1luk43/washdata-store/blob/main/CONTRIBUTING.md) for details.
 
   - type: checkboxes
     id: preflight

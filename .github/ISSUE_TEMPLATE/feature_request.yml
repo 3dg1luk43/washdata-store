@@ -17,7 +17,7 @@ body:
     attributes:
       label: Before You Submit
       options:
-        - label: I have searched the [existing issues](https://github.com/3dg1luk43/washdata_store/issues) and this has not already been requested.
+        - label: I have searched the [existing issues](https://github.com/3dg1luk43/washdata-store/issues) and this has not already been requested.
           required: true
         - label: This request is about the **store website**, not the Home Assistant integration (tracked [separately](https://github.com/3dg1luk43/ha_washdata/issues)).
           required: true
