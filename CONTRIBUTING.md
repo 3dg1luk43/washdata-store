@@ -1,10 +1,10 @@
 # Contributing to WashData Store
 
-Thank you for your interest in contributing to the WashData Store! This document covers how to contribute code and frontend changes to the store itself. For contributing appliance programs and reference cycles via the web interface, see the [README](README.md).
+Thank you for your interest in contributing to the WashData Store! This document covers how to contribute code and frontend changes to the store itself. For contributing appliances, programs and reference cycles, see the [README](README.md).
 
 ## What is this repo?
 
-This repository contains the static frontend (HTML/JS) and the Firebase Firestore rules and indexes for the [WashData Community Store](https://3dg1luk43.github.io/washdata_store) - a free, community-run catalog where WashData users share appliance power-cycle profiles.
+This repository contains the static frontend (HTML/JS) and the Firebase Firestore rules and indexes for the [WashData Community Store](https://3dg1luk43.github.io/washdata-store) - a free, community-run catalog where WashData users share appliance power-cycle profiles.
 
 ---
 
@@ -31,12 +31,12 @@ This repository contains the static frontend (HTML/JS) and the Firebase Firestor
 1. **Fork the repository** on GitHub
 2. **Clone your fork locally**:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/washdata_store.git
-   cd washdata_store
+   git clone https://github.com/YOUR_USERNAME/washdata-store.git
+   cd washdata-store
    ```
 3. **Add upstream remote**:
    ```bash
-   git remote add upstream https://github.com/3dg1luk43/washdata_store.git
+   git remote add upstream https://github.com/3dg1luk43/washdata-store.git
    ```
 
 ---
@@ -52,7 +52,7 @@ npx serve .
 python3 -m http.server 8080
 ```
 
-Open `http://localhost:8080` in your browser. Firebase is configured to use the production Firestore instance by default; for write operations you will need to sign in with GitHub OAuth in the browser.
+Open the URL the server prints (`http://localhost:3000` for `serve`, `http://localhost:8080` for Python) in your browser. Firebase is configured to use the production Firestore instance by default; for write operations you will need to sign in with GitHub OAuth in the browser.
 
 For Firestore rules changes, install the Firebase CLI:
 
@@ -81,9 +81,9 @@ Have an idea for the store UI? Open an issue. Bear in mind the store is intentio
 
 Non-trivial code PRs go through an **accepted-issue flow** (the same as the ha_washdata integration):
 
-1. **Open an issue** — a [Bug Report](https://github.com/3dg1luk43/washdata_store/issues/new?template=bug_report.yml) or [Feature Request](https://github.com/3dg1luk43/washdata_store/issues/new?template=feature_request.yml) describing what you want to fix or build.
-2. **Indicate your intent** — check the "Contributing a Fix" / "Contributing an Implementation" box at the bottom of the issue form.
-3. **Wait for the `accepted` label** — only the maintainer can apply it. This prevents you from spending time on work that's already in the pipeline or that the maintainer wouldn't merge.
+1. **Open an issue**: a [Bug Report](https://github.com/3dg1luk43/washdata-store/issues/new?template=bug_report.yml) or [Feature Request](https://github.com/3dg1luk43/washdata-store/issues/new?template=feature_request.yml) describing what you want to fix or build.
+2. **Indicate your intent**: check the "Contributing a Fix" / "Contributing an Implementation" box at the bottom of the issue form.
+3. **Wait for the `accepted` label**: only the maintainer can apply it. This prevents you from spending time on work that's already in the pipeline or that the maintainer wouldn't merge.
 4. **Open your PR** referencing the issue (`Closes #NNN`).
 
 > An automated check enforces this: a PR with no linked `accepted` issue is warned and auto-closed after 3 days if none is linked. Linking an issue stops the timer; once the maintainer accepts it, the check passes.
@@ -131,8 +131,8 @@ Changes to `firestore.rules` or `firestore.indexes.json` are high-impact. Always
 ## Coding Standards
 
 - **Plain ES modules** - no bundler, no transpiler, no framework; keep it simple
-- **No external CDN dependencies** beyond Firebase SDK (already used)
-- **No ad-tech or third-party marketing scripts** - aggregate usage is measured via the project's own GA4 property and Firestore counters; contributors must not add additional tracking or ad scripts
+- **No external CDN dependencies** beyond the Firebase SDK and the Markdown renderer (`marked`) already used
+- **No ad-tech or third-party marketing scripts** - aggregate usage is measured via the project's anonymous Firestore counters (the GA4 hook is off unless a Measurement ID is set in `config.js`); contributors must not add additional tracking or ad scripts
 - **Consistent style** - match the formatting of existing files (2-space indentation, single quotes)
 - **License header** - every source file (`.js`, `.mjs`, `.py`) must start with the AGPL-3.0-or-later
   header used across the project (copy it from any existing file). CI fails the build if a source

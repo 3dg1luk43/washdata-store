@@ -138,6 +138,23 @@ service cloud.firestore {
         && !exists(/databases/$(database)/documents/$(coll)/$(id))
         && existsAfter(/databases/$(database)/documents/$(coll)/$(id));
     }
+    // The step DOWN mirrors newChild: a cycleCount -1 must name the cycle it un-counts
+    // (lastRemovedCycleId), that cycle must be deleted by this very batch (present before,
+    // absent after) while it still counted (pending or approved), and it must belong to THIS
+    // parent. Only its uploader or an admin may delete a cycle (see the cycles rule), and a
+    // cycle can be deleted once, so each deletion moves each parent counter by exactly one.
+    function cycleCountDown(parentField, parentId) {
+      let cid = request.resource.data.get('lastRemovedCycleId', null);
+      return isSignedIn()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cycleCount', 'lastRemovedCycleId'])
+        && request.resource.data.cycleCount == resource.data.get('cycleCount', 0) - 1
+        && request.resource.data.cycleCount >= 0
+        && cid is string && cid.size() >= 1 && cid.size() <= 300 && !cid.matches('(?s).*/.*')
+        && exists(/databases/$(database)/documents/cycles/$(cid))
+        && !existsAfter(/databases/$(database)/documents/cycles/$(cid))
+        && get(/databases/$(database)/documents/cycles/$(cid)).data.status in ['pending', 'approved']
+        && get(/databases/$(database)/documents/cycles/$(cid)).data.get(parentField, null) == parentId;
+    }
 
     // Favorites: a device's favoriteCount and the user's own favorites list move together in
     // one batch (washstore.favoriteDevice). Each side checks the other, so a user can add a
@@ -195,7 +212,8 @@ service cloud.firestore {
         && request.resource.data.createdAt == request.time;
       // Denormalized counters: contributors may increment deviceCount or cycleCount by
       // exactly +1, in the same batch that creates the device / cycle of THIS brand, which the
-      // bump names (lastDeviceId / lastCycleId, see newChild). Decrement is admin-only.
+      // bump names (lastDeviceId / lastCycleId, see newChild). Decrement is admin-only, except
+      // cycleCount -1 in the batch that deletes a counted cycle of this brand (cycleCountDown).
       allow update: if canContribute()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deviceCount', 'lastDeviceId'])
         && request.resource.data.deviceCount == resource.data.get('deviceCount', 0) + 1
@@ -206,6 +224,7 @@ service cloud.firestore {
         && request.resource.data.cycleCount == resource.data.get('cycleCount', 0) + 1
         && newChild('cycles', request.resource.data.get('lastCycleId', null))
         && getAfter(/databases/$(database)/documents/cycles/$(request.resource.data.lastCycleId)).data.brand_lc == brandId;
+      allow update: if cycleCountDown('brand_lc', brandId);
       // Honest approved-device counter, the basis of brand auto-approval.
       //
       // Rules cannot run a query, so they cannot count this brand's approved devices. Instead
@@ -303,7 +322,8 @@ service cloud.firestore {
               && !(deviceId in favoritesAfter())));
       // Denormalized counters: contributors may increment profileCount or cycleCount by
       // exactly +1, in the batch that creates the profile / cycle of THIS device, which the
-      // bump names (lastProfileId / lastCycleId). Decrement is admin-only.
+      // bump names (lastProfileId / lastCycleId). Decrement is admin-only, except cycleCount
+      // -1 in the batch that deletes a counted cycle of this device (cycleCountDown).
       allow update: if canContribute()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['profileCount', 'lastProfileId'])
         && request.resource.data.profileCount == resource.data.get('profileCount', 0) + 1
@@ -314,6 +334,7 @@ service cloud.firestore {
         && request.resource.data.cycleCount == resource.data.get('cycleCount', 0) + 1
         && newChild('cycles', request.resource.data.get('lastCycleId', null))
         && getAfter(/databases/$(database)/documents/cycles/$(request.resource.data.lastCycleId)).data.deviceId == deviceId;
+      allow update: if cycleCountDown('deviceId', deviceId);
       // Honest confirm-count bump: +1 on confirmCount ONLY when the same batch creates
       // this user's confirmation doc that did not already exist. One per uid, un-gameable.
       allow update: if isGithubUser()
@@ -421,12 +442,14 @@ service cloud.firestore {
         && request.resource.data.createdAt == request.time;
       // Denormalized counter: contributors may increment cycleCount by exactly +1, in the
       // batch that creates a cycle of THIS profile, which the bump names (lastCycleId).
-      // Decrement is admin-only.
+      // Decrement is admin-only, except -1 in the batch that deletes a counted cycle of this
+      // profile (cycleCountDown).
       allow update: if canContribute()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cycleCount', 'lastCycleId'])
         && request.resource.data.cycleCount == resource.data.get('cycleCount', 0) + 1
         && newChild('cycles', request.resource.data.get('lastCycleId', null))
         && getAfter(/databases/$(database)/documents/cycles/$(request.resource.data.lastCycleId)).data.profileId == profileId;
+      allow update: if cycleCountDown('profileId', profileId);
       // Profile owner (ownerId) or parent device owner may update phases only, and only with
       // a bounded phase list.
       allow update: if isGithubUser()
@@ -542,7 +565,21 @@ service cloud.firestore {
       // preserves status/owner/createdAt/counters, which the contributor-create branch cannot).
       allow create: if isAdmin();
       allow update: if isAdmin();
-      allow delete: if (isSignedIn() && isOwner()) || isAdmin();
+      // Only the uploader (by uid; uploaderUid cannot be changed by anyone but an admin) or an
+      // admin may delete a cycle. The website's deleteCycle does it in one batch with the
+      // parents' cycleCount -1 (cycleCountDown) and the subdocs below (deletedWithCycle).
+      allow delete: if isOwner() || isAdmin();
+
+      // A cycle's confirmations, ratings and comments may go with it, but only in the batch
+      // that deletes the cycle itself (present before, absent after), which the delete rule
+      // above limits to its uploader or an admin. Firestore keeps subcollections when the
+      // parent is deleted, and the integration re-derives the SAME id for the same trace, so
+      // leftovers would return on a re-share: a stale confirmation blocks that user's new one,
+      // and a stale rating turns their next rating into an edit of a sum that no longer holds it.
+      function deletedWithCycle() {
+        return exists(/databases/$(database)/documents/cycles/$(cycleId))
+          && !existsAfter(/databases/$(database)/documents/cycles/$(cycleId));
+      }
 
       // One-way confirmation doc (create-only, own uid); the un-gameable vote source.
       match /confirmations/{uid} {
@@ -551,7 +588,7 @@ service cloud.firestore {
           && request.resource.data.uid == uid
           && request.resource.data.createdAt == request.time;
         allow update: if false;
-        allow delete: if isAdmin();
+        allow delete: if isAdmin() || deletedWithCycle();
       }
 
       match /comments/{commentId} {
@@ -565,7 +602,8 @@ service cloud.firestore {
           && (!('parentId' in request.resource.data)
               || request.resource.data.parentId == null
               || request.resource.data.parentId is string);
-        allow delete: if (isSignedIn() && resource.data.authorUid == request.auth.uid) || isAdmin();
+        allow delete: if (isSignedIn() && resource.data.authorUid == request.auth.uid) || isAdmin()
+          || deletedWithCycle();
         allow update: if false;
 
         // Reports on this comment (parent comment must exist; target* bound to this path).
@@ -583,7 +621,8 @@ service cloud.firestore {
         allow read: if true;
         allow create, update: if canContribute() && request.auth.uid == uid
           && request.resource.data.rating in [1, 2, 3, 4, 5];
-        allow delete: if false;
+        // Never on its own (that would skew ratingSum/ratingCount); only with the cycle.
+        allow delete: if deletedWithCycle();
       }
 
       // Reports on this cycle (parent must exist; target* fields bound to this object).

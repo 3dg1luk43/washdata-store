@@ -1359,16 +1359,52 @@ export async function getCycle(id) {
   return hydrateCycle(rec);
 }
 
+// Hard-delete a reference cycle: the uploader deleting what they shared, and the admin
+// delete. ONE batch takes the cycle, the profile/device/brand cycleCount it was counted in
+// (pending/approved only, the same rule as every other counter path), and its
+// confirmations, ratings and comments. The rules allow a non-admin those writes only
+// together with the cycle's own deletion (cycleCountDown / deletedWithCycle).
+//
+// The subdocs go because Firestore keeps a subcollection when its parent is deleted, and
+// the integration re-derives the SAME id (a trace hash) when the same recording is shared
+// again: a stale confirmation would lock that user out of confirming it, and a stale rating
+// would turn their next rating into an edit of a sum that no longer holds it. Reports stay:
+// they are admin-only, and the moderation queue shows the target as gone.
+//
+// A parent doc that is missing or unreadable, or whose counter is already 0, is skipped
+// (an update on a missing doc would fail the whole batch). Subdocs past the 500-write cap
+// stay behind; confirmations and ratings go first because they are the ones that resurface.
+const _CYCLE_SUBCOLLECTIONS = ['confirmations', 'ratings', 'comments'];
+const _BATCH_CAP = 500;
+
 export async function deleteCycle(id) {
+  if (!_auth.currentUser) throw new Error('Not signed in');
   const cyc = await restGet(`cycles/${id}`, { auth: true, noStore: true });
-  await deleteDoc(doc(_db, 'cycles', id));
-  if (cyc && _isVisible(cyc.status)) {
-    const updates = [];
-    if (cyc.profileId) updates.push(updateDoc(doc(_db, 'profiles', cyc.profileId), { cycleCount: increment(-1) }));
-    if (cyc.deviceId) updates.push(updateDoc(doc(_db, 'devices', cyc.deviceId), { cycleCount: increment(-1) }));
-    if (cyc.brand_lc) updates.push(updateDoc(doc(_db, 'brands', cyc.brand_lc), { cycleCount: increment(-1) }));
-    try { await Promise.all(updates); } catch (_) {}
+  if (!cyc) throw new Error('Cycle not found');
+  const parents = _isVisible(cyc.status) ? [
+    ['profiles', cyc.profileId], ['devices', cyc.deviceId], ['brands', cyc.brand_lc],
+  ].filter(([, pid]) => pid) : [];
+  const [parentDocs, subSnaps] = await Promise.all([
+    Promise.all(parents.map(([coll, pid]) => restGet(`${coll}/${pid}`, { auth: true, noStore: true }).catch(() => null))),
+    Promise.all(_CYCLE_SUBCOLLECTIONS.map((sub) => getDocs(collection(_db, 'cycles', id, sub)))),
+  ]);
+  const batch = writeBatch(_db);
+  let writes = 1;  // the cycle itself
+  parents.forEach(([coll, pid], i) => {
+    if (!parentDocs[i] || !(Number(parentDocs[i].cycleCount) > 0)) return;
+    batch.update(doc(_db, coll, pid), { cycleCount: increment(-1), lastRemovedCycleId: id });
+    writes += 1;
+  });
+  for (const snap of subSnaps) {
+    for (const d of snap.docs) {
+      if (writes >= _BATCH_CAP) break;
+      batch.delete(d.ref);
+      writes += 1;
+    }
   }
+  batch.delete(doc(_db, 'cycles', id));
+  await batch.commit();
+  invalidateCatalogCache();  // cached search rows and catalog counts still hold this cycle
 }
 
 export async function updateProfilePhases(profileId, phases) {

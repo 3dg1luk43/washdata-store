@@ -561,6 +561,8 @@ input[type="file"]:hover {
   flex-shrink: 0;
   flex-wrap: wrap;
 }
+/* A destructive footer action sits apart from Close, on the left. */
+.modal-footer .modal-footer-start { margin-right: auto; }
 
 /* Modal sparkline area */
 .modal-sparkline-area {

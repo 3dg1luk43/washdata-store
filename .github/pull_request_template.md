@@ -1,7 +1,7 @@
 > [!IMPORTANT]
 > **Non-trivial PRs must reference an issue that carries the `accepted` label.**
 > If no accepted issue is linked, this PR will be closed automatically.
-> To get your work accepted: open a [Bug Report](https://github.com/3dg1luk43/washdata_store/issues/new?template=bug_report.yml) or [Feature Request](https://github.com/3dg1luk43/washdata_store/issues/new?template=feature_request.yml) first, indicate you plan to submit a PR, and wait for the maintainer to add the `accepted` label before opening this PR.
+> To get your work accepted: open a [Bug Report](https://github.com/3dg1luk43/washdata-store/issues/new?template=bug_report.yml) or [Feature Request](https://github.com/3dg1luk43/washdata-store/issues/new?template=feature_request.yml) first, indicate you plan to submit a PR, and wait for the maintainer to add the `accepted` label before opening this PR.
 
 ## Linked Accepted Issue
 
@@ -60,7 +60,7 @@ Closes #<!-- issue number — must have the `accepted` label -->
 
 - [ ] My code matches the style of the surrounding files (plain ES modules, 2-space indent)
 - [ ] I have **not** added any ad-tech, third-party marketing scripts, or additional analytics beyond the project's existing GA4 + Firestore counters
-- [ ] I have **not** added new external/CDN dependencies beyond the existing Firebase SDK
+- [ ] I have **not** added new external/CDN dependencies beyond the existing Firebase SDK and `marked`
 - [ ] Every new source file carries the AGPL-3.0-or-later license header
 - [ ] I've validated JSON config I changed (`node -e "JSON.parse(require('fs').readFileSync('<file>','utf8'))"`)
 - [ ] I've reviewed my own code for quality
@@ -81,4 +81,4 @@ Before hitting submit, please make sure:
 1. ✅ PR title clearly describes the change
 2. ✅ Description is detailed enough for reviewers to understand
 3. ✅ Tests pass locally
-4. ✅ You've reviewed the [CONTRIBUTING.md](https://github.com/3dg1luk43/washdata_store/blob/main/CONTRIBUTING.md) guide
+4. ✅ You've reviewed the [CONTRIBUTING.md](https://github.com/3dg1luk43/washdata-store/blob/main/CONTRIBUTING.md) guide

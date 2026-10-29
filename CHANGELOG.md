@@ -13,6 +13,10 @@ Firebase Firestore, with no ads, no tracking, and no paid tier.
 
 ## Unreleased
 
+### Added
+
+- **Delete a cycle you shared**: signed in, your own reference cycles show **Delete** on the card and in the details window (with a confirm). One batch removes the cycle, takes the program, appliance and brand cycle counts down by one, and deletes its confirmations, ratings and comments, so a re-share of the same recording (same id) starts clean. Reports on it stay for the admin queue, which shows the target as gone. Brands, appliances and programs stay admin-only to delete: other users' cycles, confirmations, ratings and favourites hang off them. Admin delete now uses the same atomic batch (it used to leave the subcollections behind and decrement the counters separately, best-effort). **Requires `firebase deploy --only firestore:rules` before the site deploy**: the old rules refuse the batch, for admins too (cycle ratings were not deletable).
+
 ### Fixed
 
 - **The landing page showed only the first 60 brands**: with pending brands included it merged one page of each status and returned no "Load more", so Miele, Siemens, Samsung, Whirlpool and every other brand after the 60th were reachable only through search. Both statuses now page together behind one cursor, and a page never ends past a brand either list has not fetched yet.

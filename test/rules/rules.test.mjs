@@ -23,7 +23,7 @@ import {
 } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { doc, collection, setDoc, updateDoc, writeBatch, getDoc, serverTimestamp, increment } from 'firebase/firestore';
+import { doc, collection, setDoc, updateDoc, deleteDoc, writeBatch, getDoc, serverTimestamp, increment } from 'firebase/firestore';
 
 let env;
 const PID = 'washdata-store';
@@ -1001,6 +1001,117 @@ test('web owner editors: updateDeviceSettings with every editor field, updatePro
   // The device owner edits a program's phase map (editors.js keeps any extra keys of old phases).
   await assertSucceeds(updateDoc(doc(db, 'profiles/washer__ed__m__eco'),
     { phases: [{ name: 'Wash', start: 0, end: 1800 }, { name: 'Spin', start: 1800, end: 2400, color: 'x' }] }));
+});
+
+// ---- Uploader deletes a cycle they shared (washstore.deleteCycle) -----------------------
+// One batch: the cycle, each parent's cycleCount -1 naming it (cycleCountDown), and its
+// confirmations / ratings / comments (deletedWithCycle).
+
+async function seedDeletable(tag, { status = 'approved', uploader = 'own1', count = 2 } = {}) {
+  const brand = `delbrand${tag}`;
+  const dev = `washer__${brand}__m`;
+  const prof = `${dev}__eco`;
+  const cyc = `cdel_${tag}`;
+  await seedDoc(`brands/${brand}`, { brand, brand_lc: brand, status: 'approved', cycleCount: count });
+  await seedDoc(`devices/${dev}`, { applianceType: 'washer', brand, brand_lc: brand, status: 'approved', cycleCount: count });
+  await seedDoc(`profiles/${prof}`, { deviceId: dev, program: 'Eco', program_lc: 'eco', status: 'approved', cycleCount: count });
+  await seedDoc(`cycles/${cyc}`, {
+    ...validCycle(uploader), profileId: prof, deviceId: dev, brand_lc: brand, status, createdAt: new Date(),
+  });
+  return { brand, dev, prof, cyc, parents: [`profiles/${prof}`, `devices/${dev}`, `brands/${brand}`] };
+}
+// Exactly what deleteCycle commits.
+function deleteBatch(db, w, { subs = [], counters = w.parents, removedId = w.cyc, step = -1 } = {}) {
+  const b = writeBatch(db);
+  b.delete(doc(db, `cycles/${w.cyc}`));
+  for (const p of counters) b.update(doc(db, p), { cycleCount: increment(step), lastRemovedCycleId: removedId });
+  for (const sub of subs) b.delete(doc(db, `cycles/${w.cyc}/${sub}`));
+  return b;
+}
+async function readRaw(path) {
+  let out;
+  await env.withSecurityRulesDisabled(async (ctx) => { out = await getDoc(doc(ctx.firestore(), path)); });
+  return out.exists() ? out.data() : null;
+}
+
+test('delete: the uploader removes their cycle, its counters and every subdoc in one batch', async () => {
+  const w = await seedDeletable('a');
+  // Other users' activity, sized to probe the per-request document-access limit.
+  const subs = [];
+  for (let i = 0; i < 12; i++) {
+    await seedDoc(`cycles/${w.cyc}/confirmations/v${i}`, { uid: `v${i}`, createdAt: new Date() });
+    await seedDoc(`cycles/${w.cyc}/ratings/v${i}`, { rating: 4 });
+    await seedDoc(`cycles/${w.cyc}/comments/k${i}`, { authorUid: `v${i}`, authorName: null, text: 'ok', createdAt: new Date() });
+    subs.push(`confirmations/v${i}`, `ratings/v${i}`, `comments/k${i}`);
+  }
+  await assertSucceeds(deleteBatch(gh('own1').firestore(), w, { subs }).commit());
+  assert.equal(await readRaw(`cycles/${w.cyc}`), null);
+  for (const p of w.parents) assert.equal((await readRaw(p)).cycleCount, 1, p);
+  for (const sub of subs) assert.equal(await readRaw(`cycles/${w.cyc}/${sub}`), null, sub);
+});
+
+test('delete: only the uploader or an admin may delete a cycle', async () => {
+  const w = await seedDeletable('b');
+  await assertFails(deleteDoc(doc(gh('other1').firestore(), `cycles/${w.cyc}`)));
+  await assertFails(deleteDoc(doc(anon().firestore(), `cycles/${w.cyc}`)));
+  await assertFails(deleteBatch(gh('other1').firestore(), w).commit());
+  // The admin path commits the same batch, ratings included.
+  await seedDoc(`cycles/${w.cyc}/ratings/v1`, { rating: 5 });
+  await seedDoc('admins/adminU', { uid: 'adminU' });
+  await assertSucceeds(deleteBatch(gh('adminU').firestore(), w, { subs: ['ratings/v1'] }).commit());
+  // The cycle on its own (no counter to move) stays allowed for its uploader.
+  const w2 = await seedDeletable('b2');
+  await assertSucceeds(deleteDoc(doc(gh('own1').firestore(), `cycles/${w2.cyc}`)));
+});
+
+test('delete: cycleCount -1 needs the named cycle deleted in the same batch', async () => {
+  const w = await seedDeletable('c');
+  const db = gh('own1').firestore();
+  const prof = doc(db, w.parents[0]);
+  // A bare decrement, or one naming a cycle that is not being deleted, is refused.
+  await assertFails(updateDoc(prof, { cycleCount: increment(-1) }));
+  await assertFails(updateDoc(prof, { cycleCount: increment(-1), lastRemovedCycleId: w.cyc }));
+  // Exactly -1, and nothing else on the parent.
+  await assertFails(deleteBatch(db, w, { counters: [w.parents[0]], step: -2 }).commit());
+  const extra = writeBatch(db);
+  extra.delete(doc(db, `cycles/${w.cyc}`));
+  extra.update(prof, { cycleCount: increment(-1), lastRemovedCycleId: w.cyc, program: 'x' });
+  await assertFails(extra.commit());
+  // Once the cycle is gone, its id cannot buy another decrement.
+  await assertSucceeds(deleteBatch(db, w).commit());
+  await assertFails(updateDoc(prof, { cycleCount: increment(-1), lastRemovedCycleId: w.cyc }));
+  assert.equal((await readRaw(w.parents[0])).cycleCount, 1);
+});
+
+test('delete: a cycle takes down only its own parents, only while it was counted, never below 0', async () => {
+  const a = await seedDeletable('d');
+  const b = await seedDeletable('e');
+  const db = gh('own1').firestore();
+  // Deleting cycle a cannot decrement cycle b's program / appliance / brand.
+  for (const p of b.parents) await assertFails(deleteBatch(db, a, { counters: [p] }).commit());
+  // A removed cycle is not counted, so its deletion moves no counter.
+  const r = await seedDeletable('f', { status: 'removed' });
+  await assertFails(deleteBatch(db, r).commit());
+  await assertSucceeds(deleteBatch(db, r, { counters: [] }).commit());
+  // A counter already at 0 stays at 0 (the client skips it).
+  const z = await seedDeletable('g', { count: 0 });
+  await assertFails(deleteBatch(db, z).commit());
+  await assertSucceeds(deleteBatch(db, z, { counters: [] }).commit());
+});
+
+test('delete: subdocs cannot be deleted on their own while the cycle stays', async () => {
+  const w = await seedDeletable('h');
+  await seedDoc(`cycles/${w.cyc}/confirmations/v1`, { uid: 'v1', createdAt: new Date() });
+  await seedDoc(`cycles/${w.cyc}/ratings/v1`, { rating: 1 });
+  await seedDoc(`cycles/${w.cyc}/comments/k1`, { authorUid: 'v1', authorName: null, text: 'hm', createdAt: new Date() });
+  const own = gh('own1').firestore();
+  await assertFails(deleteDoc(doc(own, `cycles/${w.cyc}/ratings/v1`)));
+  await assertFails(deleteDoc(doc(own, `cycles/${w.cyc}/confirmations/v1`)));
+  await assertFails(deleteDoc(doc(own, `cycles/${w.cyc}/comments/k1`)));
+  // The rater cannot retract a rating either (that would skew the aggregate).
+  await assertFails(deleteDoc(doc(gh('v1').firestore(), `cycles/${w.cyc}/ratings/v1`)));
+  // A comment's author still can, as before.
+  await assertSucceeds(deleteDoc(doc(gh('v1').firestore(), `cycles/${w.cyc}/comments/k1`)));
 });
 
 // ---- Home Assistant integration (store_client.py REST :commit) ------------------------

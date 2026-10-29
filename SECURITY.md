@@ -15,13 +15,14 @@ is not protected, and the residual risks an operator should know about.
 - **Approved and pending catalog content is world-readable.** Brands, devices, programs
   (`profiles`) and reference cycles in `pending` status are public and searchable with an
   "awaiting approval" tag, and the integration downloads them by default. Only `removed`
-  content is hidden. Comments and ratings are world-readable. The store is organized as
+  content is hidden. Comments, ratings and confirmations are world-readable, and every
+  contribution carries its author's account uid. The store is organized as
   `brands` / `devices` -> `profiles` -> `cycles` flat collections with deterministic
   parent-ID references.
 
 ## What is protected
 
-- **Admin actions** (approve/reject/remove, ban/unban, delete, rename/merge, owner assignment)
+- **Admin actions** (approve/remove/restore, ban/unban, delete, rename/merge, owner assignment)
   require the caller's UID to exist in the `admins` collection. That collection is not
   client-writable - admins are added only via the Firebase console. The `admin.html` page
   being public does not grant access; every action is checked server-side by the rules.
@@ -31,11 +32,15 @@ is not protected, and the residual risks an operator should know about.
   confirms at most once (a uid-keyed confirmation doc created in the same batch as the +1).
   A brand is promoted the same way once enough of its devices are approved
   (`brandConfirmThreshold`). Programs are approved by admins only. An uploader can delete their
-  own reference cycle but cannot edit it.
+  own reference cycle but cannot edit it. The same batch takes the program, appliance and brand
+  cycle counts down by one and removes the cycle's confirmations, ratings and comments; the
+  rules allow those writes only together with that cycle's deletion. Brands, appliances and
+  programs can be deleted by admins only, since other users' content hangs off them.
 - **Contributing requires a GitHub sign-in.** Every catalog, comment, rating, confirmation and
   report write is gated on `sign_in_provider == 'github.com'`. The only anonymous writes are
   the `downloads` +1 on a cycle and the bounded `analytics` counters. The integration reads
-  anonymously and writes only through the user's connected GitHub account.
+  anonymously, sends the anonymous download counters, and makes every other write through the
+  user's connected GitHub account.
 - **Bans are enforced server-side and cannot be self-reverted.** The moderation fields on
   `users/{uid}` (`status`, `banReason`, `bannedAt`, `bannedBy`, `removedContentCount`,
   `lastRemovalAt`) are admin-only, and a user cannot pre-seed them when their record is
@@ -69,7 +74,8 @@ is not protected, and the residual risks an operator should know about.
   that adds the device to (or removes it from) the caller's own favorites list, so each user
   counts once. `deviceCount` / `profileCount` / `cycleCount` may rise by one only in the batch
   that creates the counted child, which the write names (`lastDeviceId` / `lastProfileId` /
-  `lastCycleId`). Decrements are admin-only. The integration does not maintain these counters,
+  `lastCycleId`). Decrements are admin-only, except the `cycleCount` -1 in the batch that deletes
+  a counted cycle. The integration does not maintain these counters,
   so they undercount what it contributes.
 - **The `qc` provenance code is obscured, not secret.** Each cycle carries an integer
   provenance hint (how the recording was produced) that only the admin UI decodes to a label.
@@ -98,9 +104,8 @@ or quotas) is not available without Cloud Functions (Blaze). Firebase App Check 
 abuse-mitigation control, not a rate limiter. The current controls:
 
 - **Client-side throttle (best-effort).** `washstore.js` limits writes to 20 per rolling minute
-  per browser session and counts each cycle's download at most once per session. This stops
-  accidental or casual flooding through the UI. It is **not** a security control - a scripted
-  client that bypasses the UI is unaffected.
+  per page load. This stops accidental or casual flooding through the UI. It is **not** a
+  security control - a scripted client that bypasses the UI is unaffected.
 - **Public download and analytics counters** remain unauthenticated `+1` writes. A determined
   script could still spend the daily free write quota. Impact is bounded: on the Spark plan, quota exhaustion just
   pauses writes until the next day (no bill, no data loss), and the counter is a vanity metric.

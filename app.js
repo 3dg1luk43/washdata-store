@@ -20,7 +20,7 @@ import {
   init, onAuth, signIn, signOutUser, isAdmin, ensureUserProfile,
   listBrands, searchDevices, getDevicesByBrand, getProfiles, createProfile, getReferenceCycles,
   favoriteDevice, getFavorites,
-  addComment, listComments, deleteComment,
+  addComment, listComments, deleteComment, deleteCycle,
   submitRating, getUserRating, getRatingSummary,
   confirmDevice, rateDevice, getDeviceQuality, getUserDeviceRating, hasConfirmedDevice,
   confirmCycle, hasConfirmedCycle,
@@ -436,6 +436,9 @@ onAuth(async (user) => {
   document.querySelectorAll('[data-community]').forEach((box) => {
     if (box._device) renderDeviceCommunity(box, box._device);
   });
+  // Same for the cycle cards' Delete / Report action and the modal's Delete.
+  document.querySelectorAll('[data-cycle-id]').forEach((el) => { if (el._cycle) renderCycleCardAction(el); });
+  syncModalDelete();
 });
 
 function renderOwnerActions(actions) {
@@ -1085,7 +1088,7 @@ async function openProfile(p) {
   body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
   try {
     const { items } = await getReferenceCycles(p.id, { includePending: !_browseFilters.approvedOnly });
-    if (items.length === 0) { body.innerHTML = emptyHTML('&#128200;', 'No reference cycles', 'No reference cycles for this profile yet. Upload one from the ha_washdata integration.'); return; }
+    if (items.length === 0) { body.innerHTML = noCyclesHTML(); return; }
     body.innerHTML = '';
     const rbP = makeReportBtn(reportCtxFor('profile', p.id, p.program, p.createdByUid), { label: true });
     if (rbP) { const tb = document.createElement('div'); tb.className = 'view-toolbar'; tb.appendChild(rbP); body.appendChild(tb); }
@@ -1098,6 +1101,10 @@ async function openProfile(p) {
     items.forEach((c) => grid.appendChild(buildCycleCard(c)));
     body.appendChild(grid);
   } catch (e) { body.innerHTML = emptyHTML('&#9888;', 'Failed to load', esc(e.message)); }
+}
+
+function noCyclesHTML() {
+  return emptyHTML('&#128200;', 'No reference cycles', 'No reference cycles for this profile yet. Upload one from the ha_washdata integration.');
 }
 
 function buildCycleCard(c) {
@@ -1122,8 +1129,9 @@ function buildCycleCard(c) {
       <button class="btn btn-primary btn-sm" data-details>Details</button>
     </div>`;
   el.querySelector('[data-details]').addEventListener('click', () => openDetails(c));
-  const rbC = makeReportBtn(reportCtxFor('cycle', c.id, (_profile ? _profile.program : c.program_lc) || 'cycle', c.uploaderUid));
-  if (rbC) el.querySelector('.card-actions').appendChild(rbC);
+  el.dataset.cycleId = c.id;
+  el._cycle = c;
+  renderCycleCardAction(el);
   renderCycleCommunity(el.querySelector('[data-community]'), c);
   el._ratingSummary = { avg: null, count: 0 }; // gated once the summary resolves
   // Prefer the denormalized aggregate on the cycle doc (0 reads); fall back to the live
@@ -1136,6 +1144,60 @@ function buildCycleCard(c) {
     ratingGate(el, s); // honor the Min-rating filter
   }).catch(() => {});
   return el;
+}
+
+// The action next to Details: Delete on your own cycle, Report on anyone else's. Re-run on
+// sign-in/out (see onAuth) so cards built before the auth change offer the right one.
+function renderCycleCardAction(el) {
+  const c = el._cycle;
+  const actions = el.querySelector('.card-actions');
+  actions.querySelectorAll('[data-card-action]').forEach((b) => b.remove());
+  let btn;
+  if (isMyCycle(c)) {
+    btn = document.createElement('button');
+    btn.className = 'btn btn-danger btn-sm';
+    btn.textContent = 'Delete';
+    btn.title = 'Delete this cycle from the store';
+    btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); doDeleteCycle(c, btn); });
+  } else {
+    btn = makeReportBtn(reportCtxFor('cycle', c.id, (_profile ? _profile.program : c.program_lc) || 'cycle', c.uploaderUid));
+  }
+  if (btn) { btn.dataset.cardAction = ''; actions.appendChild(btn); }
+}
+
+// ============================================================ delete own cycle
+function isMyCycle(c) { return !!(_user && c && c.uploaderUid && c.uploaderUid === _user.uid); }
+
+async function doDeleteCycle(c, btn) {
+  if (!isMyCycle(c)) return;
+  if (!confirm('Delete this cycle from the store? Its ratings, confirmations and comments are deleted too. This cannot be undone.')) return;
+  if (btn) btn.disabled = true;
+  try {
+    await deleteCycle(c.id);
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    toast(e.message, 'error');
+    return;
+  }
+  _ratingCache.delete(c.id);
+  _myCycleConfirm.delete(c.id);
+  // The counts on screen come from docs already in memory; take the deleted cycle off them
+  // instead of re-reading (only pending/approved cycles are counted).
+  if (c.status === 'pending' || c.status === 'approved') {
+    const down = (o) => { if (o && o.cycleCount > 0) o.cycleCount -= 1; };
+    if (_profile && _profile.id === c.profileId) down(_profile);
+    if (_device && _device.id === c.deviceId) down(_device);
+    if (_brand && _brand.brand_lc === c.brand_lc) down(_brand);
+  }
+  if (_openRecord && _openRecord.id === c.id) closeModal();
+  const card = [...document.querySelectorAll('[data-cycle-id]')].find((el) => el.dataset.cycleId === c.id);
+  if (card) {
+    const grid = card.parentElement;
+    card.remove();
+    // Last one gone: show the profile's normal empty state.
+    if (_view === 'profile' && grid && !grid.querySelector('[data-cycle-id]')) $('browse-body').innerHTML = noCyclesHTML();
+  }
+  toast('Cycle deleted');
 }
 
 // Confirm ("I have this appliance and this cycle looks right") for pending cycles,
@@ -1237,6 +1299,7 @@ async function openDetails(c) {
   $('modal-badges').innerHTML = `<span class="badge badge-type">${esc(typeLabel(c.applianceType))}</span>`;
   interactiveGraph($('modal-sparkline'), c);
   $('modal-detail-content').innerHTML = buildDetailGrid(c);
+  syncModalDelete();
   switchModalTab('detail');
   await loadRatingSection(c.id);
   await loadComments(c.id);
@@ -1266,6 +1329,16 @@ function buildDetailGrid(c) {
 }
 
 function closeModal() { $('details-modal').setAttribute('hidden', ''); _openRecord = null; cancelReply(); }
+// Delete in the modal footer, for the uploader only.
+function syncModalDelete() {
+  const btn = $('modal-delete-btn');
+  if (!btn) return;
+  btn.toggleAttribute('hidden', !isMyCycle(_openRecord));
+  btn.disabled = false;
+}
+if ($('modal-delete-btn')) $('modal-delete-btn').addEventListener('click', () => {
+  if (_openRecord) doDeleteCycle(_openRecord, $('modal-delete-btn'));
+});
 $('modal-close').addEventListener('click', closeModal);
 $('modal-close-footer').addEventListener('click', closeModal);
 $('details-modal').addEventListener('click', (e) => { if (e.target === $('details-modal')) closeModal(); });

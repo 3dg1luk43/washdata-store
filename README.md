@@ -1,6 +1,6 @@
 # WashData Store
 
-The WashData Store is a free, community-run library of appliance power-cycle reference recordings for the [ha_washdata](https://github.com/3dg1luk43/ha_washdata) Home Assistant integration. Instead of spending weeks recording your own washing machine programs from scratch, you can download a clean reference cycle that someone else already recorded on the same appliance, seed your local profile instantly, and start getting match results and time-remaining estimates straight away. Everything is hosted at zero cost -- GitHub Pages for the frontend, Firebase Firestore for the backend -- so there are no subscriptions and no ads. Aggregate usage (downloads, page views, searches) is measured via Google Analytics 4 to help maintain the library; no personal data or browsing profiles are stored.
+The WashData Store is a free, community-run library of appliance power-cycle reference recordings for the [ha_washdata](https://github.com/3dg1luk43/ha_washdata) Home Assistant integration. Instead of spending weeks recording your own washing machine programs from scratch, you can download a clean reference cycle that someone else already recorded on the same appliance, seed your local profile instantly, and start getting match results and time-remaining estimates straight away. Everything is hosted at zero cost -- GitHub Pages for the frontend, Firebase Firestore for the backend -- so there are no subscriptions and no ads. Aggregate usage (downloads, page views, searches) is counted with anonymous counters to help maintain the library; no personal data or browsing profiles are stored.
 
 ## How it is organized
 
@@ -17,11 +17,11 @@ Two people with the same appliance and the same program land on the same Device 
 
 ## Browsing and adopting
 
-No account is needed to browse or download. Open the store, pick a brand, drill into a device and program, and download any approved reference cycle as JSON. In ha_washdata, import it through the panel to seed a profile.
+No account is needed to browse. Open the store, pick a brand, drill into a device and program, and open a reference cycle's **Details** to see its power graph and stats. The website has no download button: you import cycles in ha_washdata, from the panel's **Store** tab, to seed a profile.
 
-The search box at the top searches the whole library at once - brands, appliances, programs and reference cycles - and matches anywhere in a name, not just the start, so `wm14` finds `iQ300 WM14N292`. Every word you type has to appear somewhere, so `siemens dishwasher` narrows across the brand and the appliance type together.
+The search box at the top searches the whole library at once - brands, appliances, programs and reference cycles - and matches anywhere in a brand, model or program name, not just the start, so `wm14` finds `iQ300 WM14N292` (reference cycles match on the start of their program name). Every word you type has to appear somewhere, so `siemens dishwasher` narrows across the brand and the appliance type together.
 
-For a faster path, use the built-in adopt flow in the ha_washdata panel: when the store has a matching device, the panel offers a one-click **Adopt** button that imports a full device package directly into your integration without leaving Home Assistant.
+For a faster path, use the built-in adopt flow in the ha_washdata panel: when the store has a matching device, the panel offers a one-click **Download this setup** button that imports a full device package directly into your integration without leaving Home Assistant.
 
 Signed-in users can **favorite** a device with the star on its card. Favorites are stored on
 your own `users/{uid}` document, and the browse view has a **Favorites only** filter alongside
@@ -31,9 +31,9 @@ click away. Each device also shows a `favoriteCount` as a rough popularity signa
 **What a device package includes:**
 
 - All programs listed for that device
-- All approved reference cycles for each program
+- All reference cycles for each program, pending ones included
 - Optional cycle phase maps (pre-wash, main wash, rinse, spin, and so on)
-- Optional detection and matching settings shared by the device owner
+- Optional detection and matching settings shared with that appliance
 
 When you adopt, you choose whether to apply the optional settings or keep your own.
 
@@ -41,23 +41,26 @@ When you adopt, you choose whether to apply the optional settings or keep your o
 
 ## Contributing
 
-Contributions require a GitHub account. Sign in once; your public GitHub display name and avatar are the only things stored.
+Contributions require a GitHub account. Your name is shown on what you add only if you choose to show it; see Privacy below for what is stored.
 
 **From the web:**
 
 1. Open the store and sign in with GitHub.
 2. If your brand or device does not exist yet, use **Add brand** or **Add appliance** to create it.
-3. Navigate to your device and the program you want to contribute to, or create the program entry if it does not exist.
-4. Click **Upload cycle** and attach your cycle file. Accepted formats: JSON array of `[seconds, watts]` pairs, or a two-column CSV.
-5. Submit. The cycle is marked pending until it clears the approval process (see below).
+3. Open your device and, if your program is missing, add it with **Add profile**.
+4. New entries are marked pending until they clear the approval process (see below).
+
+Reference cycles cannot be uploaded on the website: share them from the ha_washdata panel.
 
 **From the ha_washdata panel (recommended):**
 
 1. In ha_washdata, open the panel for your device.
-2. Go to the Advanced tab, open the gear menu, and enable **Online features**.
-3. Link your GitHub account when prompted (a one-time step).
-4. On the Cycles tab, find a clean golden cycle and click **Share to store**.
-5. The panel pre-fills brand, model, and program from your device configuration. Review and submit.
+2. Open the gear (Preferences) in the panel header, go to **Online & Community** and turn on **Enable online features** (Home Assistant admins only).
+3. Click **Connect GitHub** there (a one-time step for all your devices).
+4. On the Cycles tab, open a reference cycle (⭐) and click **Share to store**. **Share this device**, next to the appliance in Settings, shares several programs at once.
+5. Brand and model come from the device's Settings (**Appliance Brand** and **Appliance Model** must be set); the program is pre-selected from the cycle's profile. Review and click **Share**.
+
+**Removing a cycle you shared:** sign in on the website, open the program, and press **Delete** on your cycle (on its card or in its details). Its ratings, confirmations and comments are deleted with it. Brands, appliances and programs are shared by everyone, so only a moderator can delete those.
 
 ---
 
@@ -65,9 +68,9 @@ Contributions require a GitHub account. Sign in once; your public GitHub display
 
 Every new entry -- brand, device, program, or reference cycle -- starts as **pending**. Pending entries are public: they are searchable with an "awaiting approval" tag, and the ha_washdata integration can download them.
 
-A device or reference cycle is promoted to **approved** automatically when five distinct GitHub users confirm it (the threshold is admin-tunable). Any signed-in user can open a pending entry and click **Confirm** if it looks correct. When the count reaches the threshold the entry is auto-approved instantly, with no moderator action needed. A brand is approved once enough of its devices are; programs are approved by a moderator.
+A device or reference cycle is promoted to **approved** automatically when five distinct GitHub users confirm it (the threshold is admin-tunable). Any signed-in user can click **Confirm this appliance** or **Confirm this cycle** on a pending entry's card if it looks correct. When the count reaches the threshold the entry is auto-approved instantly, with no moderator action needed. A brand is approved once enough of its devices are; programs are approved by a moderator.
 
-Confirmation documents are create-only and one-per-user, so the vote count cannot be inflated. Moderators can also approve, reject, or delete entries at any time through the admin panel.
+Confirmation documents are create-only and one-per-user, so the vote count cannot be inflated. Moderators can also approve, remove (hide), restore or delete entries at any time through the admin panel.
 
 ---
 
@@ -82,52 +85,50 @@ A device package bundles everything associated with a device:
 | Cycle phase maps | No |
 | Detection and matching settings | No |
 
-When you share a device from the ha_washdata panel you control what is included. When you adopt a package you control what is applied locally.
+When you share a device from the ha_washdata panel you control what is included. When you adopt a package you choose whether its settings are applied; programs, cycles and phase maps are always added.
 
 ---
 
 ## Appliance types
 
-The store supports: **washer**, **dryer**, **dishwasher**, **washer-dryer combo**. The Other (Advanced) and Threshold Device types can receive and share reference cycles but have limited community-catalog support and no appliance-type-specific defaults.
+The store supports: **washer**, **dryer**, **dishwasher**, **washer-dryer combo**. The Other (Advanced) and Threshold Device types can import reference cycles from the store but cannot share to it, because the catalog has no matching appliance type.
 
 ---
 
 ## Integration with ha_washdata
 
-The ha_washdata panel has built-in store integration once online features are enabled (Advanced tab, gear menu). Everything works directly inside Home Assistant:
+The ha_washdata panel has built-in store integration once online features are enabled (gear menu, **Online & Community**). Everything works directly inside Home Assistant:
 
 - **Browse** the store catalog filtered to your device type
 - **Adopt** a device package with one click
 - **Share** a cycle to the store from the Cycles tab
-- **Confirm** pending community entries from within the panel
+- **Confirm** and rate your appliance's catalog entry from within the panel
 
-Online features are opt-in per device and require a one-time GitHub account link. The panel opens a small popup to the `/connect` page for the one-time GitHub OAuth handoff, and a `/create` popup for adding missing brands or devices -- both post back to the panel via `postMessage`.
+Online features are one opt-in for the whole install (off by default); sharing, confirming and rating need a one-time GitHub account link. The panel opens a small popup to the `/connect` page for the one-time GitHub OAuth handoff, and a `/create` popup for adding missing brands, appliances or programs -- both post back to the panel via `postMessage`.
 
 ---
 
 ## Cycle data format
 
-Reference cycles are stored as a sequence of `(offset_seconds, watts)` samples. The store accepts:
+Reference cycles are stored as a sequence of `(offset_seconds, watts)` samples.
 
-- **JSON:** array of `[seconds, watts]` pairs, array of `{t, v}` objects, or `{times, values}` object
-- **CSV/TSV:** two columns (time and power); lines starting with `#` are ignored
-
-Internally, cycles are downsampled to at most 10,000 points using LTTB (Largest Triangle Three Buckets) before being stored in Firestore as `{o, w}` map objects (Firestore forbids nested arrays). LTTB preserves peaks and troughs by selecting the most visually significant sample in each bucket rather than picking by index, so narrow transients (heater pulses, pump-out spikes) are retained rather than silently dropped. Statistics -- duration, energy in Wh, peak watts, mean watts -- are derived from the stored trace, so they are always consistent with what you see in the power graph.
+Before sharing, ha_washdata downsamples each cycle to at most 10,000 points using LTTB (Largest Triangle Three Buckets); it is stored in Firestore as `{o, w}` map objects (Firestore forbids nested arrays). LTTB preserves peaks and troughs by selecting the most visually significant sample in each bucket rather than picking by index, so narrow transients (heater pulses, pump-out spikes) are retained rather than silently dropped. Statistics -- duration, energy in Wh, peak watts, mean watts -- are computed by ha_washdata from its own cycle record and the full-resolution trace, before downsampling.
 
 Each stored cycle carries a `cycleSchemaVersion` so the format can evolve without breaking older
 documents; the current value is shown in the cycle detail panel and in the admin UI.
 
-The `qc` field records provenance: `1` = raw recording from ha_washdata, `2` = trimmed or edited, `3` = manually composed in the browser. Cycles uploaded from ha_washdata carry the appropriate code automatically.
+The `qc` field is an integer provenance hint (how the recording was produced) used for moderation. Cycles shared from ha_washdata carry the appropriate code automatically.
 
 ---
 
 ## Privacy
 
-- Sign-in uses GitHub OAuth. The store stores only your public GitHub display name and avatar URL, shown as attribution on your contributions.
+- Sign-in uses GitHub OAuth. The store keeps a private user record (your account uid, GitHub display name, username and avatar URL, sign-in times and favorites) that only you and the moderators can read.
+- Everything you add (brands, appliances, programs, cycles, comments, ratings, confirmations) carries your account uid, which is public. Your display name is shown on brands, appliances and shared cycles only if you opt in ("Show my GitHub name" on the website, "Show my name on what I share" in ha_washdata); comments always show it.
 - Browsing and downloading require no account and leave no personal trace.
-- Reference cycles contain only power measurements over time. They carry no location data, usage habits, or personal information beyond the contributor's public GitHub display name and avatar URL.
-- Aggregate store usage is counted server-side (downloads, page views, searches) via Google Analytics 4 and lightweight Firestore counters. No user IDs, cookies, or browsing profiles are stored. No ad-tech, no third-party marketing scripts.
-- All Firestore security rules are [public](firestore.rules) and auditable.
+- Reference cycles contain only power measurements over time. They carry no location data, usage habits, or personal information beyond the uploader's account uid and, if they chose to show it, their display name.
+- Aggregate store usage (downloads, page views, searches) is counted with anonymous Firestore counters. No user IDs, cookies, or browsing profiles are stored. No ad-tech, no third-party marketing scripts.
+- All Firestore security rules are [public](https://github.com/3dg1luk43/washdata-store/blob/main/firestore.rules) and auditable.
 
 ---
 
@@ -166,7 +167,7 @@ Device and profile IDs are **deterministic**: two contributors with the same bra
 
 ```bash
 npm install                        # install test dependencies
-npm run test:unit                  # unit tests for lib/ids.js and lib/trace.js
+npm run test:unit                  # unit tests (test/*.test.mjs)
 npm run test:rules                 # Firestore security-rules tests (requires Firebase emulator)
 npm run stamp                      # cache-bust asset URLs before committing frontend changes
 ```
@@ -175,10 +176,10 @@ npm run stamp                      # cache-bust asset URLs before committing fro
 
 ```bash
 # Insert sample approved cycles for design/dev testing (requires service-account credentials)
-node scripts/seed_sample.mjs
+node scripts/seed_sample.mjs <projectId>
 
 # One-time migration from v1 flat `envelopes` collection to v2 hierarchy (idempotent)
-node scripts/migrate_v1_to_v2.mjs
+node scripts/migrate_v1_to_v2.mjs <projectId>
 ```
 
 ### Deployment
@@ -189,7 +190,7 @@ Every push to `main` triggers the deploy workflow: it stamps a timestamp onto ev
 
 ## Project status
 
-Community project. Hosted on GitHub Pages (static site, zero cost) backed by Firebase Firestore (free tier). No ads, no paid tier, no subscriptions. Aggregate usage is measured via Google Analytics 4 (no personal data).
+Community project. Hosted on GitHub Pages (static site, zero cost) backed by Firebase Firestore (free tier). No ads, no paid tier, no subscriptions. Aggregate usage is counted with anonymous counters (no personal data).
 
 - **Store site:** [3dg1luk43.github.io/washdata-store](https://3dg1luk43.github.io/washdata-store)
 - **Integration:** [ha_washdata on GitHub](https://github.com/3dg1luk43/ha_washdata)
@@ -200,4 +201,4 @@ Idea by [oli-z](https://github.com/oli-z). Developed by [3dg1luk43](https://gith
 
 ## License
 
-Licensed under the [GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later). Any modified version you run as a network service must also be made available as open source under the same license.
+Licensed under the [GNU Affero General Public License v3.0 or later](https://github.com/3dg1luk43/washdata-store/blob/main/LICENSE) (AGPL-3.0-or-later). Any modified version you run as a network service must also be made available as open source under the same license.
