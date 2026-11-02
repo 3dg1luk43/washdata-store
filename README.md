@@ -23,10 +23,7 @@ The search box at the top searches the whole library at once - brands, appliance
 
 For a faster path, use the built-in adopt flow in the ha_washdata panel: when the store has a matching device, the panel offers a one-click **Download this setup** button that imports a full device package directly into your integration without leaving Home Assistant.
 
-Signed-in users can **favorite** a device with the star on its card. Favorites are stored on
-your own `users/{uid}` document, and the browse view has a **Favorites only** filter alongside
-the search, approved-only and minimum-rating filters, so a shortlist of candidate models stays one
-click away. Each device also shows a `favoriteCount` as a rough popularity signal.
+Signed-in users can **favorite** a device with the star on its card. The browse view has a **Favorites only** filter alongside the search, approved-only and minimum-rating filters, so a shortlist of candidate models stays one click away.
 
 **What a device package includes:**
 
@@ -68,9 +65,9 @@ Reference cycles cannot be uploaded on the website: share them from the ha_washd
 
 Every new entry -- brand, device, program, or reference cycle -- starts as **pending**. Pending entries are public: they are searchable with an "awaiting approval" tag, and the ha_washdata integration can download them.
 
-A device or reference cycle is promoted to **approved** automatically when five distinct GitHub users confirm it (the threshold is admin-tunable). Any signed-in user can click **Confirm this appliance** or **Confirm this cycle** on a pending entry's card if it looks correct. When the count reaches the threshold the entry is auto-approved instantly, with no moderator action needed. A brand is approved once enough of its devices are; programs are approved by a moderator.
+A device or reference cycle is promoted to **approved** automatically when enough distinct GitHub users confirm it (five by default). Any signed-in user can click **Confirm this appliance** or **Confirm this cycle** on a pending entry's card if it looks correct. When the count reaches the threshold the entry is auto-approved instantly, with no moderator action needed. A brand is approved once enough of its devices are; programs are approved by a moderator.
 
-Confirmation documents are create-only and one-per-user, so the vote count cannot be inflated. Moderators can also approve, remove (hide), restore or delete entries at any time through the admin panel.
+Each user can confirm an entry once, so the vote count cannot be inflated. Moderators can also approve, remove or restore entries.
 
 ---
 
@@ -104,7 +101,7 @@ The ha_washdata panel has built-in store integration once online features are en
 - **Share** a cycle to the store from the Cycles tab
 - **Confirm** and rate your appliance's catalog entry from within the panel
 
-Online features are one opt-in for the whole install (off by default); sharing, confirming and rating need a one-time GitHub account link. The panel opens a small popup to the `/connect` page for the one-time GitHub OAuth handoff, and a `/create` popup for adding missing brands, appliances or programs -- both post back to the panel via `postMessage`.
+Online features are one opt-in for the whole install (off by default); sharing, confirming and rating need a one-time GitHub account link.
 
 ---
 
@@ -112,12 +109,7 @@ Online features are one opt-in for the whole install (off by default); sharing, 
 
 Reference cycles are stored as a sequence of `(offset_seconds, watts)` samples.
 
-Before sharing, ha_washdata downsamples each cycle to at most 10,000 points using LTTB (Largest Triangle Three Buckets); it is stored in Firestore as `{o, w}` map objects (Firestore forbids nested arrays). LTTB preserves peaks and troughs by selecting the most visually significant sample in each bucket rather than picking by index, so narrow transients (heater pulses, pump-out spikes) are retained rather than silently dropped. Statistics -- duration, energy in Wh, peak watts, mean watts -- are computed by ha_washdata from its own cycle record and the full-resolution trace, before downsampling.
-
-Each stored cycle carries a `cycleSchemaVersion` so the format can evolve without breaking older
-documents; the current value is shown in the cycle detail panel and in the admin UI.
-
-The `qc` field is an integer provenance hint (how the recording was produced) used for moderation. Cycles shared from ha_washdata carry the appropriate code automatically.
+Before sharing, ha_washdata downsamples each cycle to at most 10,000 points using LTTB (Largest Triangle Three Buckets). LTTB preserves peaks and troughs by selecting the most visually significant sample in each bucket rather than picking by index, so narrow transients (heater pulses, pump-out spikes) are retained rather than silently dropped. Statistics -- duration, energy in Wh, peak watts, mean watts -- are computed by ha_washdata from its own cycle record and the full-resolution trace, before downsampling.
 
 ---
 
@@ -136,55 +128,12 @@ The `qc` field is an integer provenance hint (how the recording was produced) us
 
 The store has no server process. It is:
 
-- **Frontend:** vanilla ES modules, no bundler, no framework. Firebase Modular SDK loaded from CDN.
-- **Backend:** Cloud Firestore (Firebase free/Spark plan). The security-rules file is the entire access-control layer; admin operations require existence in a server-side `admins` collection not writable via the client.
+- **Frontend:** vanilla ES modules, no bundler, no framework.
+- **Backend:** Cloud Firestore. The [security rules](https://github.com/3dg1luk43/washdata-store/blob/main/firestore.rules) are the entire access-control layer.
 - **Hosting:** GitHub Pages (static files only).
-- **Auth:** Firebase Auth with GitHub OAuth. Contributors must authenticate; public browsing uses the Firestore REST API directly (no WebChannel handshake, faster cold load).
-- **Python client:** `washstore_client.py` -- a legacy `requests`-based read-only client for the old (schema v1) layout. The ha_washdata integration does not use it; it ships its own REST client (`store_client.py`).
+- **Auth:** Firebase Auth with GitHub OAuth, needed only to contribute.
 
-### Data hierarchy
-
-```
-brands/{brandId}
-devices/{deviceId}
-  └─ confirmations/{uid}   (one-way vote, un-gameable)
-  └─ ratings/{uid}
-profiles/{profileId}
-cycles/{cycleId}
-  └─ confirmations/{uid}
-  └─ comments/{commentId}
-  └─ ratings/{uid}
-admins/{uid}
-users/{uid}                 (own favorites, moderation fields)
-config/site                (maintenance flag, confirmThreshold)
-```
-
-Device and profile IDs are **deterministic**: two contributors with the same brand, model, and program produce identical IDs, so their cycles accumulate in one place automatically. IDs are derived by normalizing tokens with NFKD + diacritic stripping + non-alphanumeric collapsed to hyphens; non-Latin scripts are preserved to avoid empty-token collisions.
-
----
-
-## Development setup
-
-```bash
-npm install                        # install test dependencies
-npm run test:unit                  # unit tests (test/*.test.mjs)
-npm run test:rules                 # Firestore security-rules tests (requires Firebase emulator)
-npm run stamp                      # cache-bust asset URLs before committing frontend changes
-```
-
-### Seeding local data
-
-```bash
-# Insert sample approved cycles for design/dev testing (requires service-account credentials)
-node scripts/seed_sample.mjs <projectId>
-
-# One-time migration from v1 flat `envelopes` collection to v2 hierarchy (idempotent)
-node scripts/migrate_v1_to_v2.mjs <projectId>
-```
-
-### Deployment
-
-Every push to `main` triggers the deploy workflow: it stamps a timestamp onto every local asset URL for cache-busting, assembles the static site into `dist/`, and publishes to GitHub Pages. No build step or bundler is involved.
+Development setup and tests are covered in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
