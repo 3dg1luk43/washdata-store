@@ -18,7 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assertDeviceMergeOk, assertProfileMergeOk, assertCycleMoveOk, assertBrandMergeOk,
-  assertSameApplianceType,
+  assertSameApplianceType, assertTargetNotRemoved,
 } from '../lib/merge_guard.js';
 import { deviceId, profileId } from '../lib/ids.js';
 
@@ -126,4 +126,17 @@ test('brand merge: trims the name and rejects ids Firestore cannot address', () 
   assert.throws(() => assertBrandMergeOk('boch', 'a\\b'), /may not contain/);
   assert.throws(() => assertBrandMergeOk('boch', '..'), /may not contain/);
   assert.throws(() => assertBrandMergeOk('boch', 'x'.repeat(41)), /40 characters/);
+});
+
+test('merge/move: refuses a removed target, whose public views are hidden', () => {
+  const removed = { applianceType: 'washer', status: 'removed', deviceId: 'd2' };
+  assert.throws(() => assertDeviceMergeOk('a', 'b', { applianceType: 'washer' }, removed),
+    /target appliance is removed/);
+  assert.throws(() => assertProfileMergeOk('p1', 'p2', { deviceId: 'd1' }, { ...removed, deviceId: 'd1' }),
+    /target program is removed/);
+  assert.throws(() => assertCycleMoveOk('c1', 'p2', { profileId: 'p1', deviceId: 'd1' }, { ...removed, deviceId: 'd1' }),
+    /target program is removed/);
+  assert.throws(() => assertTargetNotRemoved({ status: 'removed' }, 'brand'), /target brand is removed/);
+  assert.doesNotThrow(() => assertTargetNotRemoved({ status: 'pending' }, 'brand'));
+  assert.doesNotThrow(() => assertTargetNotRemoved(null, 'brand'));
 });

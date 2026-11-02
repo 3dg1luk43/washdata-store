@@ -154,6 +154,14 @@ async function main() {
     fetchAll('profiles', ['program', 'deviceId', 'cycleCount', 'createdByUid', 'status']),
   ]);
 
+  // A program whose appliance is removed (or gone) cannot be opened -- the browse view needs
+  // the device -- so it must not be searchable either. Devices are kept even without a brand
+  // doc: device namespaces can outlive brand docs, and the device view handles that.
+  const liveDevices = new Set(devices.map((d) => d.id));
+  const orphaned = profiles.length;
+  profiles.splice(0, profiles.length, ...profiles.filter((p) => liveDevices.has(p.deviceId)));
+  if (orphaned !== profiles.length) console.log(`dropped ${orphaned - profiles.length} program(s) of removed appliances`);
+
   const index = {
     schema: SCHEMA,
     // Stamped BEFORE the reads, never after: the client asks for everything created after

@@ -1341,34 +1341,7 @@ input[type="checkbox"], input[type="radio"] {
   border-radius: 10px;
 }
 
-/* Admin merge bar + generic table message rows */
-.merge-bar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: .5rem;
-  margin-bottom: 1rem;
-  padding: .6rem 1rem;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-}
-.merge-bar select { flex: 1; min-width: 9rem; max-width: 22rem; }
-.merge-bar-label {
-  font-size: .75rem;
-  font-weight: 700;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: .05em;
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-.merge-bar-hint {
-  font-size: .7rem;
-  color: var(--text-muted);
-  flex: 2;
-  min-width: 10rem;
-}
+/* Generic admin control rows + table message rows */
 .merge-controls { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
 .merge-controls input {
   flex: 1;
@@ -2069,3 +2042,92 @@ input[type="url"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
 .tpl-input-name { font-weight: 600; font-size: .875rem; display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
 .tpl-input-desc { color: var(--text-muted); font-size: .8125rem; margin-top: .2rem; line-height: 1.5; }
 #tpl-modal-footer { flex-wrap: wrap; }
+
+/* ---- Landing: A-Z brand directory ---- */
+.az-head .search-summary { margin-bottom: .6rem; }
+.az-bar {
+  position: sticky;
+  top: 56px;              /* under the sticky topbar */
+  z-index: 50;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .2rem;
+  padding: .5rem 0;
+  margin-bottom: 1rem;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.az-letter {
+  min-width: 1.9rem;
+  height: 1.9rem;
+  padding: 0 .35rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  color: var(--text);
+  font-family: var(--font-heading);
+  font-weight: 600;
+  font-size: .8125rem;
+  cursor: pointer;
+  transition: border-color var(--transition), color var(--transition);
+}
+.az-letter:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.az-letter:disabled { opacity: .3; cursor: default; background: transparent; }
+.az-section { margin-bottom: 1.5rem; scroll-margin-top: 112px; }
+.az-section-letter {
+  font-family: var(--font-heading);
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--accent);
+  padding-bottom: .35rem;
+  margin-bottom: .65rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.brand-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: .6rem;
+}
+.brand-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: .25rem;
+  text-align: left;
+  padding: .7rem .85rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition);
+}
+.brand-tile:hover { border-color: var(--accent); background: var(--bg-surface); }
+.brand-tile-name {
+  font-family: var(--font-heading);
+  font-weight: 600;
+  font-size: .9375rem;
+  overflow-wrap: anywhere;
+}
+.brand-tile-meta { font-size: .75rem; color: var(--text-muted); }
+.brand-tile-status .badge { font-size: .625rem; padding: .1rem .4rem; }
+@media (max-width: 640px) {
+  .brand-tiles { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  /* One swipeable row, so the sticky bar never covers the section it jumps to. */
+  .az-bar { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .az-bar::-webkit-scrollbar { display: none; }
+  .az-letter { flex: 0 0 auto; min-width: 1.9rem; height: 1.9rem; }
+}
+
+/* ---- Brand page header ---- */
+.brand-header-card { position: relative; }
+.brand-header-note { font-size: .75rem; }
+.brand-header-report { position: absolute; top: .85rem; right: 1rem; }
+
+/* ---- Admin catalog: removed view, count warnings, merge impact ---- */
+.cat-toolbar { align-items: center; }
+.cat-toolbar #cat-removed-btn { margin-left: auto; }
+#cat-removed-btn.active { border-color: var(--accent); color: var(--accent); }
+.cat-warn { color: var(--warning); }
+.mt-impact { margin-top: .35rem; font-size: .75rem; color: var(--text-muted); }

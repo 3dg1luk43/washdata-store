@@ -187,9 +187,12 @@ export function signInWithPopup() { throw new Error('not used in tests'); }
 export function signOut() { throw new Error('not used in tests'); }
 export function GithubAuthProvider() {}
 export function getAdditionalUserInfo() { return null; }
+export function connectAuthEmulator() {}
+export function connectFirestoreEmulator() {}
 
 // ---- REST layer (firestore-rest.js) backed by the same store ----------------
 export function setTokenProvider() {}
+export function useRestEmulator() {}
 export async function restGet(path) {
   const d = store.get(path);
   return d ? { ...d, id: path.split('/').pop() } : null;

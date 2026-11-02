@@ -21,7 +21,8 @@ import {
   adminListCycles, adminSetCycleStatus,
   adminListDevices, adminSetDeviceStatus, adminSetProfileStatus, adminSetBrandStatus, adminMergeDevices, adminMergeProfiles,
   adminRenameBrand, adminMergeBrands, adminRenameDevice, adminRenameProfile, adminMoveCycle,
-  adminListBrands, adminListProfiles,
+  adminListBrands, adminListProfiles, adminRestore, adminRecountBrand, adminListRemovedCycles,
+  brandConfirmThresholdValue,
   adminListUsers, adminBanUser, adminUnbanUser, adminGetStats, adminRecount, adminCountOpenReports,
   getSiteConfig, setMaintenance, setConfirmThreshold, setBrandConfirmThreshold,
   adminSetDeviceOwner, adminSetProfileOwner,
@@ -29,7 +30,7 @@ import {
   adminDeleteComment,
   getReferenceCycles, getCycle,
   adminGetAnalytics,
-  getRatingSummary, getDeviceQuality,
+  getRatingSummary,
   getUserDoc,
   adminListReports, getReportsForTarget, adminResolveReports, adminRecordRemoval, adminGetByPath,
   reportReasonLabel,
@@ -67,6 +68,8 @@ let _mergeCtx = null;
 let _catCycles = [];
 let _catCycleCursor = null;
 let _catalogLoaded = false;
+let _brandBar = 5;            // approved models a pending brand needs (config/site)
+let _removedCycles = null;    // fetched when the Removed view opens
 // State for the owner-picker modal (shared by device + profile pickers)
 let _ownerPickerCtx = null; // { record, isProfile, card }
 // Cached site stats (catalog totals + open reports + banned count); shared by Overview,
@@ -295,11 +298,13 @@ async function loadOverview() {
       <div class="stat-card"><div class="stat-label">Pending Review</div><div class="stat-value c-pending">${num(s.pending)}</div>${statBreakdown(s.pendingByType)}</div>
       <div class="stat-card"><div class="stat-label">Approved</div><div class="stat-value c-approved">${num(s.approved)}</div>${statBreakdown(s.approvedByType)}</div>
       <div class="stat-card"><div class="stat-label">Rejected</div><div class="stat-value c-rejected">${num(s.rejected)}</div></div>
-      <div class="stat-card"><div class="stat-label">Removed</div><div class="stat-value c-removed">${num(s.removed)}</div>${statBreakdown(s.removedByType)}</div>
+      <div class="stat-card stat-card-link" id="ov-removed-card" title="Open the Removed list (with Restore)"><div class="stat-label">Removed</div><div class="stat-value c-removed">${num(s.removed)}</div>${statBreakdown(s.removedByType)}</div>
       <div class="stat-card"><div class="stat-label">Banned Users</div><div class="stat-value c-ban">${num(s.bannedUsers)}</div></div>`;
     setOpenReports(s.openReports);
     const rc = $('ov-reports-card');
     if (rc) rc.addEventListener('click', () => { switchTab('reports'); if (!_reportsLoaded) loadReports(true); });
+    const rm = $('ov-removed-card');
+    if (rm) rm.addEventListener('click', openRemovedView);
   } catch (e) {
     $('stats-grid').innerHTML = `<div class="text-muted" style="grid-column:1/-1;padding:1rem">${esc(e.message)}</div>`;
     toast(e.message, 'error');
@@ -453,7 +458,22 @@ function buildCycleActions(container, c, tr) {
   const mk = (label, cls, handler) => { const b = document.createElement('button'); b.className = `btn ${cls} btn-sm`; b.textContent = label; b.addEventListener('click', handler); container.appendChild(b); };
   if (c.status === 'pending') mk('Approve', 'btn-ghost', setStatus('approved'));
   if (c.status !== 'removed') mk('Remove', 'btn-ghost', setStatus('removed'));
-  else mk('Restore', 'btn-ghost', setStatus('approved'));
+  else {
+    // Back to the status it had (and its program / appliance / brand too, if those were
+    // removed), not blindly to approved.
+    mk('Restore', 'btn-primary', async () => {
+      try {
+        const restored = await adminRestore('cycle', c.id);
+        const self = restored.find((r) => r.kind === 'cycle');
+        if (self) c.status = self.status;
+        const badge = tr.querySelector('.status-badge');
+        if (badge) { badge.className = `badge badge-${c.status} status-badge`; badge.textContent = c.status; }
+        buildCycleActions(container, c, tr);
+        _catalogLoaded = false;   // parents may have been restored as well
+        toast(restoredMessage(restored));
+      } catch (e) { toast(e.message, 'error'); }
+    });
+  }
   mk('View', 'btn-ghost', () => openReviewModal(c));
   mk('Delete', 'btn-danger', async () => {
     if (!confirm(`Permanently delete this cycle (${deviceLabel(c)} - ${c.program_lc})?`)) return;
@@ -521,51 +541,121 @@ function bumpPending(delta) {
   if (!isNaN(n)) el.textContent = String(Math.max(0, n + delta));
 }
 
-// Shared status action builder. Works on any container that has a child .action-cell.
-// Rebuilds itself after status change; updates .status-badge; adjusts pending count.
-function buildStatusActions(container, rec, setter, label, extra, deleter) {
+// Status actions for a catalog card (brand / appliance / program): Approve, Remove (soft,
+// reversible) or Restore, then the kind-specific `extra(cell)` buttons, then Delete.
+// `opts.removeBlocked` / `opts.deleteBlocked` disable an action with the reason as tooltip.
+const _STATUS_SETTER = { brand: adminSetBrandStatus, device: adminSetDeviceStatus, profile: adminSetProfileStatus };
+const _KIND_LABEL = { brand: 'Brand', device: 'Appliance', profile: 'Program', cycle: 'Cycle' };
+const _DELETE_COPY = {
+  brand: 'Permanently delete this brand? It has no appliances left, so nothing else is affected.',
+  device: 'Permanently delete this appliance with all its programs and reference cycles? This cannot be undone. (Remove hides it and can be undone.)',
+  profile: 'Permanently delete this program with all its reference cycles? This cannot be undone. (Remove hides it and can be undone.)',
+};
+
+function buildStatusActions(container, rec, kind, extra, deleter, opts = {}) {
   const cell = container.querySelector('.action-cell');
   cell.innerHTML = '';
-  let saving = false;
-  const mk = (text, status) => {
-    const btn = document.createElement('button'); btn.className = 'btn btn-ghost btn-sm'; btn.textContent = text;
-    btn.addEventListener('click', async () => {
-      if (saving) return;
-      saving = true;
-      cell.querySelectorAll('button').forEach((b) => { b.disabled = true; });
-      const wasPending = rec.status === 'pending';
-      try {
-        await setter(rec.id, status); rec.status = status;
-        const badge = container.querySelector('.status-badge');
-        if (badge) { badge.className = `badge badge-${status} status-badge`; badge.textContent = status; }
-        container.classList.toggle('cat-pending', status === 'pending');
-        bumpPending((wasPending ? -1 : 0) + (status === 'pending' ? 1 : 0));
-        buildStatusActions(container, rec, setter, label, extra, deleter);
-        toast(`${label} ${status}`);
-      } catch (e) {
-        saving = false;
-        cell.querySelectorAll('button').forEach((b) => { b.disabled = false; });
-        toast(e.message, 'error');
-      }
+  const label = _KIND_LABEL[kind];
+  const mk = (text, cls, fn, blockedReason) => {
+    const b = document.createElement('button');
+    b.className = `btn ${cls} btn-sm`;
+    b.textContent = text;
+    if (blockedReason) { b.disabled = true; b.dataset.blocked = '1'; b.title = blockedReason; }
+    b.addEventListener('click', async () => {
+      cell.querySelectorAll('button').forEach((x) => { x.disabled = true; });
+      try { await fn(); } catch (e) { toast(e.message, 'error'); }
+      // A successful action re-renders the list (these buttons are gone); a cancelled or
+      // failed one leaves the card, so give its buttons back.
+      if (cell.isConnected) cell.querySelectorAll('button').forEach((x) => { x.disabled = x.dataset.blocked === '1'; });
     });
-    cell.appendChild(btn);
+    cell.appendChild(b);
+    return b;
   };
-  if (rec.status !== 'approved') mk('Approve', 'approved');
-  if (deleter) {
-    const delBtn = document.createElement('button'); delBtn.className = 'btn btn-danger btn-sm'; delBtn.textContent = 'Delete';
-    delBtn.addEventListener('click', async () => {
-      if (!confirm(`Permanently delete this ${label.toLowerCase()} and all its data? This cannot be undone.`)) return;
-      delBtn.disabled = true;
-      try {
-        await deleter(rec.id);
-        bumpPending(rec.status === 'pending' ? -1 : 0);
-        container.remove();
-        toast(`${label} deleted`);
-      } catch (e) { delBtn.disabled = false; toast(e.message, 'error'); }
+  if (rec.status === 'removed') {
+    mk('Restore', 'btn-primary', async () => {
+      const restored = await adminRestore(kind, rec.id);
+      await applyRestored(restored);
+      toast(restoredMessage(restored));
+      renderCatalog();
     });
-    cell.appendChild(delBtn);
+  } else {
+    if (rec.status !== 'approved') {
+      mk('Approve', 'btn-ghost', async () => {
+        await setCatalogStatus(kind, rec, 'approved');
+        toast(`${label} approved`);
+      });
+    }
+    mk('Remove', 'btn-ghost', async () => {
+      if (!confirm(`Hide this ${label.toLowerCase()} from the store? It stays restorable from Catalog > Removed.`)) return;
+      await setCatalogStatus(kind, rec, 'removed');
+      toast(`${label} removed. Restore it from Removed if that was a mistake.`);
+    }, opts.removeBlocked);
   }
   if (extra) extra(cell);
+  if (deleter) {
+    mk('Delete', 'btn-danger', async () => {
+      if (!confirm(_DELETE_COPY[kind])) return;
+      await deleter(rec.id);
+      if (rec.status === 'pending') bumpPending(-1);
+      _statsCache = null;
+      toast(`${label} deleted`);
+      renderCatalog();
+    }, opts.deleteBlocked);
+  }
+}
+
+// Change a catalog object's status, then mirror it into the cached listings so the view
+// re-renders without re-reading the whole catalog.
+async function setCatalogStatus(kind, rec, status) {
+  const wasPending = rec.status === 'pending';
+  const before = rec.status;
+  await _STATUS_SETTER[kind](rec.id, status);
+  rec.status = status;
+  // Mirror what washstore recorded, so the Removed view shows it without a reload.
+  if (status === 'removed') {
+    const now = new Date();
+    rec.removedFrom = _isVis(before) ? before : 'pending';
+    rec.removedAt = { toMillis: () => now.getTime(), toDate: () => now };
+  }
+  bumpPending((wasPending ? -1 : 0) + (status === 'pending' ? 1 : 0));
+  _statsCache = null;
+  if (kind === 'device') await refreshCachedBrand(rec.brand_lc);
+  renderCatalog();
+}
+
+// Re-read one brand doc into the cache (1 read): an appliance status change moves the
+// brand's stored counters, and can promote it.
+async function refreshCachedBrand(brandLc) {
+  if (!brandLc) return;
+  try {
+    const fresh = await adminGetByPath(`brands/${brandLc}`);
+    const i = _brandItems.findIndex((b) => b.id === brandLc);
+    if (fresh && i >= 0) _brandItems[i] = { ..._brandItems[i], ...fresh };
+  } catch (_) { /* display only */ }
+}
+
+const _LIST_OF_KIND = () => ({ brand: _brandItems, device: _deviceItems, profile: _profileItems });
+
+async function applyRestored(restored) {
+  const lists = _LIST_OF_KIND();
+  const brands = new Set();
+  for (const r of restored) {
+    const item = (lists[r.kind] || []).find((x) => x.id === r.id);
+    if (item) { item.status = r.status; item.removedFrom = null; }
+    if (r.kind === 'cycle') _removedCycles = (_removedCycles || []).filter((c) => c.id !== r.id);
+    if (r.kind === 'device' && item) brands.add(item.brand_lc);
+    if (r.kind === 'brand') brands.add(r.id);
+  }
+  _statsCache = null;
+  await Promise.all([...brands].map(refreshCachedBrand));
+}
+
+function restoredMessage(restored) {
+  if (!restored.length) return 'Nothing to restore';
+  const main = restored[restored.length - 1];
+  const parents = restored.slice(0, -1).map((r) => _KIND_LABEL[r.kind].toLowerCase());
+  return `${_KIND_LABEL[main.kind]} restored as ${main.status}`
+    + (parents.length ? ` (its ${parents.join(' and ')} too)` : '');
 }
 
 // ============================================================ catalog
@@ -575,9 +665,9 @@ function buildStatusActions(container, rec, setter, label, extra, deleter) {
 // dialog would burn the daily read budget.
 async function fetchCatalogItems() {
   const [brandRes, devRes, profRes] = await Promise.all([
-    adminListBrands({ pageSize: 500 }),
-    adminListDevices({ pageSize: 500 }),
-    adminListProfiles({ pageSize: 500 }),
+    adminListBrands(),
+    adminListDevices(),
+    adminListProfiles(),
   ]);
   _brandItems = brandRes.items || [];
   _deviceItems = devRes.items || [];
@@ -591,9 +681,10 @@ async function ensureCatalogItems() {
 
 async function loadCatalogData() {
   $('cat-content').innerHTML = '<div class="loading-center" style="padding:3rem"><div class="loading-spinner"></div></div>';
-  $('cat-merge-bar').style.display = 'none';
   try {
     await fetchCatalogItems();
+    _removedCycles = null;
+    try { _brandBar = await brandConfirmThresholdValue(); } catch (_) { /* keep default */ }
     _catLevel = 'brands'; _catBrand = null; _catDevice = null; _catProfile = null;
     renderCatalog();
   } catch (e) {
@@ -613,6 +704,7 @@ function catNavigate(level, brand, device, profile) {
 
 function renderCatBreadcrumb() {
   const crumbs = [{ label: 'All Brands', level: 'brands' }];
+  if (_catLevel === 'removed') crumbs.push({ label: 'Removed', level: 'removed' });
   if (_catBrand) crumbs.push({ label: _catBrand.brand, level: 'devices' });
   if (_catDevice) crumbs.push({ label: _catDevice.model || truncate(_catDevice.id, 20), level: 'profiles' });
   if (_catProfile) crumbs.push({ label: _catProfile.program, level: 'cycles' });
@@ -632,49 +724,14 @@ function renderCatBreadcrumb() {
 
 function renderCatalog() {
   renderCatBreadcrumb();
+  updateRemovedButton();
   switch (_catLevel) {
+    case 'removed': renderCatRemoved(); break;
     case 'brands': renderCatBrands(); break;
     case 'devices': renderCatDevices(); break;
     case 'profiles': renderCatProfiles(); break;
     case 'cycles': renderCatCyclesLevel(); break;
   }
-}
-
-// Render a contextual merge bar scoped to the current level's items.
-function catMergebar(items, noun, getLabel, mergeAction, afterMerge) {
-  const bar = $('cat-merge-bar');
-  if (items.length < 2) { bar.style.display = 'none'; return; }
-  bar.style.display = '';
-  bar.innerHTML = '';
-  const labelEl = document.createElement('span'); labelEl.className = 'merge-bar-label'; labelEl.textContent = 'Merge';
-  const mkSel = (placeholder) => {
-    const sel = document.createElement('select');
-    sel.style.cssText = 'flex:1;min-width:9rem;max-width:22rem';
-    sel.innerHTML = `<option value="">-- ${placeholder} --</option>` + items.map((i) => `<option value="${esc(i.id)}">${esc(getLabel(i))}</option>`).join('');
-    return sel;
-  };
-  const fromSel = mkSel(`source ${noun}`);
-  const arrow = document.createElement('span'); arrow.className = 'text-muted'; arrow.style.flexShrink = '0'; arrow.textContent = '→';
-  const toSel = mkSel(`target ${noun}`);
-  const mergeBtn = document.createElement('button'); mergeBtn.className = 'btn btn-danger btn-sm'; mergeBtn.textContent = 'Merge';
-  mergeBtn.addEventListener('click', async () => {
-    const from = fromSel.value; const to = toSel.value;
-    if (!from || !to) { toast(`Select both source and target ${noun}`, 'error'); return; }
-    if (from === to) { toast('Source and target must be different', 'error'); return; }
-    const fromItem = items.find((i) => i.id === from);
-    const toItem = items.find((i) => i.id === to);
-    if (!confirm(`Merge "${fromItem ? getLabel(fromItem) : from}" into "${toItem ? getLabel(toItem) : to}"? This cannot be undone.`)) return;
-    mergeBtn.disabled = true;
-    try {
-      await mergeAction(from, to); toast('Merged');
-      _catalogLoaded = false;
-      await loadCatalogData();
-      afterMerge();
-    } catch (e) { mergeBtn.disabled = false; toast(e.message, 'error'); }
-  });
-  const hint = document.createElement('span'); hint.className = 'merge-bar-hint';
-  hint.textContent = `Reassigns all data from source to target ${noun}, then deletes source.`;
-  bar.append(labelEl, fromSel, arrow, toSel, mergeBtn, hint);
 }
 
 // Build a catalog card element. metaHTML is trusted pre-escaped HTML.
@@ -706,7 +763,8 @@ async function reloadCatalog() {
   const b = bId ? _brandItems.find((x) => x.id === bId) : null;
   const d = dId ? _deviceItems.find((x) => x.id === dId) : null;
   const p = pId ? _profileItems.find((x) => x.id === pId) : null;
-  if (lvl === 'devices' && b) catNavigate('devices', b);
+  if (lvl === 'removed') catNavigate('removed');
+  else if (lvl === 'devices' && b) catNavigate('devices', b);
   else if (lvl === 'profiles' && b && d) catNavigate('profiles', b, d);
   else if (lvl === 'cycles' && b && d && p) catNavigate('cycles', b, d, p);
 }
@@ -784,14 +842,21 @@ function mtProfileLabel(p) {
 
 // Build the candidate list for a merge source. Returns [{ value, label, sub }].
 // `sub` is the secondary line shown in the preview (status / appliance type).
+// A removed entry is never offered as a target: whatever is merged into it would be hidden
+// (washstore refuses it too). Each option's `sub` says how big the target is, which is what
+// decides which of two duplicates should survive.
 function mtCandidates(kind, id, obj) {
+  const live = (x) => x.status !== 'removed';
   if (kind === 'brand') {
     // adminMergeBrands takes the canonical display NAME (it derives the lowercase doc id
     // itself), so that -- not the doc id -- is what the option has to carry. Names are
     // unambiguous here: two brands with the same name would share one lc id.
     return _brandItems
-      .filter((b) => b.id !== id)
-      .map((b) => ({ value: b.brand || b.id, label: b.brand || b.id, sub: b.status }))
+      .filter((b) => b.id !== id && live(b))
+      .map((b) => {
+        const n = _deviceItems.filter((d) => d.brand_lc === b.id && d.status !== 'removed').length;
+        return { value: b.brand || b.id, label: b.brand || b.id, sub: `${n} appliance${n !== 1 ? 's' : ''} - ${b.status}` };
+      })
       .sort((a, b) => a.label.localeCompare(b.label));
   }
   const type = obj && obj.applianceType;
@@ -799,20 +864,20 @@ function mtCandidates(kind, id, obj) {
   const devOk = (d) => !type || !d.applianceType || d.applianceType === type;
   if (kind === 'device') {
     return _deviceItems
-      .filter((d) => d.id !== id && devOk(d))
-      .map((d) => ({ value: d.id, label: mtDeviceLabel(d), sub: `${typeLabel(d.applianceType)} - ${d.status}` }))
+      .filter((d) => d.id !== id && devOk(d) && live(d))
+      .map((d) => ({ value: d.id, label: mtDeviceLabel(d), sub: `${typeLabel(d.applianceType)} - ${num(d.cycleCount)} cycles - ${d.status}` }))
       .sort((a, b) => a.label.localeCompare(b.label));
   }
   // profile + cycle both target a PROFILE (a cycle is moved onto it).
   const srcDev = _deviceItems.find((d) => d.id === (obj && obj.deviceId));
   const srcType = (srcDev && srcDev.applianceType) || type;
   return _profileItems
-    .filter((p) => p.id !== id)
+    .filter((p) => p.id !== id && live(p))
     .filter((p) => {
       const dev = _deviceItems.find((d) => d.id === p.deviceId);
       return !srcType || !dev || !dev.applianceType || dev.applianceType === srcType;
     })
-    .map((p) => ({ value: p.id, label: mtProfileLabel(p), sub: p.status }))
+    .map((p) => ({ value: p.id, label: mtProfileLabel(p), sub: `${num(p.cycleCount)} cycles - ${p.status}` }))
     .sort((a, b) => a.label.localeCompare(b.label));
 }
 
@@ -889,7 +954,34 @@ function mtRenderPreview() {
   const verb = _mergeCtx.kind === 'cycle' ? 'moves to' : 'merges into';
   prev.innerHTML = `<span class="mt-from">${esc(_mergeCtx.label)}</span> ${esc(verb)} `
     + `<span class="mt-to">${esc(res.targetLabel)}</span>`
-    + (res.isNew ? ' <span class="mt-new">(new brand - will be created)</span>' : '');
+    + (res.isNew ? ' <span class="mt-new">(new brand - will be created)</span>' : '')
+    + `<div class="mt-impact">${esc(mtImpact(res))}</div>`;
+}
+
+// One line on what the merge carries over, from the listings in memory (no reads).
+function mtImpact(res) {
+  const { kind, id, obj } = _mergeCtx;
+  const pl = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  if (kind === 'brand') {
+    const devs = _deviceItems.filter((d) => d.brand_lc === id);
+    const cycles = devs.reduce((t, d) => t + num(d.cycleCount), 0);
+    const src = _brandItems.find((b) => b.id === id);
+    const tgt = _brandItems.find((b) => (b.brand || b.id).toLowerCase() === String(res.target).toLowerCase());
+    const lift = src && tgt && src.status === 'approved' && tgt.status === 'pending' ? ' The target becomes approved.' : '';
+    return `Moves ${pl(devs.length, 'appliance')} (${pl(cycles, 'cycle')}); the source brand is deleted.${lift}`;
+  }
+  if (kind === 'device') {
+    const progs = _profileItems.filter((p) => p.deviceId === id).length;
+    const tgt = _deviceItems.find((d) => d.id === res.target);
+    const lift = obj && tgt && obj.status === 'approved' && tgt.status === 'pending' ? ' The target becomes approved.' : '';
+    return `Moves ${pl(progs, 'program')} and ${pl(num(obj && obj.cycleCount), 'cycle')}; programs with the same name are combined.${lift}`;
+  }
+  if (kind === 'profile') {
+    const tgt = _profileItems.find((p) => p.id === res.target);
+    const lift = obj && tgt && obj.status === 'approved' && tgt.status === 'pending' ? ' The target becomes approved.' : '';
+    return `Moves ${pl(num(obj && obj.cycleCount), 'cycle')}; the source program is deleted.${lift}`;
+  }
+  return 'Only the cycle is re-filed; nothing is deleted.';
 }
 
 function mtFilterOptions() {
@@ -989,16 +1081,30 @@ $('merge-target-save').addEventListener('click', async () => {
   } catch (e) { btn.disabled = false; toast(e.message, 'error'); }
 });
 
+const _isVis = (st) => st === 'pending' || st === 'approved';
+
+// "Merge into..." for any catalog card: one searchable picker for every kind, replacing the
+// old pair of dropdowns that only listed siblings at the current level.
+function catMergeButton(cell, kind, rec, label) {
+  const b = document.createElement('button');
+  b.className = 'btn btn-ghost btn-sm';
+  b.textContent = 'Merge into...';
+  b.addEventListener('click', () => openMergeTargetModal({
+    kind, id: rec.id, label, obj: rec,
+    onDone: async (out) => {
+      await reloadCatalog();
+      // Land on the result so the admin sees what the merge produced.
+      if (kind === 'brand' && out && out.id) {
+        const t = _brandItems.find((x) => x.id === out.id);
+        if (t) catNavigate('devices', t);
+      }
+    },
+  }));
+  cell.appendChild(b);
+}
+
 // Level 1 — Brands
 function renderCatBrands() {
-  // Merge/rename brands (e.g. fold "bosh" into "Bosch"). The target select carries the brand
-  // lowercase id; adminMergeBrands wants the canonical display name, so resolve it here.
-  catMergebar(_brandItems, 'brand', (b) => `${b.brand || b.id} (${b.status})`,
-    (fromLc, toLc) => {
-      const tgt = _brandItems.find((x) => x.id === toLc);
-      return adminMergeBrands(fromLc, tgt ? tgt.brand : toLc);
-    },
-    () => catNavigate('brands'));
   const sorted = [..._brandItems].sort((a, b) =>
     (a.status === 'pending' ? -1 : 0) - (b.status === 'pending' ? -1 : 0) || (a.brand || '').localeCompare(b.brand || ''));
   const items = catSearchFilter(sorted, (b) => `${b.brand || ''} ${b.status || ''} ${b.createdByName || ''}`);
@@ -1006,15 +1112,50 @@ function renderCatBrands() {
   if (!items.length) { content.innerHTML = '<div class="tbl-msg">No brands found.</div>'; return; }
   const list = document.createElement('div'); list.className = 'cat-list';
   items.forEach((brand) => {
-    const devCount = _deviceItems.filter((d) => d.brand_lc === brand.id).length;
-    const meta = `${devCount} device${devCount !== 1 ? 's' : ''}${brand.createdByName ? ` · by ${esc(brand.createdByName)}` : ''}`;
-    const card = catMakeCard(brand, brand.brand, meta);
-    buildStatusActions(card, brand, adminSetBrandStatus, 'Brand', (cell) => {
+    const devs = _deviceItems.filter((d) => d.brand_lc === brand.id);
+    const visible = devs.filter((d) => _isVis(d.status)).length;
+    const approved = devs.filter((d) => d.status === 'approved').length;
+    const hidden = devs.length - visible;
+    // Stored counters feed the public cards and the auto-approval rule; when they disagree
+    // with the appliances actually on file, the card says so and offers a cheap repair.
+    const drift = num(brand.deviceCount) !== visible || num(brand.approvedDeviceCount) !== approved;
+    const eligible = brand.status === 'pending' && approved >= _brandBar;
+    const metaParts = [
+      `${visible} appliance${visible !== 1 ? 's' : ''}${hidden ? ` (+${hidden} removed)` : ''}`,
+      brand.status === 'pending' ? `${approved}/${_brandBar} approved` : null,
+      brand.createdByName ? `by ${esc(brand.createdByName)}` : null,
+      drift ? `<span class="cat-warn" title="Stored: ${num(brand.deviceCount)} appliances, ${num(brand.approvedDeviceCount)} approved">public counts out of date</span>` : null,
+      eligible ? '<span class="cat-warn">qualifies for approval</span>' : null,
+    ].filter(Boolean).join(' · ');
+    const card = catMakeCard(brand, brand.brand, metaParts);
+    buildStatusActions(card, brand, 'brand', (cell) => {
+      if (drift || eligible) {
+        const fix = document.createElement('button'); fix.className = 'btn btn-ghost btn-sm'; fix.textContent = 'Fix counts';
+        fix.title = 'Recount this brand from its appliances and cycles, and approve it if it qualifies';
+        fix.addEventListener('click', async () => {
+          fix.disabled = true;
+          try {
+            const r = await adminRecountBrand(brand.id);
+            Object.assign(brand, { deviceCount: r.deviceCount, approvedDeviceCount: r.approvedDeviceCount, cycleCount: r.cycleCount });
+            if (r.status) brand.status = r.status;
+            toast(`${brand.brand}: ${r.deviceCount} appliances, ${r.approvedDeviceCount} approved${r.status === 'approved' ? ' - brand approved' : ''}`);
+            renderCatalog();
+          } catch (e) { fix.disabled = false; toast(e.message, 'error'); }
+        });
+        cell.appendChild(fix);
+      }
       catRenameButton(cell, 'brand', brand.brand, (name) => adminRenameBrand(brand.id, name));
-      const drill = document.createElement('button'); drill.className = 'btn-drill'; drill.textContent = 'Devices →';
+      catMergeButton(cell, 'brand', brand, brand.brand || brand.id);
+      const drill = document.createElement('button'); drill.className = 'btn-drill'; drill.textContent = 'Appliances →';
       drill.addEventListener('click', () => catNavigate('devices', brand));
       cell.appendChild(drill);
-    }, adminDeleteBrand);
+    }, async (id) => {
+      await adminDeleteBrand(id);
+      _brandItems = _brandItems.filter((b) => b.id !== id);
+    }, {
+      removeBlocked: visible ? `Still has ${visible} visible appliance${visible !== 1 ? 's' : ''}. Merge the brand into the correct one, or remove them first.` : null,
+      deleteBlocked: devs.length ? `Still has ${devs.length} appliance${devs.length !== 1 ? 's' : ''}${hidden ? ` (${hidden} removed)` : ''}. Merge the brand into the correct one, or delete them first.` : null,
+    });
     list.appendChild(card);
   });
   content.appendChild(list);
@@ -1023,51 +1164,46 @@ function renderCatBrands() {
 // Level 2 — Devices for selected brand
 function renderCatDevices() {
   const all = _deviceItems.filter((d) => d.brand_lc === _catBrand.id);
-  // Capture now: loadCatalogData() inside catMergebar resets the module-level vars to null.
-  const savedBrand = _catBrand;
-  catMergebar(all, 'device', (d) => `${d.model || d.id} (${d.status})`, adminMergeDevices,
-    () => catNavigate('devices', savedBrand));
-  const sorted = [...all].sort((a, b) => (a.status === 'pending' ? -1 : 0) - (b.status === 'pending' ? -1 : 0));
+  const sorted = [...all].sort((a, b) => (a.status === 'pending' ? -1 : 0) - (b.status === 'pending' ? -1 : 0)
+    || String(a.model || '').localeCompare(String(b.model || ''), undefined, { numeric: true }));
   const items = catSearchFilter(sorted, (d) => `${d.model || ''} ${d.applianceType || ''} ${d.status || ''}`);
   const content = $('cat-content'); content.innerHTML = '';
-  if (!items.length) { content.innerHTML = '<div class="tbl-msg">No devices for this brand.</div>'; return; }
+  if (!items.length) { content.innerHTML = '<div class="tbl-msg">No appliances for this brand.</div>'; return; }
   const list = document.createElement('div'); list.className = 'cat-list';
   items.forEach((device) => {
-    const profCount = _profileItems.filter((p) => p.deviceId === device.id).length;
+    const profCount = _profileItems.filter((p) => p.deviceId === device.id && _isVis(p.status)).length;
     const metaParts = [
       esc(typeLabel(device.applianceType)),
-      `${profCount} profile${profCount !== 1 ? 's' : ''}`,
+      `${profCount} program${profCount !== 1 ? 's' : ''}`,
+      `${num(device.cycleCount)} cycle${num(device.cycleCount) !== 1 ? 's' : ''}`,
+      device.status === 'pending' ? `${num(device.confirmCount)} confirmation${num(device.confirmCount) !== 1 ? 's' : ''}` : null,
       device.favoriteCount ? `⭐ ${num(device.favoriteCount)}` : null,
       device.ownerId ? `owner: <span class="cat-owner-label">${esc(resolveOwnerLabel(device.ownerId))}</span>` : null,
     ].filter(Boolean).join(' · ');
     const card = catMakeCard(device, device.model || device.id, metaParts);
-    buildStatusActions(card, device, adminSetDeviceStatus, 'Device', (cell) => {
+    buildStatusActions(card, device, 'device', (cell) => {
       catRenameButton(cell, 'model', device.model, (name) => adminRenameDevice(device.id, name));
+      catMergeButton(cell, 'device', device, mtDeviceLabel(device));
       const settBtn = document.createElement('button'); settBtn.className = 'btn btn-ghost btn-sm'; settBtn.textContent = 'Settings';
       settBtn.addEventListener('click', () => openSettingsEditor(device));
       cell.appendChild(settBtn);
       const ownerBtn = document.createElement('button'); ownerBtn.className = 'btn btn-ghost btn-sm'; ownerBtn.textContent = 'Set owner';
       ownerBtn.addEventListener('click', () => openOwnerPicker(device, card));
       cell.appendChild(ownerBtn);
-      // The merge bar above only lists THIS brand's devices; the picker reaches any device
-      // of the same appliance type, which is what a duplicate under a misspelled brand needs.
-      const mergeBtn = document.createElement('button'); mergeBtn.className = 'btn btn-ghost btn-sm'; mergeBtn.textContent = 'Merge into...';
-      mergeBtn.addEventListener('click', () => openMergeTargetModal({
-        kind: 'device', id: device.id, label: mtDeviceLabel(device), obj: device,
-        onDone: reloadCatalog,
-      }));
-      cell.appendChild(mergeBtn);
-      const drill = document.createElement('button'); drill.className = 'btn-drill'; drill.textContent = 'Profiles →';
+      const drill = document.createElement('button'); drill.className = 'btn-drill'; drill.textContent = 'Programs →';
       drill.addEventListener('click', () => catNavigate('profiles', _catBrand, device));
       cell.appendChild(drill);
-    }, async (id) => { await adminDeleteDevice(id); _deviceItems = _deviceItems.filter((d) => d.id !== id); });
-    // Quality rating in the meta line (bounded fan-out: only this brand's devices).
-    getDeviceQuality(device.id).then((s) => {
-      if (s && s.count > 0) {
-        const meta = card.querySelector('.cat-card-meta');
-        if (meta) meta.insertAdjacentHTML('beforeend', ` · <span style="color:var(--warning)">★ ${s.avg.toFixed(1)} (${s.count})</span>`);
-      }
-    }).catch(() => {});
+    }, async (id) => {
+      await adminDeleteDevice(id);
+      _deviceItems = _deviceItems.filter((d) => d.id !== id);
+      _profileItems = _profileItems.filter((p) => p.deviceId !== id);
+      await refreshCachedBrand(device.brand_lc);
+    });
+    // Quality rating in the meta line, off the denormalized aggregate (no extra read).
+    if (num(device.ratingCount) > 0) {
+      const meta = card.querySelector('.cat-card-meta');
+      if (meta) meta.insertAdjacentHTML('beforeend', ` · <span style="color:var(--warning)">★ ${(num(device.ratingSum) / num(device.ratingCount)).toFixed(1)} (${num(device.ratingCount)})</span>`);
+    }
     list.appendChild(card);
   });
   content.appendChild(list);
@@ -1076,37 +1212,28 @@ function renderCatDevices() {
 // Level 3 — Profiles for selected device
 function renderCatProfiles() {
   const all = _profileItems.filter((p) => p.deviceId === _catDevice.id);
-  // Capture now: loadCatalogData() inside catMergebar resets the module-level vars to null.
-  const savedBrand = _catBrand, savedDevice = _catDevice;
-  catMergebar(all, 'profile', (p) => `${p.program || p.id} (${p.status})`, adminMergeProfiles,
-    () => catNavigate('profiles', savedBrand, savedDevice));
-  const sorted = [...all].sort((a, b) => (a.status === 'pending' ? -1 : 0) - (b.status === 'pending' ? -1 : 0));
+  const sorted = [...all].sort((a, b) => (a.status === 'pending' ? -1 : 0) - (b.status === 'pending' ? -1 : 0)
+    || num(b.cycleCount) - num(a.cycleCount));
   const items = catSearchFilter(sorted, (p) => `${p.program || ''} ${p.status || ''} ${p.createdByName || ''}`);
   const content = $('cat-content'); content.innerHTML = '';
-  if (!items.length) { content.innerHTML = '<div class="tbl-msg">No profiles for this device.</div>'; return; }
+  if (!items.length) { content.innerHTML = '<div class="tbl-msg">No programs for this appliance.</div>'; return; }
   const list = document.createElement('div'); list.className = 'cat-list';
   items.forEach((profile) => {
     const metaParts = [
+      `${num(profile.cycleCount)} cycle${num(profile.cycleCount) !== 1 ? 's' : ''}`,
       profile.createdByName ? `by ${esc(profile.createdByName)}` : null,
       profile.ownerId ? `owner: <span class="cat-owner-label">${esc(resolveOwnerLabel(profile.ownerId))}</span>` : null,
     ].filter(Boolean).join(' · ');
     const card = catMakeCard(profile, profile.program || profile.id, metaParts);
-    buildStatusActions(card, profile, adminSetProfileStatus, 'Profile', (cell) => {
+    buildStatusActions(card, profile, 'profile', (cell) => {
       catRenameButton(cell, 'program', profile.program, (name) => adminRenameProfile(profile.id, name));
+      catMergeButton(cell, 'profile', profile, mtProfileLabel(profile));
       const phaseBtn = document.createElement('button'); phaseBtn.className = 'btn btn-ghost btn-sm'; phaseBtn.textContent = 'Edit phases';
       phaseBtn.addEventListener('click', () => openPhaseEditor(profile));
       cell.appendChild(phaseBtn);
       const ownerBtn = document.createElement('button'); ownerBtn.className = 'btn btn-ghost btn-sm'; ownerBtn.textContent = 'Set owner';
       ownerBtn.addEventListener('click', () => openOwnerPicker(profile, card, true));
       cell.appendChild(ownerBtn);
-      // The merge bar above only lists THIS device's programs; the picker also reaches a
-      // program on another device (a cycle set filed under the wrong model).
-      const mergeBtn = document.createElement('button'); mergeBtn.className = 'btn btn-ghost btn-sm'; mergeBtn.textContent = 'Merge into...';
-      mergeBtn.addEventListener('click', () => openMergeTargetModal({
-        kind: 'profile', id: profile.id, label: mtProfileLabel(profile), obj: profile,
-        onDone: reloadCatalog,
-      }));
-      cell.appendChild(mergeBtn);
       const drill = document.createElement('button'); drill.className = 'btn-drill'; drill.textContent = 'Cycles →';
       drill.addEventListener('click', () => catNavigate('cycles', _catBrand, _catDevice, profile));
       cell.appendChild(drill);
@@ -1116,9 +1243,101 @@ function renderCatProfiles() {
   content.appendChild(list);
 }
 
+// Removed: everything soft-removed, newest first, each with Restore. Brands, appliances and
+// programs come from the catalog listings already in memory; removed cycles are one query.
+function updateRemovedButton() {
+  const btn = $('cat-removed-btn');
+  if (!btn) return;
+  const n = _brandItems.filter((b) => b.status === 'removed').length
+    + _deviceItems.filter((d) => d.status === 'removed').length
+    + _profileItems.filter((p) => p.status === 'removed').length
+    + (_removedCycles ? _removedCycles.length : 0);
+  btn.textContent = n ? `Removed (${n}${_removedCycles ? '' : '+'})` : 'Removed';
+  btn.classList.toggle('active', _catLevel === 'removed');
+}
+
+async function renderCatRemoved() {
+  const content = $('cat-content');
+  if (!_removedCycles) {
+    content.innerHTML = '<div class="loading-center" style="padding:2rem"><div class="loading-spinner"></div></div>';
+    try { _removedCycles = await adminListRemovedCycles(); }
+    catch (e) { _removedCycles = []; toast(e.message, 'error'); }
+    if (_catLevel !== 'removed') return;
+    updateRemovedButton();
+  }
+  const devById = new Map(_deviceItems.map((d) => [d.id, d]));
+  const profById = new Map(_profileItems.map((p) => [p.id, p]));
+  const rows = [
+    ..._brandItems.filter((b) => b.status === 'removed').map((rec) => ({ kind: 'brand', rec, name: rec.brand || rec.id, where: '' })),
+    ..._deviceItems.filter((d) => d.status === 'removed').map((rec) => ({ kind: 'device', rec, name: `${rec.brand || ''} ${rec.model || rec.id}`.trim(), where: typeLabel(rec.applianceType) })),
+    ..._profileItems.filter((p) => p.status === 'removed').map((rec) => {
+      const d = devById.get(rec.deviceId);
+      return { kind: 'profile', rec, name: rec.program || rec.id, where: d ? `${d.brand} ${d.model}` : (rec.deviceId || '') };
+    }),
+    ..._removedCycles.map((rec) => {
+      const p = profById.get(rec.profileId);
+      return { kind: 'cycle', rec, name: `${deviceLabel(rec)} · ${p ? p.program : (rec.program_lc || '')}`, where: `${formatDuration((rec.stats || {}).duration)} · by ${rec.uploaderName || 'Anon'}` };
+    }),
+  ];
+  const ms = (r) => (r.rec.removedAt && r.rec.removedAt.toMillis ? r.rec.removedAt.toMillis() : 0);
+  rows.sort((a, b) => ms(b) - ms(a));
+  const shown = catSearchFilter(rows, (r) => `${r.kind} ${r.name} ${r.where}`);
+  content.innerHTML = '';
+  if (!shown.length) { content.innerHTML = '<div class="tbl-msg">Nothing is removed. Removed entries show up here with a Restore button.</div>'; return; }
+  const list = document.createElement('div'); list.className = 'cat-list';
+  for (const r of shown) {
+    const back = _isVis(r.rec.removedFrom) ? r.rec.removedFrom : 'pending';
+    const meta = [
+      `<span class="badge badge-type">${esc(_KIND_LABEL[r.kind])}</span>`,
+      r.where ? esc(r.where) : null,
+      r.rec.removedAt ? `removed ${formatDate(r.rec.removedAt)}` : null,
+      `restores as ${esc(back)}`,
+    ].filter(Boolean).join(' · ');
+    const card = catMakeCard(r.rec, r.name, meta);
+    if (r.kind === 'cycle') {
+      const cell = card.querySelector('.action-cell');
+      const restore = document.createElement('button'); restore.className = 'btn btn-primary btn-sm'; restore.textContent = 'Restore';
+      restore.addEventListener('click', async () => {
+        restore.disabled = true;
+        try {
+          const restored = await adminRestore('cycle', r.rec.id);
+          await applyRestored(restored);
+          toast(restoredMessage(restored));
+          renderCatalog();
+        } catch (e) { restore.disabled = false; toast(e.message, 'error'); }
+      });
+      const view = document.createElement('button'); view.className = 'btn btn-ghost btn-sm'; view.textContent = 'View';
+      view.addEventListener('click', () => openReviewModal(r.rec));
+      const del = document.createElement('button'); del.className = 'btn btn-danger btn-sm'; del.textContent = 'Delete';
+      del.addEventListener('click', async () => {
+        if (!confirm('Permanently delete this cycle with its ratings and comments? This cannot be undone.')) return;
+        del.disabled = true;
+        try { await deleteCycle(r.rec.id); _removedCycles = _removedCycles.filter((c) => c.id !== r.rec.id); toast('Cycle deleted'); renderCatalog(); }
+        catch (e) { del.disabled = false; toast(e.message, 'error'); }
+      });
+      cell.append(restore, view, del);
+    } else {
+      const deleter = {
+        brand: async (id) => { await adminDeleteBrand(id); _brandItems = _brandItems.filter((b) => b.id !== id); },
+        device: async (id) => {
+          await adminDeleteDevice(id);
+          _deviceItems = _deviceItems.filter((d) => d.id !== id);
+          _profileItems = _profileItems.filter((p) => p.deviceId !== id);
+        },
+        profile: async (id) => { await adminDeleteProfile(id); _profileItems = _profileItems.filter((p) => p.id !== id); },
+      }[r.kind];
+      const devCount = r.kind === 'brand' ? _deviceItems.filter((d) => d.brand_lc === r.rec.id).length : 0;
+      buildStatusActions(card, r.rec, r.kind, null, deleter, {
+        deleteBlocked: devCount ? `Still has ${devCount} appliance${devCount !== 1 ? 's' : ''}. Delete or move them first.` : null,
+      });
+    }
+    list.appendChild(card);
+  }
+  content.appendChild(list);
+}
+
 // Level 4 — Cycles for selected profile
 async function renderCatCyclesLevel() {
-  $('cat-merge-bar').style.display = 'none';
   const content = $('cat-content');
   content.innerHTML = '<div class="loading-center" style="padding:2rem"><div class="loading-spinner"></div></div>';
   try {
@@ -1163,7 +1382,19 @@ $('cat-search').addEventListener('input', () => {
   if (_catLevel === 'brands') renderCatBrands();
   else if (_catLevel === 'devices') renderCatDevices();
   else if (_catLevel === 'profiles') renderCatProfiles();
+  else if (_catLevel === 'removed') renderCatRemoved();
 });
+$('cat-removed-btn').addEventListener('click', () => {
+  if (_catLevel === 'removed') catNavigate('brands');
+  else catNavigate('removed');
+});
+
+// Open the catalog's Removed view from anywhere (the Overview tile).
+async function openRemovedView() {
+  switchTab('catalog');
+  if (!_catalogLoaded) await loadCatalogData();
+  catNavigate('removed');
+}
 
 // ============================================================ users table
 async function loadUsers(reset = false) {
@@ -1782,8 +2013,9 @@ if (recountBtn) {
     recountBtn.textContent = 'Recounting…';
     try {
       const r = await adminRecount();
-      toast(`Recounted: ${r.updated} docs updated (${r.brands} brands, ${r.devices} devices, ${r.profiles} profiles, ${r.cycles} cycles)`);
-      _statsLoaded = false; _statsCache = null;
+      toast(`Recounted: ${r.updated} docs updated (${r.brands} brands, ${r.devices} devices, ${r.profiles} profiles, ${r.cycles} cycles)`
+        + (r.promotedBrands ? `; ${r.promotedBrands} brand${r.promotedBrands === 1 ? '' : 's'} approved` : ''));
+      _statsLoaded = false; _statsCache = null; _catalogLoaded = false;
       loadStatistics();
     } catch (e) {
       toast(e.message, 'error');

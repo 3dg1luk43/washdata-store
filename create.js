@@ -22,7 +22,7 @@ import firebaseConfig from './config.js';
 import { MAINTENANCE } from './site-config.js';
 import {
   init, onAuth, signIn, signOutUser, isAdmin, ensureUserProfile,
-  createDevice, createBrand, createProfile, listBrands, applianceLabel, confirmThresholdValue,
+  createDevice, createBrand, createProfile, listAllBrands, applianceLabel, confirmThresholdValue,
   getSiteConfig,
 } from './washstore.js';
 
@@ -119,9 +119,9 @@ onAuth(async (user) => {
 let _brandsLoaded = false;
 async function loadBrandOptions() {
   try {
-    // Default page size (shares the browse page's cached brand listing via sessionStorage);
-    // the catalog is far smaller than a page, so this returns every brand.
-    const { items } = await listBrands({ includePending: true });
+    // EVERY brand (paged), sharing the landing page's cached A-Z listing. This used to be one
+    // 60-brand page, which dropped every brand after the 60th alphabetically (issue #7).
+    const items = await listAllBrands({ includePending: true });
     const dl = $('brand-list');
     dl.innerHTML = items.map((b) => `<option value="${esc(b.brand)}"></option>`).join('');
   } catch (_) { /* autocomplete is best-effort */ }

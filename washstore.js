@@ -22,6 +22,7 @@ import {
   onAuthStateChanged,
   GithubAuthProvider,
   getAdditionalUserInfo,
+  connectAuthEmulator,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 import {
   getFirestore,
@@ -41,14 +42,15 @@ import {
   increment,
   writeBatch,
   onSnapshot,
+  connectFirestoreEmulator,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
 import { deviceId as mkDeviceId, profileId as mkProfileId, lc } from './lib/ids.js';
 import {
   assertDeviceMergeOk, assertProfileMergeOk, assertCycleMoveOk, assertBrandMergeOk,
+  assertTargetNotRemoved,
 } from './lib/merge_guard.js';
 import { downsampleCycle, parseCycle, cycleStats, packPoints, unpackPoints } from './lib/trace.js';
-import { mergeBrandPages } from './lib/brand_pages.js';
-import { restQuery, restGet, restRatingSummary, restDeviceRating, restCount, setTokenProvider } from './firestore-rest.js';
+import { restQuery, restGet, restRatingSummary, restDeviceRating, restCount, setTokenProvider, useRestEmulator } from './firestore-rest.js';
 
 export { downsampleCycle, parseCycle, cycleStats };
 
@@ -104,10 +106,27 @@ let _app = null;
 let _auth = null;
 let _db = null;
 
+// Local development only: on localhost, `?emu` (remembered for the tab) points the SDK and
+// the REST reads at the Firebase emulators (Firestore :8099, Auth :9099; see SETUP.md), so
+// admin flows can be exercised without touching production data. Never true on the site.
+function _emulatorMode() {
+  try {
+    const host = location.hostname;
+    if (host !== 'localhost' && host !== '127.0.0.1') return false;
+    if (new URLSearchParams(location.search).has('emu')) sessionStorage.setItem('wd_emu', '1');
+    return sessionStorage.getItem('wd_emu') === '1';
+  } catch (_) { return false; }
+}
+
 export function init(config) {
   _app = initializeApp(config);
   _auth = getAuth(_app);
   _db = getFirestore(_app);
+  if (_emulatorMode()) {
+    connectFirestoreEmulator(_db, '127.0.0.1', 8099);
+    connectAuthEmulator(_auth, 'http://127.0.0.1:9099', { disableWarnings: true });
+    useRestEmulator('127.0.0.1', 8099);
+  }
   // Let the REST layer attach the signed-in user's ID token on authed (admin/owner) reads.
   setTokenProvider(() => (_auth && _auth.currentUser ? _auth.currentUser.getIdToken() : null));
 }
@@ -933,49 +952,42 @@ async function _livePrefixGroups(q, statuses, errors) {
   };
 }
 
-function _brandFilters(status, search) {
-  const filters = [{ field: 'status', op: 'EQUAL', value: status }];
-  if (search) {
-    const p = search.toLowerCase();
-    filters.push({ field: 'brand_lc', op: 'GREATER_THAN_OR_EQUAL', value: p });
-    filters.push({ field: 'brand_lc', op: 'LESS_THAN_OR_EQUAL', value: p + '\uf8ff' });
-  }
-  return filters;
-}
+// The fields a brand card / A-Z directory entry renders. A projection does not lower the
+// billed document count, but it keeps the payload of a 100+ brand listing small.
+const _BRAND_CARD_FIELDS = ['brand', 'brand_lc', 'status', 'deviceCount', 'cycleCount',
+  'approvedDeviceCount', 'createdByUid'];
 
-// List brands, optional case-insensitive prefix search on brand_lc. REST read.
-// includePending merges approved + pending (the catalog is community-visible-with-a-tag).
-export async function listBrands({ search = null, pageSize = 60, cursor = null, includePending = false } = {}) {
-  // Cache only the unfiltered first page (landing grid + contribute datalist); searched or
-  // paginated queries pass through so search-as-you-type and load-more stay live.
-  const cacheable = !search && !cursor;
-  const cacheKey = `wdcat:brands:${includePending ? 1 : 0}:${pageSize}`;
-  if (cacheable) {
-    const hit = _catalogCacheGet(cacheKey);
-    if (hit) return hit;
-  }
-  let result;
-  if (includePending) {
-    const page = (status) => restQuery('brands', {
-      filters: _brandFilters(status, search),
-      orderBy: [{ field: 'brand_lc', dir: 'ASCENDING' }],
-      limit: pageSize,
-      startAfter: cursor ? [cursor] : null,
-    });
-    const [a, p] = await Promise.all([page('approved'), page('pending')]);
-    result = mergeBrandPages(a, p, pageSize);
-  } else {
-    const items = await restQuery('brands', {
-      filters: _brandFilters('approved', search),
-      orderBy: [{ field: 'brand_lc', dir: 'ASCENDING' }],
-      limit: pageSize,
-      startAfter: cursor ? [cursor] : null,
-    });
-    const next = items.length === pageSize ? items[items.length - 1].brand_lc : null;
-    result = { items, cursor: next };
-  }
-  if (cacheable) _catalogCachePut(cacheKey, result);
-  return result;
+// EVERY public brand, alphabetical, for the landing page's A-Z directory. One document read
+// per brand (about a hundred today), cached for the session window like the other catalog
+// listings, so browsing back to the landing page is free.
+export async function listAllBrands({ includePending = true } = {}) {
+  const cacheKey = `wdcat:allbrands:${includePending ? 1 : 0}`;
+  const hit = _catalogCacheGet(cacheKey);
+  if (hit) return hit;
+  const PAGE = 300;
+  const all = async (status) => {
+    const out = [];
+    let after = null;
+    for (;;) {
+      const rows = await restQuery('brands', {
+        filters: [{ field: 'status', op: 'EQUAL', value: status }],
+        orderBy: [{ field: 'brand_lc', dir: 'ASCENDING' }],
+        limit: PAGE,
+        startAfter: after != null ? [after] : null,
+        select: _BRAND_CARD_FIELDS,
+      });
+      out.push(...rows);
+      if (rows.length < PAGE) return out;
+      after = rows[rows.length - 1].brand_lc;
+    }
+  };
+  const lists = await Promise.all(includePending ? [all('approved'), all('pending')] : [all('approved')]);
+  const byId = new Map();
+  for (const b of lists.flat()) if (!byId.has(b.id)) byId.set(b.id, b);
+  const items = [...byId.values()].sort((a, b) => String(a.brand || a.id)
+    .localeCompare(String(b.brand || b.id), undefined, { sensitivity: 'base' }));
+  _catalogCachePut(cacheKey, items);
+  return items;
 }
 
 // Devices for a brand (used by brand -> devices browse and by upload autocomplete).
@@ -1027,7 +1039,7 @@ export async function searchDevices({ applianceType = null, brand = null, favori
     }
     return { items, cursor: null };  // favorites depend on the signed-in user; not cached
   }
-  // Cache only the first page; later pages pass through, mirroring listBrands.
+  // Cache only the first page; later pages pass through (Load more stays live).
   const cacheable = !cursor;
   const cacheKey = `wdcat:devices:${(brand || '').toLowerCase()}:${applianceType || ''}:${includePending ? 1 : 0}:${pageSize}`;
   if (cacheable) {
@@ -1594,7 +1606,7 @@ export async function adminListCycles({ status = null, applianceType = null, pag
 
 export async function adminSetCycleStatus(id, status, reason = null) {
   const cyc = await restGet(`cycles/${id}`, { auth: true, noStore: true });
-  const update = { status };
+  const update = { status, ..._removalFields(cyc, status) };
   if (reason != null) update.rejectionReason = reason;
   await updateDoc(doc(_db, 'cycles', id), update);
   if (cyc) {
@@ -1609,21 +1621,15 @@ export async function adminSetCycleStatus(id, status, reason = null) {
   }
 }
 
-export async function adminListDevices({ status = null, pageSize = 50 } = {}) {
-  const filters = [];
-  if (status) filters.push({ field: 'status', op: 'EQUAL', value: status });
-  const items = await restQuery('devices', {
-    filters,
-    orderBy: [{ field: 'favoriteCount', dir: 'DESCENDING' }],
-    limit: pageSize,
-    auth: true,
-  });
+export async function adminListDevices() {
+  const items = await _adminListAll('devices');
+  items.sort((a, b) => (b.favoriteCount || 0) - (a.favoriteCount || 0));
   return { items, cursor: null };
 }
 
 export async function adminSetDeviceStatus(id, status) {
   const dev = await restGet(`devices/${id}`, { auth: true, noStore: true });
-  await updateDoc(doc(_db, 'devices', id), { status });
+  await updateDoc(doc(_db, 'devices', id), { status, ..._removalFields(dev, status) });
   if (dev?.brand_lc) {
     // Two independent tallies on the parent brand: visible devices, and APPROVED devices
     // (which gate brand auto-approval). Combined into one update -- a doc must not be
@@ -1656,29 +1662,45 @@ export async function adminSetProfileOwner(profileId, ownerUid, ownerName) {
   });
 }
 
-// Admin brand/profile listings for the review tabs. No server-side status filter
-// (keeps the query on a single-field index); the admin UI filters client-side.
-export async function adminListBrands({ pageSize = 200 } = {}) {
-  const items = await restQuery('brands', {
-    orderBy: [{ field: 'brand_lc', dir: 'ASCENDING' }],
-    limit: pageSize,
-    auth: true,
-  });
+// Admin brand/profile listings for the catalog. No server-side status filter (keeps the
+// query on the built-in __name__ index); the admin UI filters client-side.
+export async function adminListBrands() {
+  const items = await _adminListAll('brands');
+  items.sort((a, b) => String(a.brand_lc || a.id).localeCompare(String(b.brand_lc || b.id)));
   return { items, cursor: null };
 }
 
-export async function adminListProfiles({ pageSize = 200 } = {}) {
-  const items = await restQuery('profiles', {
-    orderBy: [{ field: 'createdAt', dir: 'DESCENDING' }],
-    limit: pageSize,
-    auth: true,
-  });
+export async function adminListProfiles() {
+  const items = await _adminListAll('profiles');
+  items.sort((a, b) => _tsMillis(b.createdAt) - _tsMillis(a.createdAt));
   return { items, cursor: null };
+}
+
+function _tsMillis(ts) { return ts && ts.toMillis ? ts.toMillis() : 0; }
+
+// EVERY document of a catalog collection, in pages on the document id. The catalog used to
+// be one 500-document page per collection, which on a store with 822 devices silently left
+// a third of them out: brands showed the wrong device count, and merge targets, duplicates
+// and removed devices past the cap could not be found at all.
+async function _adminListAll(collectionId, pageSize = 500) {
+  const out = [];
+  let after = null;
+  for (;;) {
+    const rows = await restQuery(collectionId, {
+      orderBy: [{ field: '__name__', dir: 'ASCENDING' }],
+      limit: pageSize,
+      startAfter: after ? [{ _ref: `${collectionId}/${after}` }] : null,
+      auth: true,
+    });
+    out.push(...rows);
+    if (rows.length < pageSize) return out;
+    after = rows[rows.length - 1].id;
+  }
 }
 
 export async function adminSetProfileStatus(id, status) {
   const prof = await restGet(`profiles/${id}`, { auth: true, noStore: true });
-  await updateDoc(doc(_db, 'profiles', id), { status });
+  await updateDoc(doc(_db, 'profiles', id), { status, ..._removalFields(prof, status) });
   if (prof?.deviceId) {
     const delta = _counterDelta(prof.status, status);
     if (delta !== 0) {
@@ -1688,7 +1710,48 @@ export async function adminSetProfileStatus(id, status) {
 }
 
 export async function adminSetBrandStatus(brandLc, status) {
-  await updateDoc(doc(_db, 'brands', brandLc), { status });
+  const brand = await restGet(`brands/${brandLc}`, { auth: true, noStore: true });
+  // Hiding a brand does not hide its appliances: they stay listed, searchable and openable
+  // under a brand that no longer exists. Refuse while any of them is still visible.
+  if (status === 'removed') await _assertBrandEmpty(brandLc, 'remove');
+  await updateDoc(doc(_db, 'brands', brandLc), { status, ..._removalFields(brand, status) });
+  // Approving by hand is final; restoring to pending re-checks the automatic bar.
+  if (status === 'pending') await _maybePromoteBrand(brandLc);
+}
+
+// Soft removal is reversible, so it records what it replaced: `removedFrom` is the status a
+// Restore goes back to, `removedAt` orders the Removed view. Leaving `removed` clears both.
+function _removalFields(rec, status) {
+  if (status === 'removed') {
+    if (rec && rec.status === 'removed') return {};
+    return { removedFrom: _isVisible(rec && rec.status) ? rec.status : 'pending', removedAt: serverTimestamp() };
+  }
+  return rec && rec.status === 'removed' ? { removedFrom: null, removedAt: null } : {};
+}
+
+// Every device filed under a brand, any status (admin read; one document per device).
+async function _brandDevices(brandLc) {
+  return restQuery('devices', {
+    filters: [{ field: 'brand_lc', op: 'EQUAL', value: brandLc }],
+    select: ['status', 'model'],
+    limit: 1000,
+    auth: true,
+  });
+}
+
+// A brand can only be removed once none of its appliances is visible, and only deleted once
+// it has none at all: an appliance must never outlive the brand it is filed under. Merging
+// into the correct brand is the way to get rid of a duplicate that still has appliances.
+async function _assertBrandEmpty(brandLc, action) {
+  const devs = await _brandDevices(brandLc);
+  const visible = devs.filter((d) => _isVisible(d.status)).length;
+  const blocking = action === 'delete' ? devs.length : visible;
+  if (!blocking) return;
+  const hidden = devs.length - visible;
+  const what = `${blocking} appliance${blocking === 1 ? '' : 's'}`;
+  const extra = action === 'delete' && hidden ? ` (${hidden} of them removed)` : '';
+  throw new Error(`This brand still has ${what}${extra}. Merge it into the correct brand, or `
+    + `${action === 'delete' ? 'delete' : 'remove'} those appliances first.`);
 }
 
 // ------------------------------------------------------------------
@@ -1915,6 +1978,10 @@ export async function adminMergeDevices(fromId, toId) {
   // Favorites of the dissolved device follow it, so the target's vanity counter follows too.
   const favGained = await _repointFavorites(fromId, toId);
   if (favGained > 0) toUpdate.favoriteCount = increment(favGained);
+  // The merged entry keeps the better-established status of the two: folding an approved
+  // duplicate into a pending one must not throw the approval away.
+  const upgrade = _isApproved(fromDev.status) && toDev.status === 'pending';
+  if (upgrade) toUpdate.status = 'approved';
   if (Object.keys(toUpdate).length > 0) {
     structural.push({ op: 'update', ref: doc(_db, 'devices', toId), data: toUpdate });
   }
@@ -1922,15 +1989,23 @@ export async function adminMergeDevices(fromId, toId) {
   // update: a batch must not write the same doc twice.
   const fromBrandUpd = {};
   if (fromDev.brand_lc && _isVisible(fromDev.status)) fromBrandUpd.deviceCount = increment(-1);
-  if (fromDev.brand_lc && _isApproved(fromDev.status)) fromBrandUpd.approvedDeviceCount = increment(-1);
+  // Same brand + upgrade: the approval moves to the target, so the tally does not change.
+  if (fromDev.brand_lc && _isApproved(fromDev.status) && (crossBrand || !upgrade)) {
+    fromBrandUpd.approvedDeviceCount = increment(-1);
+  }
   if (crossBrand && visibleCycles > 0) fromBrandUpd.cycleCount = increment(-visibleCycles);
   if (fromDev.brand_lc && Object.keys(fromBrandUpd).length > 0) {
     structural.push({ op: 'update', ref: doc(_db, 'brands', fromDev.brand_lc), data: fromBrandUpd });
   }
   // Target brand gains those cycles (its deviceCount is unchanged - the target device
-  // already existed and was already counted).
-  if (crossBrand && toBrandExists && visibleCycles > 0) {
-    structural.push({ op: 'update', ref: doc(_db, 'brands', toDev.brand_lc), data: { cycleCount: increment(visibleCycles) } });
+  // already existed and was already counted), plus the approval when the target inherited it.
+  if (crossBrand && toBrandExists) {
+    const toBrandUpd = {};
+    if (visibleCycles > 0) toBrandUpd.cycleCount = increment(visibleCycles);
+    if (upgrade) toBrandUpd.approvedDeviceCount = increment(1);
+    if (Object.keys(toBrandUpd).length) {
+      structural.push({ op: 'update', ref: doc(_db, 'brands', toDev.brand_lc), data: toBrandUpd });
+    }
   }
   structural.push({ op: 'delete', ref: doc(_db, 'devices', fromId) });
 
@@ -1949,7 +2024,8 @@ export async function adminMergeDevices(fromId, toId) {
     _closeOrphanedReports(`devices/${fromId}`),
     ...profileMaps.map(({ p }) => _closeOrphanedReports(`profiles/${p.id}`)),
   ]);
-  return { id: toId, profiles: profileMaps.length, cycles: cycSnap.docs.length };
+  if (upgrade && toDev.brand_lc) await _maybePromoteBrand(toDev.brand_lc);
+  return { id: toId, profiles: profileMaps.length, cycles: cycSnap.docs.length, approved: upgrade };
 }
 
 // Reassign a profile's cycles to another profile, then delete the empty source.
@@ -2003,7 +2079,12 @@ export async function adminMergeProfiles(fromId, toId) {
   const visibleCycles = cycSnap.docs.filter((c) => _isVisible(c.data().status)).length;
   const batch = writeBatch(_db);
   batch.delete(doc(_db, 'profiles', fromId));
-  if (visibleCycles > 0) batch.update(doc(_db, 'profiles', toId), { cycleCount: increment(visibleCycles) });
+  // Keep the better-established status, as the device merge does.
+  const upgrade = _isApproved(fromProf.status) && toProf.status === 'pending';
+  const toProfUpd = {};
+  if (visibleCycles > 0) toProfUpd.cycleCount = increment(visibleCycles);
+  if (upgrade) toProfUpd.status = 'approved';
+  if (Object.keys(toProfUpd).length) batch.update(doc(_db, 'profiles', toId), toProfUpd);
   // Source device loses the profile, and on a cross-device merge its cycles too.
   const fromDevUpd = {};
   if (_isVisible(fromProf.status)) fromDevUpd.profileCount = increment(-1);
@@ -2192,6 +2273,7 @@ export async function adminMergeBrands(fromLc, toBrandName) {
     getDoc(doc(_db, 'brands', fromLc)),
     getDoc(doc(_db, 'brands', toLc)),
   ]);
+  if (tgtSnap0.exists()) assertTargetNotRemoved(tgtSnap0.data(), 'brand');
   if (!tgtSnap0.exists()) {
     const src = srcSnap0.exists() ? srcSnap0.data() : {};
     // A pure rename into a new key inherits the source's identity but starts its counters at
@@ -2258,6 +2340,14 @@ export async function adminMergeBrands(fromLc, toBrandName) {
   if (!failed.length) {
     if (srcSnap0.exists()) await deleteDoc(doc(_db, 'brands', fromLc));
     await _closeOrphanedReports(`brands/${fromLc}`);
+  }
+  // The surviving brand keeps the better-established status of the two, and the approved
+  // models it just received may carry it over its own automatic bar.
+  const srcApproved = srcSnap0.exists() && srcSnap0.data().status === 'approved';
+  if (srcApproved && tgtSnap0.exists() && tgtSnap0.data().status === 'pending') {
+    await updateDoc(doc(_db, 'brands', toLc), { status: 'approved' });
+  } else {
+    await _maybePromoteBrand(toLc);
   }
   return { id: toLc, moved, merged, failed };
 }
@@ -2395,9 +2485,91 @@ export async function adminDeleteDevice(deviceId) {
   await batch.commit();
 }
 
-// Hard-delete a brand document.
+// Hard-delete an EMPTY brand document. A brand that still has appliances is refused (see
+// _assertBrandEmpty): deleting only the brand doc used to leave every appliance under it
+// listed, searchable and openable with no brand behind it.
 export async function adminDeleteBrand(brandId) {
+  await _assertBrandEmpty(brandId, 'delete');
   await deleteDoc(doc(_db, 'brands', brandId));
+  await _closeOrphanedReports(`brands/${brandId}`);
+}
+
+// ------------------------------------------------------------------
+// Restore (undo a soft removal)
+// ------------------------------------------------------------------
+
+const _KIND_COLLECTION = { brand: 'brands', device: 'devices', profile: 'profiles', cycle: 'cycles' };
+
+// Bring a removed brand / appliance / program / cycle back to the status it had when it was
+// removed (`removedFrom`; pending for items removed before that was recorded). A child is
+// useless under a hidden parent, so every removed ancestor is restored first, top-down so
+// each level's counter credit lands on a parent that is already visible again. Returns the
+// list of what was restored, e.g. [{ kind: 'brand', id, status }, { kind: 'device', ... }].
+export async function adminRestore(kind, id) {
+  const coll = _KIND_COLLECTION[kind];
+  if (!coll) throw new Error(`Cannot restore a ${kind}`);
+  const rec = await restGet(`${coll}/${id}`, { auth: true, noStore: true });
+  if (!rec) throw new Error('This entry no longer exists, so it cannot be restored.');
+  // Ancestors, top-down.
+  const chain = [];
+  if (kind === 'cycle' || kind === 'profile' || kind === 'device') {
+    const deviceId = kind === 'device' ? id : rec.deviceId;
+    const dev = kind === 'device' ? rec : (deviceId ? await restGet(`devices/${deviceId}`, { auth: true, noStore: true }) : null);
+    if (!dev) throw new Error('The appliance this belongs to no longer exists. Move or merge it instead.');
+    const brandLc = dev.brand_lc;
+    if (brandLc) {
+      const brand = await restGet(`brands/${brandLc}`, { auth: true, noStore: true });
+      if (!brand) throw new Error(`Brand "${dev.brand || brandLc}" no longer exists. Rename the appliance's brand to an existing one instead.`);
+      if (brand.status === 'removed') chain.push({ kind: 'brand', id: brandLc, rec: brand });
+    }
+    if (kind !== 'device' && dev.status === 'removed') chain.push({ kind: 'device', id: deviceId, rec: dev });
+    if (kind === 'cycle' && rec.profileId) {
+      const prof = await restGet(`profiles/${rec.profileId}`, { auth: true, noStore: true });
+      if (!prof) throw new Error('The program this cycle belongs to no longer exists. Move it instead.');
+      if (prof.status === 'removed') chain.push({ kind: 'profile', id: rec.profileId, rec: prof });
+    }
+  }
+  if (rec.status === 'removed') chain.push({ kind, id, rec });
+  const restored = [];
+  for (const step of chain) {
+    const to = _isVisible(step.rec.removedFrom) ? step.rec.removedFrom : 'pending';
+    if (step.kind === 'brand') await adminSetBrandStatus(step.id, to);
+    else if (step.kind === 'device') await adminSetDeviceStatus(step.id, to);
+    else if (step.kind === 'profile') await adminSetProfileStatus(step.id, to);
+    else await adminSetCycleStatus(step.id, to);
+    restored.push({ kind: step.kind, id: step.id, status: to });
+  }
+  return restored;
+}
+
+// Everything currently soft-removed, newest removal first: brands, appliances and programs
+// from the catalog listings the caller already holds, cycles from one status query.
+export async function adminListRemovedCycles({ pageSize = 200 } = {}) {
+  const { items } = await adminListCycles({ status: 'removed', pageSize });
+  return items;
+}
+
+// Recompute one brand's counters from its documents and promote it if it now qualifies.
+// The global "Recalculate counts" does this for every brand at a cost of thousands of reads;
+// this is the cheap fix for the one brand that reads wrong.
+export async function adminRecountBrand(brandLc) {
+  const [devs, cycs] = await Promise.all([
+    _brandDevices(brandLc),
+    restQuery('cycles', {
+      filters: [{ field: 'brand_lc', op: 'EQUAL', value: brandLc }],
+      select: ['status'],
+      limit: 5000,
+      auth: true,
+    }),
+  ]);
+  const counts = {
+    deviceCount: devs.filter((d) => _isVisible(d.status)).length,
+    approvedDeviceCount: devs.filter((d) => _isApproved(d.status)).length,
+    cycleCount: cycs.filter((c) => _isVisible(c.status)).length,
+  };
+  await updateDoc(doc(_db, 'brands', brandLc), counts);
+  const promoted = await _maybePromoteBrand(brandLc);
+  return { ...counts, status: promoted ? promoted.status : null };
 }
 
 // Hard-delete a profile and all its reference cycles.
@@ -2502,9 +2674,23 @@ export async function adminRecount() {
   const cycleRatings = await _mapLimited(cycles, 8, (c) => restRatingSummary(c.id).catch(() => ({ avg: null, count: 0 })));
   const deviceRatings = await _mapLimited(devices, 8, (d) => restDeviceRating(d.id).catch(() => ({ avg: null, count: 0 })));
 
+  // A pending brand whose models are approved often enough is promoted here too. Its counter
+  // may have lagged for a long time (devices approved before brand auto-approval existed, or
+  // through a path that did not credit the brand), and nothing else re-checks the bar, so
+  // without this the card would keep saying "Pending - 2/3 models" over four approved ones.
+  // Folded into the brand's counter write: a batch must not write one document twice.
+  const brandBar = await brandConfirmThresholdValue();
+  const promote = new Set(brands
+    .filter((b) => b.status === 'pending' && (apprDevByBrand[b.brand_lc] || 0) >= brandBar)
+    .map((b) => b.id));
+
   // Build update ops for every document
   const ops = [
-    ...brands.map((b) => ({ ref: doc(_db, 'brands', b.id), data: { deviceCount: devByBrand[b.brand_lc] || 0, cycleCount: cycByBrand[b.brand_lc] || 0, approvedDeviceCount: apprDevByBrand[b.brand_lc] || 0 } })),
+    ...brands.map((b) => ({ ref: doc(_db, 'brands', b.id), data: {
+      deviceCount: devByBrand[b.brand_lc] || 0, cycleCount: cycByBrand[b.brand_lc] || 0,
+      approvedDeviceCount: apprDevByBrand[b.brand_lc] || 0,
+      ...(promote.has(b.id) ? { status: 'approved' } : {}),
+    } })),
     ...devices.map((d, i) => ({ ref: doc(_db, 'devices', d.id), data: { profileCount: profByDevice[d.id] || 0, cycleCount: cycByDevice[d.id] || 0, ..._ratingFields(deviceRatings[i]) } })),
     ...profiles.map((p) => ({ ref: doc(_db, 'profiles', p.id), data: { cycleCount: cycByProfile[p.id] || 0 } })),
     ...cycles.map((c, i) => ({ ref: doc(_db, 'cycles', c.id), data: _ratingFields(cycleRatings[i]) })),
@@ -2516,7 +2702,7 @@ export async function adminRecount() {
     for (const { ref, data } of ops.slice(i, i + BATCH)) batch.update(ref, data);
     await batch.commit();
   }
-  return { brands: brands.length, devices: devices.length, profiles: profiles.length, cycles: cycles.length, updated: ops.length };
+  return { brands: brands.length, devices: devices.length, profiles: profiles.length, cycles: cycles.length, updated: ops.length, promotedBrands: promote.size };
 }
 
 export async function adminGetStats() {

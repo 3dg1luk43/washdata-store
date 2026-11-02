@@ -18,7 +18,7 @@ import firebaseConfig, { GA_MEASUREMENT_ID } from './config.js';
 import { MAINTENANCE } from './site-config.js';
 import {
   init, onAuth, signIn, signOutUser, isAdmin, ensureUserProfile,
-  listBrands, searchDevices, getDevicesByBrand, getProfiles, createProfile, getReferenceCycles,
+  listAllBrands, searchDevices, getDevicesByBrand, getProfiles, createProfile, getReferenceCycles,
   favoriteDevice, getFavorites,
   addComment, listComments, deleteComment, deleteCycle,
   submitRating, getUserRating, getRatingSummary,
@@ -65,15 +65,7 @@ let _view = 'brands';             // brands | brand | device | profile
 let _brand = null;
 let _device = null;
 let _profile = null;
-let _browseCursor = null;
 let _browseFilters = { search: '', favoritesOnly: false, approvedOnly: false, minRating: 0 };
-// Signature of the filters that actually reach Firestore, so an unchanged filter set does
-// not re-issue the query. minRating is excluded: it re-gates already-loaded cards
-// client-side and never triggers a read.
-function _queryFilterKey(f) {
-  return `${f.search.toLowerCase()}|${f.favoritesOnly ? 1 : 0}|${f.approvedOnly ? 1 : 0}`;
-}
-let _lastQueryFilterKey = null;
 let _favorites = new Set();
 let _confirmThreshold = 5;
 let _brandThreshold = 5;
@@ -162,11 +154,101 @@ function browseVisible() { return _maintenanceKnown && (!_maintenance || _adminF
 function maybeLoadBrowse() {
   if (browseVisible() && !_browseLoaded) {
     _browseLoaded = true;
-    // Seed the query-filter signature so pressing Apply with untouched filters recognises
-    // that the initial load already answered it (see _applyFilters).
-    _lastQueryFilterKey = _queryFilterKey(_browseFilters);
-    loadBrands(true);
+    // A deep link (#/brand/..., #/device/..., a shared cycle) opens straight into that view.
+    _thresholdsReady.then(() => {
+      if (parseRoute().kind !== 'brands') routeFromUrl();
+      else loadBrands();
+    });
   }
+}
+
+// ============================================================ routing
+// Every browse view has a URL (#/brand/<id>, #/device/<id>, #/program/<id>, #/cycle/<id>,
+// #/search/<query>), so the browser's Back button walks back through the catalog instead of
+// leaving the site, a refresh keeps the place, and any view can be shared as a link.
+let _routing = false;       // rendering FROM the URL: views must not push it again
+let _modalPushed = false;   // the open cycle modal added its own history entry
+
+function parseRoute() {
+  const m = /^#\/(brand|device|program|cycle|search)\/(.+)$/.exec(location.hash || '');
+  if (!m) return { kind: 'brands', id: '' };
+  try { return { kind: m[1], id: decodeURIComponent(m[2]) }; } catch (_) { return { kind: 'brands', id: '' }; }
+}
+function routeHash(kind, id) { return kind === 'brands' ? '' : `#/${kind}/${encodeURIComponent(id)}`; }
+
+// Record a view change in the history. Returns true when it added an entry.
+function setRoute(kind, id = '', { replace = false } = {}) {
+  if (_routing) return false;
+  const hash = routeHash(kind, id);
+  if ((location.hash || '') === hash) return false;
+  const url = hash || (location.pathname + location.search);
+  if (replace) history.replaceState(null, '', url);
+  else history.pushState(null, '', url);
+  return !replace;
+}
+
+// Make sure _device / _brand describe `deviceId`, reading only what is not in memory. A
+// missing brand doc must not block the view (device namespaces can outlive brand docs).
+async function ensureChainFor(deviceId) {
+  if (!(_device && _device.id === deviceId)) _device = await getDevice(deviceId);
+  if (!(_brand && _brand.brand_lc === _device.brand_lc)) {
+    try { _brand = await getBrand(_device.brand_lc); } catch (_) { _brand = null; }
+  }
+}
+
+async function routeFromUrl() {
+  const r = parseRoute();
+  _routing = true;
+  try {
+    if (r.kind !== 'cycle' && !$('details-modal').hasAttribute('hidden')) hideModal();
+    if (r.kind === 'brands') {
+      resetSearchBox();
+      await loadBrands();
+    } else if (r.kind === 'search') {
+      $('filter-brand').value = r.id;
+      _browseFilters.search = r.id;
+      await loadSearch(r.id);
+    } else if (r.kind === 'brand') {
+      const b = _brand && (_brand.brand_lc || _brand.id) === r.id ? _brand : await getBrand(r.id);
+      await openBrand(b);
+    } else if (r.kind === 'device') {
+      const d = _device && _device.id === r.id ? _device : await getDevice(r.id);
+      await openDeviceCard(d);
+    } else if (r.kind === 'program') {
+      // Already on it (e.g. Back from the cycle modal): nothing to reload.
+      if (!(_view === 'profile' && _profile && _profile.id === r.id)) {
+        const p = _profile && _profile.id === r.id ? _profile : await getProfile(r.id);
+        await ensureChainFor(p.deviceId);
+        await openProfile(p);
+      }
+    } else if (r.kind === 'cycle') {
+      if (!(_openRecord && _openRecord.id === r.id)) {
+        const c = await getCycle(r.id);
+        if (!(_view === 'profile' && _profile && _profile.id === c.profileId)) {
+          const p = await getProfile(c.profileId);
+          await ensureChainFor(c.deviceId);
+          await openProfile(p);
+        }
+        await openDetails(c);
+      }
+    }
+  } catch (e) {
+    _view = 'missing';
+    renderBreadcrumb();
+    $('browse-body').innerHTML = emptyHTML('&#128269;', 'Not found',
+      `${e.message}. It may have been renamed, merged or removed.`)
+      + '<div class="add-cta"><a class="btn btn-ghost btn-sm" href="index.html">Browse all brands</a></div>';
+  } finally {
+    _routing = false;
+  }
+}
+window.addEventListener('popstate', () => { if (browseVisible()) routeFromUrl(); });
+
+// The search box and the filter state it feeds always move together: clearing one without
+// the other is how the landing page used to stay filtered by a query no longer on screen.
+function resetSearchBox() {
+  $('filter-brand').value = '';
+  _browseFilters.search = '';
 }
 
 // ============================================================ helpers
@@ -469,53 +551,119 @@ function renderBreadcrumb() {
       ? `<span class="crumb-sep">/</span><span class="crumb current">"${esc(_searchQuery)}"</span>`
       : `<span class="crumb-sep">/</span><button class="crumb" data-to="search">"${esc(_searchQuery)}"</button>`);
   }
-  if (_brand) parts.push(`<span class="crumb-sep">/</span><button class="crumb" data-to="brand">${esc(_brand.brand)}</button>`);
-  if (_device && (_view === 'device' || _view === 'profile')) parts.push(`<span class="crumb-sep">/</span><button class="crumb" data-to="device">${esc(_device.brand)} ${esc(modelOf(_device))}</button>`);
+  if (_brand && _view !== 'brand') parts.push(`<span class="crumb-sep">/</span><button class="crumb" data-to="brand">${esc(_brand.brand)}</button>`);
+  else if (_brand) parts.push(`<span class="crumb-sep">/</span><span class="crumb current">${esc(_brand.brand)}</span>`);
+  if (_device && _view === 'profile') parts.push(`<span class="crumb-sep">/</span><button class="crumb" data-to="device">${esc(_device.brand)} ${esc(modelOf(_device))}</button>`);
+  else if (_device && _view === 'device') parts.push(`<span class="crumb-sep">/</span><span class="crumb current">${esc(_device.brand)} ${esc(modelOf(_device))}</span>`);
   if (_view === 'profile' && _profile) parts.push(`<span class="crumb-sep">/</span><span class="crumb current">${esc(_profile.program)}</span>`);
   bc.innerHTML = parts.join('');
   bc.querySelectorAll('.crumb[data-to]').forEach((b) => b.addEventListener('click', () => {
-    if (b.dataset.to === 'brands') { $('filter-brand').value = ''; loadBrands(true); }
+    if (b.dataset.to === 'brands') { resetSearchBox(); loadBrands(); }
     else if (b.dataset.to === 'search') loadSearch(_searchQuery);
     else if (b.dataset.to === 'brand') openBrand(_brand);
     else if (b.dataset.to === 'device') openDevice(_device);
   }));
 }
 
-// ============================================================ browse: brands
-async function loadBrands(reset = false) {
+// ============================================================ browse: brands (A-Z directory)
+// The landing page lists EVERY brand, alphabetically, grouped under a letter with an A-Z jump
+// bar. A one-letter query filters this list in place (no reads); two or more characters run
+// the library-wide search instead.
+async function loadBrands() {
   _view = 'brands'; _brand = null; _device = null; _profile = null; _searchQuery = '';
+  setRoute('brands', '', { replace: parseRoute().kind === 'search' });
   $('filter-rail').removeAttribute('hidden');
+  $('load-more-btn').setAttribute('hidden', '');
   renderBreadcrumb();
   renderOwnerActions(null);
   const body = $('browse-body');
-  const favoritesOnly = _browseFilters.favoritesOnly;
-  if (reset) { _browseCursor = null; body.innerHTML = '<div class="card-grid" id="brand-grid"></div>'; $('load-more-btn').setAttribute('hidden', ''); }
-  const grid = body.querySelector('.card-grid');
-  const spinner = loadingPlaceholder();
-  grid.appendChild(spinner);
+  body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
   try {
-    if (favoritesOnly) {
-      if (!_user) { spinner.remove(); grid.innerHTML = emptyHTML('&#11088;', 'Sign in for favorites', 'Sign in to save and browse favorite devices.'); return; }
+    if (_browseFilters.favoritesOnly) {
+      if (!_user) { body.innerHTML = emptyHTML('&#11088;', 'Sign in for favorites', 'Sign in to save and browse favorite devices.'); return; }
       const { items } = await searchDevices({ favoritesOnly: true, pageSize: 60 });
-      spinner.remove();
-      grid.innerHTML = '';
-      if (items.length === 0) grid.innerHTML = emptyHTML('&#11088;', 'No favorites yet', 'Star a device to find it here quickly.');
-      else items.forEach((d) => grid.appendChild(buildDeviceCard(d)));
-      $('load-more-btn').setAttribute('hidden', '');
+      if (_view !== 'brands') return;
+      body.innerHTML = '';
+      if (items.length === 0) { body.innerHTML = emptyHTML('&#11088;', 'No favorites yet', 'Star a device to find it here quickly.'); return; }
+      const grid = document.createElement('div');
+      grid.className = 'card-grid';
+      items.forEach((d) => grid.appendChild(buildDeviceCard(d)));
+      body.appendChild(grid);
       return;
     }
-    const { items, cursor } = await listBrands({ search: _browseFilters.search || null, pageSize: 60, cursor: _browseCursor, includePending: !_browseFilters.approvedOnly });
-    spinner.remove();
-    if (items.length === 0 && !_browseCursor) grid.innerHTML = emptyHTML('&#128269;', 'No brands found', 'Try a different search. The library grows as people contribute.');
-    else items.forEach((b) => grid.appendChild(buildBrandCard(b)));
-    _browseCursor = cursor;
-    $('load-more-btn').toggleAttribute('hidden', !cursor);
+    const items = await listAllBrands({ includePending: !_browseFilters.approvedOnly });
+    // A newer view (a search, a brand) may have started while this was loading.
+    if (_view !== 'brands' || _browseFilters.favoritesOnly) return;
+    renderBrandDirectory(items);
   } catch (e) {
-    spinner.remove();
-    const g = $('browse-body').querySelector('.card-grid') || $('browse-body');
-    g.innerHTML = emptyHTML('&#9888;', 'Could not load the library', esc(e.message));
+    body.innerHTML = emptyHTML('&#9888;', 'Could not load the library', e.message);
     toast(e.message, 'error');
   }
+}
+
+const _AZ = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ#'.split('');
+function brandLetter(name) {
+  const ch = String(name || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').trim().charAt(0).toUpperCase();
+  return /[A-Z]/.test(ch) ? ch : '#';
+}
+
+function renderBrandDirectory(items) {
+  const body = $('browse-body');
+  body.innerHTML = '';
+  const q = (_browseFilters.search || '').trim().toLowerCase();
+  const shown = q ? items.filter((b) => String(b.brand || b.id).toLowerCase().startsWith(q)) : items;
+  if (shown.length === 0) {
+    body.innerHTML = emptyHTML('&#128269;', 'No brands found',
+      q ? `No brand starts with "${q}".` : 'The library grows as people contribute.') + addApplianceCTA('');
+    return;
+  }
+  const groups = new Map();
+  for (const b of shown) {
+    const l = brandLetter(b.brand || b.id);
+    if (!groups.has(l)) groups.set(l, []);
+    groups.get(l).push(b);
+  }
+  const approved = shown.filter((b) => b.status === 'approved').length;
+  const head = document.createElement('div');
+  head.className = 'az-head';
+  head.innerHTML = `<span class="search-summary"><span><strong>${shown.length}</strong> ${shown.length === 1 ? 'brand' : 'brands'}${
+    approved && approved < shown.length ? ` &middot; ${approved} approved` : ''}</span></span>`;
+  body.appendChild(head);
+  if (groups.size > 1) {
+    const bar = document.createElement('nav');
+    bar.className = 'az-bar';
+    bar.setAttribute('aria-label', 'Jump to letter');
+    for (const l of _AZ) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'az-letter';
+      btn.textContent = l;
+      if (!groups.has(l)) { btn.disabled = true; } else {
+        btn.title = `${groups.get(l).length} brand${groups.get(l).length === 1 ? '' : 's'}`;
+        btn.addEventListener('click', () => {
+          const sec = document.getElementById(`az-${l === '#' ? 'other' : l}`);
+          if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+      }
+      bar.appendChild(btn);
+    }
+    body.appendChild(bar);
+  }
+  for (const l of _AZ) {
+    if (!groups.has(l)) continue;
+    const sec = document.createElement('section');
+    sec.className = 'az-section';
+    sec.id = `az-${l === '#' ? 'other' : l}`;
+    sec.innerHTML = `<h2 class="az-section-letter">${l}</h2>`;
+    const tiles = document.createElement('div');
+    tiles.className = 'brand-tiles';
+    groups.get(l).forEach((b) => tiles.appendChild(buildBrandTile(b)));
+    sec.appendChild(tiles);
+    body.appendChild(sec);
+  }
+  const cta = document.createElement('div');
+  cta.innerHTML = addApplianceCTA('');
+  body.appendChild(cta);
 }
 
 // Awaiting-approval badge with the live confirm progress (pending only).
@@ -527,7 +675,10 @@ function statusBadge(rec, kind) {
     // counter. Profiles have neither and stay a plain "awaiting approval".
     let label = 'Pending';
     if (kind === 'brand') {
-      label = `Pending &middot; ${num(rec.approvedDeviceCount)}/${num(_brandThreshold)} models`;
+      // Past the bar but not promoted yet (the counter catches up on the next approval or a
+      // recount): a progress figure over 100% only confuses.
+      const n = num(rec.approvedDeviceCount);
+      label = n < _brandThreshold ? `Pending &middot; ${n}/${num(_brandThreshold)} models` : 'Pending';
     } else if (typeof rec.confirmCount === 'number') {
       label = `Pending &middot; ${num(rec.confirmCount)}/${num(_confirmThreshold)}`;
     }
@@ -541,22 +692,16 @@ function addApplianceCTA(brand) {
   return `<div class="add-cta"><span class="text-muted">Can't find your appliance?</span> <a class="btn btn-ghost btn-sm" href="create.html${q}">Add it</a></div>`;
 }
 
-function buildBrandCard(b) {
-  const el = document.createElement('div');
-  el.className = 'card device-card';
-  el.innerHTML = `
-    <div class="card-body">
-      <div class="card-top">
-        <span class="eyebrow">Brand</span>
-        <span class="card-status-pill" data-status>${statusBadge(b, 'brand')}</span>
-      </div>
-      <div class="card-title">${esc(b.brand)}</div>
-      <div class="card-counts"><span>${_pluralize(b.deviceCount || 0, 'model')}</span> <span class="dot">&middot;</span> <span>${_pluralize(b.cycleCount || 0, 'cycle')}</span></div>
-    </div>
-    <div class="card-actions"><button class="btn btn-primary btn-sm" data-open>Browse models &rsaquo;</button></div>`;
-  el.querySelector('[data-open]').addEventListener('click', () => openBrand(b));
-  const rb = makeReportBtn(reportCtxFor('brand', b.id, b.brand, b.createdByUid));
-  if (rb) el.querySelector('.card-actions').appendChild(rb);
+// Compact brand entry for the A-Z directory and the search results. Reporting a brand lives
+// on its own page (the header), where there is room to say what is being reported.
+function buildBrandTile(b) {
+  const el = document.createElement('button');
+  el.type = 'button';
+  el.className = `brand-tile${b.status === 'pending' ? ' is-pending' : ''}`;
+  el.innerHTML = `<span class="brand-tile-name">${esc(b.brand || b.id)}</span>
+    <span class="brand-tile-meta">${_pluralize(b.deviceCount || 0, 'model')} &middot; ${_pluralize(b.cycleCount || 0, 'cycle')}</span>
+    <span class="brand-tile-status">${statusBadge(b, 'brand')}</span>`;
+  el.addEventListener('click', () => openBrand(b));
   return el;
 }
 
@@ -566,9 +711,10 @@ function buildBrandCard(b) {
 // shortcut into the catalog rather than a separate place to be.
 let _searchQuery = '';
 
-async function loadSearch(q) {
+async function loadSearch(q, { replace = false } = {}) {
   _view = 'search'; _brand = null; _device = null; _profile = null;
   _searchQuery = String(q || '').trim().toLowerCase();
+  setRoute('search', _searchQuery, { replace });
   $('filter-rail').removeAttribute('hidden');
   $('load-more-btn').setAttribute('hidden', '');
   renderBreadcrumb();
@@ -612,7 +758,7 @@ function renderSearch(res) {
 
   // Brands and appliances reuse the catalog cards; programs and cycles get a compact row
   // because out of context they need to name the appliance they belong to.
-  addSearchGroup(body, 'Brands', res.brands, res.errors.brands, (b) => buildBrandCard(b));
+  addSearchGroup(body, 'Brands', res.brands, res.errors.brands, (b) => buildBrandTile(b), 'brand-tiles');
   addSearchGroup(body, 'Appliances', res.devices,
     res.errors.devicesByModel || res.errors.devicesByBrand, (d) => buildDeviceCard(d));
   addSearchRowGroup(body, 'Programs', res.profiles, res.errors.profiles, (p) => ({
@@ -650,13 +796,13 @@ function searchGroupHead(title, items, error) {
   return head;
 }
 
-function addSearchGroup(body, title, items, error, build) {
+function addSearchGroup(body, title, items, error, build, gridClass = 'card-grid') {
   if (!items.length && !error) return;
   const sec = document.createElement('div');
   sec.className = 'search-group';
   sec.appendChild(searchGroupHead(title, items, error));
   const grid = document.createElement('div');
-  grid.className = 'card-grid';
+  grid.className = gridClass;
   items.forEach((it) => grid.appendChild(build(it)));
   sec.appendChild(grid);
   body.appendChild(sec);
@@ -748,6 +894,7 @@ async function openBrand(b) {
   logStoreEvent('brand_views');
   _brand = b; _device = null; _profile = null; _view = 'brand';
   _brandTypeFilter = '';
+  setRoute('brand', b.brand_lc || b.id);
   $('filter-rail').setAttribute('hidden', '');
   renderBreadcrumb();
   renderOwnerActions(null);
@@ -794,14 +941,16 @@ function renderBrandDevices(append = false) {
     const what = _brandTypeFilter ? applianceLabel(_brandTypeFilter).toLowerCase() : 'model';
     body.innerHTML = emptyHTML('&#128203;', 'Nothing here yet', `No ${what} entries for this brand yet.`)
       + addApplianceCTA(_brand.brand);
-    renderBrandTypeBar();
+    body.insertBefore(buildBrandTypeBar(), body.firstChild);
+    body.insertBefore(buildBrandHeader(), body.firstChild);
     $('load-more-btn').toggleAttribute('hidden', !_brandCursor);
     return;
   }
   let grid = body.querySelector('.card-grid');
   if (!append || !grid) {
     body.innerHTML = '';
-    renderBrandTypeBar();
+    body.appendChild(buildBrandHeader());
+    body.appendChild(buildBrandTypeBar());
     grid = document.createElement('div');
     grid.className = 'card-grid';
     body.appendChild(grid);
@@ -817,8 +966,26 @@ function renderBrandDevices(append = false) {
 // The type options come from the full APPLIANCE_TYPES list, never from what the current
 // page returned -- otherwise a type with no model on page 1 has no option to select and
 // stays unreachable.
-function renderBrandTypeBar() {
-  const body = $('browse-body');
+// The brand's own header: its status (with the live progress toward automatic approval),
+// totals, and the Report action that used to sit on the landing-page card.
+function buildBrandHeader() {
+  const b = _brand;
+  const el = document.createElement('div');
+  el.className = 'device-header-card brand-header-card';
+  el.innerHTML = `
+    <div class="device-header-meta"><span class="badge badge-type">Brand</span>${statusBadge(b, 'brand')}</div>
+    <h2 class="device-header-title">${esc(b.brand || b.id)}</h2>
+    <div class="device-header-stats">
+      <span>${_pluralize(b.deviceCount || 0, 'model')}</span><span>&middot;</span>
+      <span>${_pluralize(b.cycleCount || 0, 'reference cycle')}</span>
+    </div>
+    ${b.status === 'pending' ? `<div class="brand-header-note text-muted">Approved automatically once ${num(_brandThreshold)} of its models are approved.</div>` : ''}`;
+  const rb = makeReportBtn(reportCtxFor('brand', b.id, b.brand, b.createdByUid), { label: true });
+  if (rb) { rb.classList.add('brand-header-report'); el.appendChild(rb); }
+  return el;
+}
+
+function buildBrandTypeBar() {
   const typeOpts = [`<option value="">${esc('All types')}</option>`]
     .concat(APPLIANCE_TYPES.map((t) => `<option value="${esc(t)}"${_brandTypeFilter === t ? ' selected' : ''}>${esc(typeLabel(t))}</option>`))
     .join('');
@@ -827,11 +994,11 @@ function renderBrandTypeBar() {
   bar.innerHTML = `<div class="form-group"><label for="brand-type-filter">Appliance type</label>
     <select id="brand-type-filter">${typeOpts}</select></div>`;
   bar.appendChild(buildMinRatingControl()); // filter devices by quality rating
-  body.insertBefore(bar, body.firstChild);
   bar.querySelector('#brand-type-filter').addEventListener('change', (e) => {
     _brandTypeFilter = e.target.value;
     loadBrandDevices(true);
   });
+  return bar;
 }
 
 function buildDeviceCard(d) {
@@ -984,6 +1151,7 @@ async function openDevice(d) {
   trackEvent('store_device_view', { appliance_type: d.applianceType, brand: d.brand });
   logStoreEvent('device_views');
   _device = d; _profile = null; _view = 'device';
+  setRoute('device', d.id);
   $('filter-rail').setAttribute('hidden', '');
   $('load-more-btn').setAttribute('hidden', '');
   renderBreadcrumb();
@@ -994,6 +1162,11 @@ async function openDevice(d) {
   body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
   try {
     const profiles = await getProfiles(d.id, { includePending: !_browseFilters.approvedOnly });
+    if (_view !== 'device' || _device !== d) return;   // navigated away while loading
+    // Programs with recordings first (that is what people come for), then by name. Newest
+    // first used to bury the one program with cycles under a dozen empty ones.
+    profiles.sort((a, b) => (num(b.cycleCount) - num(a.cycleCount))
+      || String(a.program || '').localeCompare(String(b.program || ''), undefined, { sensitivity: 'base', numeric: true }));
     body.innerHTML = '';
     // Device header card
     const header = document.createElement('div');
@@ -1080,6 +1253,7 @@ async function openProfile(p) {
   trackEvent('store_profile_view', { program: p.program });
   logStoreEvent('profile_views');
   _profile = p; _view = 'profile';
+  setRoute('program', p.id);
   renderBreadcrumb();
   renderOwnerActions(_user && _device && _device.ownerId && _device.ownerId === _user.uid
     ? [{ label: 'Edit phases', handler: () => openPhaseEditor(p) }]
@@ -1088,6 +1262,7 @@ async function openProfile(p) {
   body.innerHTML = '<div class="loading-center"><div class="loading-spinner"></div></div>';
   try {
     const { items } = await getReferenceCycles(p.id, { includePending: !_browseFilters.approvedOnly });
+    if (_view !== 'profile' || _profile !== p) return;   // navigated away while loading
     if (items.length === 0) { body.innerHTML = noCyclesHTML(); return; }
     body.innerHTML = '';
     const rbP = makeReportBtn(reportCtxFor('profile', p.id, p.program, p.createdByUid), { label: true });
@@ -1231,29 +1406,29 @@ function renderCycleCommunity(box, c) {
   });
 }
 
-function _applyFilters(force = false) {
+function _applyFilters() {
   _browseFilters = {
     search: $('filter-brand').value.trim(),
     favoritesOnly: $('filter-favorites').checked,
     approvedOnly: $('filter-approved') ? $('filter-approved').checked : false,
     minRating: $('filter-rating') ? Number($('filter-rating').value) || 0 : 0,
   };
-  // Pressing Apply after typing (or after the debounce already fired) used to re-run the
-  // identical query, and a brand search is uncached by design -- so an unchanged filter
-  // set cost two more document reads for a result already on screen.
-  const key = _queryFilterKey(_browseFilters);
-  if (!force && key === _lastQueryFilterKey) { reapplyRatingGates(); return; }
-  _lastQueryFilterKey = key;
   if (_browseFilters.search) {
     trackEvent('store_search', { query_length: _browseFilters.search.length });
     logStoreEvent('searches');
   }
-  // A query searches the whole library; an empty box is the brand landing grid. The
-  // favorites filter is a device view of its own and keeps its existing path.
+  // Two or more characters search the whole library; less than that is the brand directory
+  // (filtered by the first letter typed). Favorites are a device view of their own. Both
+  // the directory and the search results are cached, so re-running costs no reads; the old
+  // "skip an unchanged filter set" shortcut compared against a remembered key that went stale
+  // whenever a breadcrumb changed the view, which left typed queries ignored.
+  // While typing, the first step off the landing page is a history entry; refining the query
+  // replaces it, so Back returns to where the search started rather than to every keystroke.
+  const searching = parseRoute().kind === 'search';
   if (_browseFilters.search.length >= SEARCH_MIN_CHARS && !_browseFilters.favoritesOnly) {
-    loadSearch(_browseFilters.search);
+    loadSearch(_browseFilters.search, { replace: searching });
   } else {
-    loadBrands(true);
+    loadBrands();
   }
 }
 // 450ms, not the old 350: every keystroke that gets through is five Firestore queries
@@ -1276,11 +1451,10 @@ $('filter-clear').addEventListener('click', () => {
   if ($('filter-approved')) $('filter-approved').checked = false;
   if ($('filter-rating')) $('filter-rating').value = '0';
   _browseFilters = { search: '', favoritesOnly: false, approvedOnly: false, minRating: 0 };
-  loadBrands(true);
+  loadBrands();
 });
 $('load-more-btn').addEventListener('click', () => {
-  if (_view === 'brands') loadBrands(false);
-  else if (_view === 'brand') loadBrandDevices(false);
+  if (_view === 'brand') loadBrandDevices(false);
 });
 
 // ============================================================ details modal
@@ -1294,6 +1468,7 @@ async function openDetails(c) {
   logStoreEvent('cycle_details');
   _ratingCache.delete(c.id); // always fetch fresh aggregate when modal opens
   _openRecord = c; _replyToId = null;
+  _modalPushed = setRoute('cycle', c.id);
   $('modal-title').textContent = `${prettyBrand(c)} ${prettyModel(c)}`.trim() || 'Reference cycle';
   $('modal-program').textContent = _profile ? _profile.program : (c.program_lc || '');
   $('modal-badges').innerHTML = `<span class="badge badge-type">${esc(typeLabel(c.applianceType))}</span>`;
@@ -1328,7 +1503,17 @@ function buildDetailGrid(c) {
   </div>`;
 }
 
-function closeModal() { $('details-modal').setAttribute('hidden', ''); _openRecord = null; cancelReply(); }
+function hideModal() { $('details-modal').setAttribute('hidden', ''); _openRecord = null; cancelReply(); }
+// Closing the modal leaves its #/cycle URL: step Back over the entry it added, or rewrite a
+// deep-linked one to its program so Back does not reopen it.
+function closeModal() {
+  const pushed = _modalPushed;
+  _modalPushed = false;
+  hideModal();
+  if (parseRoute().kind !== 'cycle') return;
+  if (pushed) history.back();
+  else setRoute(_profile ? 'program' : 'brands', _profile ? _profile.id : '', { replace: true });
+}
 // Delete in the modal footer, for the uploader only.
 function syncModalDelete() {
   const btn = $('modal-delete-btn');
@@ -1551,9 +1736,12 @@ $('report-submit').addEventListener('click', async () => {
 // ============================================================ init
 // Show the boot splash until the live maintenance flag is known (and, if on, whether
 // the viewer is an admin). Never paints the homepage or maintenance screen prematurely.
+// Badges print "Pending - n/threshold", so the first browse render waits for both values.
+const _thresholdsReady = Promise.all([
+  confirmThresholdValue().then((v) => { _confirmThreshold = v; }).catch(() => {}),
+  brandConfirmThresholdValue().then((v) => { _brandThreshold = v; }).catch(() => {}),
+]);
 reconcile();
-confirmThresholdValue().then((v) => { _confirmThreshold = v; }).catch(() => {});
-brandConfirmThresholdValue().then((v) => { _brandThreshold = v; }).catch(() => {});
 getSiteConfig().then((cfg) => {
   _maintenance = ('maintenance' in cfg) ? !!cfg.maintenance : MAINTENANCE;
 }).catch(() => {}).finally(() => {

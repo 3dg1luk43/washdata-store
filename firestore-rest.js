@@ -20,7 +20,13 @@
 import firebaseConfig from './config.js';
 
 const PID = firebaseConfig.projectId;
-const BASE = `https://firestore.googleapis.com/v1/projects/${PID}/databases/(default)/documents`;
+let BASE = `https://firestore.googleapis.com/v1/projects/${PID}/databases/(default)/documents`;
+
+// Local development against the Firestore emulator (see washstore.init): same REST API,
+// different origin.
+export function useRestEmulator(host, port) {
+  BASE = `http://${host}:${port}/v1/projects/${PID}/databases/(default)/documents`;
+}
 
 // Optional auth-token provider (set by washstore init). Public reads pass no token;
 // admin/owner reads pass { auth: true } to attach the signed-in user's ID token so the
